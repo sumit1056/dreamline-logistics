@@ -1,0 +1,45 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  phone     String   @unique
+  role      String   @default("DRIVER") // "FOUNDER", "DRIVER"
+  createdAt DateTime @default(now())
+}
+
+model Expense {
+  id         Int      @id @default(autoincrement())
+  amount     Float
+  currency   String   @default("INR")
+  category   String   // 'fuel', 'bittu', 'service', 'other', 'shadowfax', 'rate_change', 'factory', 'other_income'
+  notes      String
+  vehicle    String?
+  senderName String
+  timestamp  DateTime @default(now())
+  approved   Boolean  @default(false)
+  imageUrl   String?
+  type       String   @default("EXPENSE") // "EXPENSE", "INCOME"
+}
+
+model Delivery {
+  id              Int      @id @default(autoincrement())
+  title           String   // e.g. "Runsheet Summary"
+  category        String   @default("vendor_ship") // "vendor_ship", "per_order_rate"
+  totalOrders     Int      @default(0)
+  completedOrders Int      @default(0)
+  driverName      String   @default("Unassigned")
+  notes           String   @default("")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}

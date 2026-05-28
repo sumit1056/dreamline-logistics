@@ -5,7 +5,8 @@ This document stores coding patterns, preferences, environment details, and crit
 ## Environment Details
 - **OS**: Windows (Local machine)
 - **Project Root**: `e:\logictic_app`
-- **Primary Framework / Stack**: Node.js (WhatsApp Web Session Client)
+- **Primary Framework / Stack**: React Router v7 / Remix (Vite runner)
+- **Database Engine**: Prisma v6 (SQLite local engine: `file:./dev.db`)
 - **AI Core**: Google Gemini 1.5 Flash (Dreamline Logistics API Key active in .env)
 
 ## Global Antigravity Rules (from GEMINI.md)

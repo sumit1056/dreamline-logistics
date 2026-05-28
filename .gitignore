@@ -5,3 +5,15 @@
 # React Router
 /.react-router/
 /build/
+
+/generated/prisma
+
+# Database
+*.db
+*.db-journal
+*.db-wal
+
+# WhatsApp session cache
+.wwebjs_auth/
+.wwebjs_cache/
+
