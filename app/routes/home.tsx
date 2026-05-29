@@ -172,7 +172,7 @@ export async function action({ request }: { request: Request }) {
 
         for (const item of parsed) {
           if (item.targetTable === "expense") {
-            const amount = parseFloat(item.amount) || 0;
+            const amount = Math.round(parseFloat(item.amount) || 0);
             const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
             const category = item.category || "other";
             const notes = item.notes || rawText;
@@ -226,7 +226,7 @@ export async function action({ request }: { request: Request }) {
       }
     } else {
       // Manual entry
-      const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
+      const amount = Math.round(parseFloat(formData.get("amount")?.toString() || "0") || 0);
       const type = formData.get("type")?.toString() || "EXPENSE";
       const category = formData.get("category")?.toString() || "other";
       const notes = formData.get("notes")?.toString() || "";
@@ -1105,8 +1105,16 @@ export default function Home() {
                                 type="number"
                                 name="amount"
                                 required
-                                step="0.01"
-                                placeholder="0.00"
+                                step="1"
+                                min="0"
+                                placeholder="0"
+                                onKeyDown={(e) => {
+                                  if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
+                                }}
+                                onPaste={(e) => {
+                                  const text = e.clipboardData.getData("text");
+                                  if (/[.,\-+eE]/.test(text)) e.preventDefault();
+                                }}
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
                               />
                             </div>
@@ -1689,8 +1697,16 @@ export default function Home() {
                               type="number"
                               name="totalOrders"
                               required
+                              step="1"
                               min="0"
                               placeholder="e.g. 50"
+                              onKeyDown={(e) => {
+                                if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
+                              }}
+                              onPaste={(e) => {
+                                const text = e.clipboardData.getData("text");
+                                if (/[.,\-+eE]/.test(text)) e.preventDefault();
+                              }}
                               className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
                             />
                           </div>
@@ -1703,8 +1719,16 @@ export default function Home() {
                               value={formCompletedOrders}
                               onChange={(e) => setFormCompletedOrders(e.target.value)}
                               required
+                              step="1"
                               min="0"
                               placeholder="e.g. 48"
+                              onKeyDown={(e) => {
+                                if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
+                              }}
+                              onPaste={(e) => {
+                                const text = e.clipboardData.getData("text");
+                                if (/[.,\-+eE]/.test(text)) e.preventDefault();
+                              }}
                               className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
                             />
                           </div>
