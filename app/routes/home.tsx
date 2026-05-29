@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useLoaderData, Form, useNavigation, useActionData } from "react-router";
 import type { Route } from "./+types/home";
 import { prisma } from "../db.server";
@@ -413,11 +413,15 @@ export default function Home() {
   const [expensePage, setExpensePage] = useState(1);
   const [deliveryPage, setDeliveryPage] = useState(1);
 
-  // New Dreamline Logistics transaction and camera state hooks
   const [manualType, setManualType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [selectedCategory, setSelectedCategory] = useState("fuel");
   const [fuelSlipBase64, setFuelSlipBase64] = useState<string | null>(null);
   const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
+
+  // Form references for automated clearing on success
+  const manualExpenseFormRef = useRef<HTMLFormElement>(null);
+  const runsheetFormRef = useRef<HTMLFormElement>(null);
+  const aiFormRef = useRef<HTMLFormElement>(null);
 
   // Initialize theme from localStorage or system preferences
   useEffect(() => {
@@ -779,6 +783,13 @@ export default function Home() {
     if (actionData && "success" in actionData && actionData.success) {
       setAiRawInput("");
       setFormCompletedOrders("");
+      setFuelSlipBase64(null); // Reset slip receipt image base64
+      
+      // Native browser form reset for all input text fields
+      aiFormRef.current?.reset();
+      manualExpenseFormRef.current?.reset();
+      runsheetFormRef.current?.reset();
+
       if (actionData.action === "create_delivery") {
         setRunsheetSuccessVisible(true);
         const timer = setTimeout(() => setRunsheetSuccessVisible(false), 6000);
@@ -797,7 +808,7 @@ export default function Home() {
     ? 40000 + (parsedCompleted * 35)
     : parsedCompleted * 75;
 
-  const isSubmitting = navigation.state !== "idle";
+  const isSubmitting = navigation.state === "submitting";
 
   return (
     <div className={`notion-app ${sidebarOpen ? "sidebar-open" : ""} text-[#2A3547] dark:text-[#DFE5EF] bg-[#F4F6F9] dark:bg-[#0f172a] min-h-screen flex`}>
@@ -1047,7 +1058,7 @@ export default function Home() {
                             </h3>
                           </div>
 
-                          <Form method="post" className="space-y-4">
+                          <Form ref={aiFormRef} method="post" className="space-y-4">
                             <input type="hidden" name="_action" value="create_expense" />
                             <input type="hidden" name="isAi" value="true" />
                             <textarea
@@ -1138,7 +1149,7 @@ export default function Home() {
                             </h3>
                           </div>
 
-                          <Form method="post" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <Form ref={manualExpenseFormRef} method="post" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                             <input type="hidden" name="_action" value="create_expense" />
                             <input type="hidden" name="isAi" value="false" />
 
@@ -1351,7 +1362,7 @@ export default function Home() {
                               )}
                             </span>
                             <span className={`text-xs font-bold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-neutral-100"}`}>
-                              {exp.type === "INCOME" ? "+" : "-"} ₹{exp.amount}
+                              {exp.type === "INCOME" ? "+" : ""} ₹{exp.amount}
                             </span>
                           </div>
                           
@@ -1588,7 +1599,7 @@ export default function Home() {
                                 </td>
                                 <td className="p-3.5 max-w-[200px] truncate">{exp.notes}</td>
                                 <td className={`p-3.5 font-bold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-white"}`}>
-                                  {exp.type === "INCOME" ? "+" : "-"} ₹{exp.amount}
+                                  {exp.type === "INCOME" ? "+" : ""} ₹{exp.amount}
                                 </td>
                                 <td className="p-3.5 text-neutral-400">{new Date(exp.timestamp).toLocaleString()}</td>
                                 <td className="p-3.5 text-right">
@@ -1657,7 +1668,7 @@ export default function Home() {
                             <div className="flex justify-between items-center mt-1 pt-1 border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30">
                               <div className="flex flex-col gap-0.5">
                                 <span className={`text-sm font-extrabold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-white"}`}>
-                                  {exp.type === "INCOME" ? "+" : "-"} ₹{exp.amount}
+                                  {exp.type === "INCOME" ? "+" : ""} ₹{exp.amount}
                                 </span>
                                 <span className="text-[9px] text-neutral-400 font-medium">
                                   {new Date(exp.timestamp).toLocaleString(undefined, {
@@ -1803,7 +1814,7 @@ export default function Home() {
                         </h3>
                       </div>
 
-                      <Form method="post" className="space-y-4">
+                      <Form ref={runsheetFormRef} method="post" className="space-y-4">
                         <input type="hidden" name="_action" value="create_delivery" />
 
                         <input type="hidden" name="title" value="Daily Runsheet Summary" />
