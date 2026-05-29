@@ -333,6 +333,13 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("light");
 
+  // PWA install state variables
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [isInstallable, setIsInstallable] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
+  const [showInstallBanner, setShowInstallBanner] = useState(false);
+
   // AI manual feedback state
   const [aiRawInput, setAiRawInput] = useState("");
   const [expenseFormMode, setExpenseFormMode] = useState<"ai" | "manual">("ai");
@@ -382,6 +389,78 @@ export default function Home() {
       }
     }
   }, []);
+
+  // PWA Install Prompt & Compatibility Logic
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      // Check if already running in standalone mode
+      const isStandaloneMode = 
+        window.matchMedia("(display-mode: standalone)").matches || 
+        (window.navigator as any).standalone === true;
+      
+      setIsStandalone(isStandaloneMode);
+
+      // Detect iOS platform
+      const userAgent = window.navigator.userAgent.toLowerCase();
+      const iOSDetect = /iphone|ipad|ipod/.test(userAgent);
+      setIsIOS(iOSDetect);
+
+      // Check if user dismissed the banner previously
+      const isDismissed = localStorage.getItem("dreamline_pwa_dismissed") === "true";
+
+      // Intercept the browser's install prompt event
+      const handleBeforeInstallPrompt = (e: any) => {
+        e.preventDefault();
+        setDeferredPrompt(e);
+        setIsInstallable(true);
+        if (!isStandaloneMode && !isDismissed) {
+          setShowInstallBanner(true);
+        }
+      };
+
+      window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+
+      // If iOS, we can show instructions even if beforeinstallprompt is not supported
+      if (iOSDetect && !isStandaloneMode && !isDismissed) {
+        setShowInstallBanner(true);
+      }
+
+      // Fallback: if browser supports PWA but event hasn't fired yet
+      if (!isStandaloneMode && !isDismissed && !iOSDetect) {
+        const timer = setTimeout(() => {
+          setShowInstallBanner(true);
+        }, 4000);
+        return () => {
+          clearTimeout(timer);
+          window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+        };
+      }
+
+      return () => {
+        window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      };
+    }
+  }, []);
+
+  const handleInstallApp = async () => {
+    if (!deferredPrompt) {
+      alert("To install: tap your browser's menu button and select 'Add to Home screen' or 'Install App'.");
+      return;
+    }
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    console.log(`User responded to install prompt: ${outcome}`);
+    if (outcome === "accepted") {
+      setDeferredPrompt(null);
+      setIsInstallable(false);
+      setShowInstallBanner(false);
+    }
+  };
+
+  const handleDismissBanner = () => {
+    setShowInstallBanner(false);
+    localStorage.setItem("dreamline_pwa_dismissed", "true");
+  };
 
   const toggleTheme = () => {
     if (theme === "light") {
@@ -702,6 +781,28 @@ export default function Home() {
             <span>Order Tracking</span>
           </button>
         </nav>
+
+        {/* Persistent Install App Button (Hidden when already standalone) */}
+        {!isStandalone && (
+          <div className="px-4 pb-4">
+            <button
+              onClick={() => {
+                setShowInstallBanner(true);
+                if (isInstallable) {
+                  handleInstallApp();
+                } else if (isIOS) {
+                  // Keep banner open with iOS instructions
+                } else {
+                  alert("To install: tap your browser's menu (three vertical dots in Chrome) and select 'Add to Home screen' or 'Install App'.");
+                }
+              }}
+              className="w-full py-2 text-xs font-bold text-[#5D87FF] hover:text-[#4570EA] bg-[#5D87FF]/10 hover:bg-[#5D87FF]/15 border border-[#5D87FF]/20 dark:border-[#5D87FF]/35 rounded-md flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-sm"
+            >
+              <span>📲</span>
+              <span>Install Mobile App</span>
+            </button>
+          </div>
+        )}
 
         {/* Sidebar Footer */}
         <div className="p-4 border-t border-neutral-200/60 dark:border-slate-800 text-center">
@@ -2137,6 +2238,130 @@ export default function Home() {
                   alt="Petrol Slip Attachment"
                   className="w-full h-full object-contain rounded-md"
                 />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Premium PWA Install Sheet Modal Overlay */}
+        {showInstallBanner && (
+          <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-fade-in">
+            <div 
+              className="absolute inset-0 cursor-pointer" 
+              onClick={handleDismissBanner} 
+              aria-label="Dismiss banner"
+            />
+            
+            <div className="bg-white dark:bg-[#1c1c1e] rounded-t-2xl sm:rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 w-full max-w-md shadow-2xl relative z-10 animate-slide-up flex flex-col max-h-[90vh]">
+              {/* Modal Header */}
+              <div className="flex justify-between items-center p-4 border-b border-neutral-100 dark:border-neutral-800">
+                <span className="text-xs font-extrabold text-neutral-800 dark:text-neutral-200 uppercase tracking-widest flex items-center gap-1.5">
+                  📲 Convert to Mobile App
+                </span>
+                <button
+                  type="button"
+                  onClick={handleDismissBanner}
+                  className="px-2.5 py-1 rounded bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-500 dark:text-neutral-300 transition-all cursor-pointer text-[10px] font-bold"
+                >
+                  Close
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-5 overflow-y-auto space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-[#5D87FF]/10 flex items-center justify-center text-2xl shadow-inner flex-shrink-0">
+                    🚚
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-neutral-800 dark:text-neutral-100">
+                      Dreamline Logistics
+                    </h3>
+                    <p className="text-[10px] text-[#5D87FF] font-bold uppercase tracking-wider mt-0.5">
+                      Premium Field Console
+                    </p>
+                  </div>
+                </div>
+
+                <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
+                  Install Dreamline Logistics on your device for instant launch, offline receipt storage, smoother navigation, and real-time ledger updates right from your home screen.
+                </p>
+
+                {isIOS ? (
+                  /* iOS / Safari Steps */
+                  <div className="bg-neutral-50 dark:bg-neutral-900/40 border border-neutral-150 dark:border-neutral-800/80 rounded-xl p-4 text-left space-y-3">
+                    <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5">
+                      <span>🍏</span> iOS Installation Steps:
+                    </h4>
+                    <ol className="text-xs text-neutral-500 dark:text-neutral-400 space-y-2.5 list-decimal list-inside pl-1">
+                      <li>
+                        Tap the <strong className="text-neutral-700 dark:text-neutral-300 font-extrabold">Share button</strong> at the bottom of Safari: <span className="inline-block p-1 bg-white dark:bg-neutral-800 rounded border border-neutral-200 dark:border-neutral-700 text-xs">📤</span>
+                      </li>
+                      <li>
+                        Scroll down and select <strong className="text-neutral-700 dark:text-neutral-300 font-extrabold">"Add to Home Screen"</strong> (with the <span className="font-normal inline-block text-[10px] w-4 h-4 text-center border border-neutral-300 dark:border-neutral-600 rounded bg-white dark:bg-neutral-800 font-bold leading-3">＋</span> icon)
+                      </li>
+                      <li>
+                        Confirm the name <strong className="text-[#5D87FF]">"Dreamline"</strong> and tap <strong className="text-neutral-850 dark:text-neutral-100 font-bold">Add</strong> in the top right.
+                      </li>
+                    </ol>
+                  </div>
+                ) : isInstallable ? (
+                  /* Direct PWA prompt available */
+                  <div className="bg-blue-50/40 dark:bg-blue-950/10 border border-blue-100/50 dark:border-blue-900/30 rounded-xl p-4 text-left">
+                    <div className="flex items-start gap-2.5">
+                      <span className="text-base">✨</span>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
+                        Your device fully supports one-tap install. Click the button below to prompt the system's quick installation wizard.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  /* Android / Chrome Manual / Other Browser */
+                  <div className="bg-neutral-50 dark:bg-neutral-900/40 border border-neutral-150 dark:border-neutral-800/80 rounded-xl p-4 text-left space-y-3">
+                    <h4 className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5">
+                      <span>🤖</span> Android / Chrome Manual Steps:
+                    </h4>
+                    <ol className="text-xs text-neutral-500 dark:text-neutral-400 space-y-2.5 list-decimal list-inside pl-1">
+                      <li>
+                        Tap the browser <strong className="text-neutral-700 dark:text-neutral-300 font-extrabold">menu button</strong> (three dots <span className="font-normal inline-block border border-neutral-200 dark:border-neutral-700 px-1.5 py-0.5 rounded bg-white dark:bg-neutral-800">⋮</span> or <span className="font-normal inline-block border border-neutral-200 dark:border-neutral-700 px-1.5 py-0.5 rounded bg-white dark:bg-neutral-800">⋯</span>)
+                      </li>
+                      <li>
+                        Tap <strong className="text-neutral-700 dark:text-neutral-300 font-extrabold">"Add to Home screen"</strong> or <strong className="text-neutral-700 dark:text-neutral-300 font-extrabold">"Install App"</strong>
+                      </li>
+                      <li>
+                        Confirm the prompt to pin it to your desktop.
+                      </li>
+                    </ol>
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer / Action Buttons */}
+              <div className="p-4 bg-neutral-50 dark:bg-[#151515] border-t border-neutral-100 dark:border-neutral-800 flex gap-3">
+                {isInstallable && !isIOS ? (
+                  <button
+                    type="button"
+                    onClick={handleInstallApp}
+                    className="flex-grow py-2.5 px-4 text-xs font-extrabold text-white bg-[#5D87FF] hover:bg-[#4570EA] rounded-lg shadow-md hover:shadow-lg transition-all cursor-pointer text-center"
+                  >
+                    🚀 Install Now
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleDismissBanner}
+                    className="flex-grow py-2.5 px-4 text-xs font-extrabold text-white bg-[#5D87FF] hover:bg-[#4570EA] rounded-lg shadow-md hover:shadow-lg transition-all cursor-pointer text-center"
+                  >
+                    👍 Got It, Done!
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleDismissBanner}
+                  className="py-2.5 px-4 text-xs font-bold text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-200/50 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 rounded-lg transition-all cursor-pointer text-center"
+                >
+                  Maybe Later
+                </button>
               </div>
             </div>
           </div>
