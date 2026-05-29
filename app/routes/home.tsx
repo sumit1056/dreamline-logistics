@@ -79,19 +79,32 @@ export async function action({ request }: { request: Request }) {
         }
 
         const prompt = `
-          You are an AI logistics assistant parsing financial logs into structured JSON.
-          Parse the following description into strict JSON with the following fields:
+          You are an AI logistics assistant parsing operational logs and financial entries into a structured JSON array.
+          Analyze the user's input. It may contain one or multiple separate entries: expenses, incomes, or delivery/runsheet tracking updates.
+
+          Parse the input into a strict JSON array where each item represents an entry to be saved to our database.
+          For each item in the array, specify the target table using "targetTable": "expense" or "delivery".
+
+          If targetTable is "expense":
           - amount: (number) The cost or income in rupees/INR.
           - type: (string) Must be either "EXPENSE" or "INCOME".
           - category: (string) Must be one of the following exactly:
-            Expenses: 'fuel', 'bittu', 'service', 'other'
-            Incomes: 'shadowfax', 'factory', 'other_income'
+            For "EXPENSE": 'fuel', 'bittu', 'service', 'other'
+            For "INCOME": 'shadowfax', 'factory', 'other_income'
           - notes: (string) Clean and concise description of the transaction.
-          - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234 or similar), otherwise null.
-          
-          Description: "${rawText}"
-          
-          Return ONLY valid, raw, double-quoted JSON. Do not include markdown code block formatting.
+          - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234), otherwise null.
+
+          If targetTable is "delivery":
+          - title: (string) A clean title, e.g., "Daily Runsheet - Vendor Shipments" or "Per Order Runsheet".
+          - category: (string) Must be either "vendor_ship" or "per_order_rate" based on context.
+          - totalOrders: (number) Total orders assigned to the driver (default to completedOrders if not explicitly mentioned).
+          - completedOrders: (number) Number of successfully completed orders.
+          - driverName: (string) The driver's name if mentioned (e.g. "John Driver" or "Sam Driver"), otherwise "Unassigned".
+          - notes: (string) Clean operational notes or remarks.
+
+          User Input: "${rawText}"
+
+          Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
         `;
 
         const response = await fetch(
@@ -113,27 +126,64 @@ export async function action({ request }: { request: Request }) {
         const cleanedText = generatedText.replace(/```json/g, "").replace(/```/g, "").trim();
         const parsed = JSON.parse(cleanedText);
 
-        const amount = parseFloat(parsed.amount) || 0;
-        const type = parsed.type === "INCOME" ? "INCOME" : "EXPENSE";
-        const category = parsed.category || "other";
-        const notes = parsed.notes || rawText;
-        const vehicle = parsed.vehicle || null;
+        if (!Array.isArray(parsed)) {
+          throw new Error("AI did not return a valid list of entries.");
+        }
 
+        let expensesCreated = 0;
+        let deliveriesCreated = 0;
         const imageUrl = formData.get("imageUrl")?.toString() || null;
-        const record = await prisma.expense.create({
-          data: {
-            amount,
-            category,
-            notes,
-            vehicle,
-            senderName: "AI Assistant",
-            approved: false,
-            imageUrl,
-            type,
-          },
-        });
 
-        return { success: true, action: "create_expense", parsedExpense: record };
+        for (const item of parsed) {
+          if (item.targetTable === "expense") {
+            const amount = parseFloat(item.amount) || 0;
+            const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
+            const category = item.category || "other";
+            const notes = item.notes || rawText;
+            const vehicle = item.vehicle || null;
+
+            await prisma.expense.create({
+              data: {
+                amount,
+                category,
+                notes,
+                vehicle,
+                senderName: "AI Assistant",
+                approved: false,
+                imageUrl: category === "fuel" ? imageUrl : null,
+                type,
+              },
+            });
+            expensesCreated++;
+          } else if (item.targetTable === "delivery") {
+            const title = item.title || "Daily Runsheet";
+            const category = item.category === "per_order_rate" ? "per_order_rate" : "vendor_ship";
+            const completedOrders = parseInt(item.completedOrders) || 0;
+            const totalOrders = parseInt(item.totalOrders) || completedOrders;
+            const driverName = item.driverName || "Unassigned";
+            const notes = item.notes || "";
+
+            await prisma.delivery.create({
+              data: {
+                title,
+                category,
+                totalOrders,
+                completedOrders,
+                driverName,
+                notes,
+              },
+            });
+            deliveriesCreated++;
+          }
+        }
+
+        return {
+          success: true,
+          action: "create_expense",
+          isAi: true,
+          expensesCreated,
+          deliveriesCreated,
+        };
       } catch (err: any) {
         console.error("AI Parse failed:", err);
         return { error: "Failed to parse text: " + err.message };
@@ -621,7 +671,7 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Header Action Items (Theme Toggle, Notifications) */}
+          {/* Header Action Items (Theme Toggle) */}
           <div className="flex items-center gap-3.5">
             {/* Light / Dark Mode Toggle */}
             <button
@@ -639,20 +689,6 @@ export default function Home() {
                 </svg>
               )}
             </button>
-
-            {/* Notification Bell Badge */}
-            <div className="relative">
-              <button className="p-2 rounded-full hover:bg-neutral-100 dark:hover:bg-neutral-800/60 text-neutral-600 dark:text-neutral-300 transition-all focus:outline-none cursor-pointer flex items-center justify-center">
-                <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-                </svg>
-              </button>
-              {/* Badge dot */}
-              <span className="absolute top-1.5 right-1.5 flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#fa896b] opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#fa896b]"></span>
-              </span>
-            </div>
           </div>
         </header>
 
@@ -700,7 +736,17 @@ export default function Home() {
               )}
               {expenseSuccessVisible && (
                 <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in flex items-center justify-between">
-                  <span>✅ Operation saved successfully!</span>
+                  {actionData && "isAi" in actionData && actionData.isAi ? (
+                    <span>
+                      🤖 AI Parsed and Saved: 
+                      {actionData.expensesCreated > 0 && ` 💸 ${actionData.expensesCreated} Expense/Income item(s)`}
+                      {actionData.expensesCreated > 0 && actionData.deliveriesCreated > 0 && " and"}
+                      {actionData.deliveriesCreated > 0 && ` 📦 ${actionData.deliveriesCreated} Order Runsheet(s)`}
+                      !
+                    </span>
+                  ) : (
+                    <span>✅ Operation saved successfully!</span>
+                  )}
                   {actionData && "parsedExpense" in actionData && actionData.parsedExpense && (
                     <span className="text-[10px] uppercase font-bold text-neutral-400">
                       Parsed: ₹{actionData.parsedExpense.amount} ({actionData.parsedExpense.category})
@@ -754,7 +800,7 @@ export default function Home() {
                         <div className="space-y-4 animate-fade-in">
                           <div className="space-y-1">
                             <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">
-                              Smart AI Expense Log Parser
+                              Smart AI Logistics Parser (Expenses & Orders)
                             </h3>
                           </div>
 
@@ -766,7 +812,7 @@ export default function Home() {
                               rows={3}
                               value={aiRawInput}
                               onChange={(e) => setAiRawInput(e.target.value)}
-                              placeholder="Example: diesel bill ₹4500 for truck MH-12-AB-1234 by sam today"
+                              placeholder="Example: diesel bill ₹4500 for MH-12-AB-1234 by sam today + John completed runsheet with 42 orders"
                               className="notion-textarea text-sm w-full border border-neutral-200 dark:border-neutral-800 rounded-md px-3.5 py-2.5 bg-transparent focus:ring-1 focus:ring-[#5D87FF] outline-none min-h-[80px] text-neutral-800 dark:text-neutral-100"
                             />
 
