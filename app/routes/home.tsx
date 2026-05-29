@@ -798,24 +798,33 @@ export default function Home() {
   // Reset raw inputs on action success and set fading success messages
   useEffect(() => {
     if (actionData && "success" in actionData && actionData.success) {
+      // If a fuel slip is still pending, do NOT show the success toast yet —
+      // the popup modal will handle the remaining workflow.
+      const hasPendingSlip = "needsFuelSlip" in actionData && actionData.needsFuelSlip;
+
+      // Always clear the text inputs and primary fuel slip (non-pending)
       setAiRawInput("");
       setFormCompletedOrders("");
-      setFuelSlipBase64(null); // Reset slip receipt image base64
-      setPendingSlipBase64(null); // Reset pending slip receipt image base64
+      setFuelSlipBase64(null);
       
       // Native browser form reset for all input text fields
       aiFormRef.current?.reset();
       manualExpenseFormRef.current?.reset();
       runsheetFormRef.current?.reset();
 
-      if (actionData.action === "create_delivery") {
-        setRunsheetSuccessVisible(true);
-        const timer = setTimeout(() => setRunsheetSuccessVisible(false), 6000);
-        return () => clearTimeout(timer);
-      } else if (actionData.action === "create_expense") {
-        setExpenseSuccessVisible(true);
-        const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
-        return () => clearTimeout(timer);
+      // Only clear pending slip and show success if there is NO pending fuel entry
+      if (!hasPendingSlip) {
+        setPendingSlipBase64(null);
+
+        if (actionData.action === "create_delivery") {
+          setRunsheetSuccessVisible(true);
+          const timer = setTimeout(() => setRunsheetSuccessVisible(false), 6000);
+          return () => clearTimeout(timer);
+        } else if (actionData.action === "create_expense") {
+          setExpenseSuccessVisible(true);
+          const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
+          return () => clearTimeout(timer);
+        }
       }
     }
   }, [actionData]);
