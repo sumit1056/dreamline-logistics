@@ -432,6 +432,7 @@ export default function Home() {
   const [selectedCategory, setSelectedCategory] = useState("fuel");
   const [fuelSlipBase64, setFuelSlipBase64] = useState<string | null>(null);
   const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
+  const [showPendingModal, setShowPendingModal] = useState(false);
   const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
 
   // Form references for automated clearing on success
@@ -819,6 +820,15 @@ export default function Home() {
     }
   }, [actionData]);
 
+  // Synchronize needsFuelSlip action validation to automatically open the step-by-step modal
+  useEffect(() => {
+    if (actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip) {
+      setShowPendingModal(true);
+    } else {
+      setShowPendingModal(false);
+    }
+  }, [actionData]);
+
   // Live Payout Preview for Runsheet Console
   const parsedCompleted = parseInt(formCompletedOrders) || 0;
   const previewPayout = formCategory === "vendor_ship"
@@ -1150,85 +1160,6 @@ export default function Home() {
                             </div>
                           </Form>
 
-                          {actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip && actionData.pendingFuelExpense && (
-                            <div className="mt-4 p-4 border border-amber-200 bg-amber-50/50 dark:bg-amber-950/20 dark:border-amber-900/50 rounded-lg space-y-3 animate-fade-in text-neutral-800 dark:text-neutral-200">
-                              <div className="flex items-start gap-2.5">
-                                <span className="text-xl">⚠️</span>
-                                <div className="flex-1">
-                                  <h4 className="text-xs font-extrabold text-amber-800 dark:text-amber-300">
-                                    CNG / Fuel Slip Required
-                                  </h4>
-                                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 leading-relaxed">
-                                    Other parsed entries have been saved successfully! However, the fuel/CNG expense of <strong>₹{actionData.pendingFuelExpense.amount}</strong> ({actionData.pendingFuelExpense.notes}) requires a receipt slip photo to save.
-                                  </p>
-                                </div>
-                              </div>
-                              
-                              <div className="flex flex-wrap items-center gap-3 pt-1">
-                                <button
-                                  type="button"
-                                  onClick={() => document.getElementById("pending-slip-input")?.click()}
-                                  className="notion-btn text-[11px] px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-md font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
-                                >
-                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                                  </svg>
-                                  Snap Receipt
-                                </button>
-
-                                <input
-                                  type="file"
-                                  id="pending-slip-input"
-                                  accept="image/*"
-                                  capture="environment"
-                                  className="hidden"
-                                  onChange={async (e) => {
-                                    const file = e.target.files?.[0];
-                                    if (file) {
-                                      const compressed = await compressImage(file);
-                                      setPendingSlipBase64(compressed);
-                                    }
-                                  }}
-                                />
-
-                                {pendingSlipBase64 && (
-                                  <Form method="post" className="inline-flex items-center gap-2">
-                                    <input type="hidden" name="_action" value="create_expense" />
-                                    <input type="hidden" name="isAi" value="false" />
-                                    <input type="hidden" name="amount" value={actionData.pendingFuelExpense.amount} />
-                                    <input type="hidden" name="type" value={actionData.pendingFuelExpense.type} />
-                                    <input type="hidden" name="category" value={actionData.pendingFuelExpense.category} />
-                                    <input type="hidden" name="notes" value={actionData.pendingFuelExpense.notes} />
-                                    <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
-                                    <input type="hidden" name="senderName" value="AI Assistant" />
-                                    <input type="hidden" name="imageUrl" value={pendingSlipBase64} />
-                                    
-                                    <div className="relative w-9 h-12 rounded border border-neutral-300 dark:border-neutral-700 overflow-hidden shadow">
-                                      <img src={pendingSlipBase64} className="w-full h-full object-cover" alt="Pending Slip" />
-                                      <button
-                                        type="button"
-                                        onClick={() => setPendingSlipBase64(null)}
-                                        className="absolute top-0.5 right-0.5 p-0.5 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
-                                      >
-                                        <svg className="w-2 h-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                        </svg>
-                                      </button>
-                                    </div>
-
-                                    <button
-                                      type="submit"
-                                      disabled={isSubmitting}
-                                      className="notion-btn text-[11px] px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-bold transition-all shadow-sm cursor-pointer disabled:opacity-50"
-                                    >
-                                      {isSubmitting ? "Saving..." : "Save CNG/Fuel"}
-                                    </button>
-                                  </Form>
-                                )}
-                              </div>
-                            </div>
-                          )}
                         </div>
                       ) : (
                         <div className="space-y-4 animate-fade-in">
@@ -2735,6 +2666,173 @@ export default function Home() {
                 >
                   Maybe Later
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Premium Step-by-Step Pending CNG/Fuel Slip Modal */}
+        {showPendingModal && actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip && actionData.pendingFuelExpense && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            {/* Glass backdrop */}
+            <div 
+              className="absolute inset-0 bg-black/75 backdrop-blur-md transition-opacity duration-300"
+              onClick={() => {
+                setPendingSlipBase64(null);
+                setShowPendingModal(false);
+              }}
+            />
+            
+            {/* Premium Modal Card */}
+            <div className="relative bg-[#ffffff] dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800/80 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
+              
+              {/* Header */}
+              <div className="flex items-center gap-3.5 border-b border-[#edece9]/60 dark:border-neutral-800/60 pb-4">
+                <div className="p-2.5 rounded-xl bg-amber-100 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-md font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
+                    CNG / Fuel Slip Required
+                  </h3>
+                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-amber-600 dark:text-amber-400">
+                    Step 2 of 2: Upload Receipt
+                  </span>
+                </div>
+              </div>
+
+              {/* Message Details */}
+              <div className="space-y-3.5">
+                <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
+                  Your other parsed logs have been saved <strong className="text-emerald-600 dark:text-emerald-400 font-bold">successfully</strong>! However, the fuel/CNG expense of <span className="font-bold text-neutral-800 dark:text-white">₹{actionData.pendingFuelExpense.amount}</span> requires a receipt photo to save.
+                </p>
+                
+                <div className="p-3.5 bg-neutral-50 dark:bg-neutral-900/50 rounded-xl border border-neutral-150/60 dark:border-neutral-800/40 space-y-2">
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-neutral-400 font-medium">Category:</span>
+                    <span className="font-extrabold uppercase text-[10px] tracking-wider bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded font-mono">
+                      ⛽ {actionData.pendingFuelExpense.category}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-neutral-400 font-medium">Amount:</span>
+                    <span className="font-extrabold text-neutral-900 dark:text-white text-sm">
+                      ₹{actionData.pendingFuelExpense.amount}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-start text-xs gap-4">
+                    <span className="text-neutral-400 font-medium shrink-0">Notes:</span>
+                    <span className="font-semibold text-neutral-705 dark:text-neutral-300 text-right line-clamp-2 break-all">
+                      "{actionData.pendingFuelExpense.notes}"
+                    </span>
+                  </div>
+                  {actionData.pendingFuelExpense.vehicle && (
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-neutral-400 font-medium">Vehicle Plate:</span>
+                      <span className="font-bold font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-1.5 py-0.5 rounded text-[10px]">
+                        {actionData.pendingFuelExpense.vehicle}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Photo Input Picker Area */}
+              <div className="space-y-4">
+                <div className="flex flex-col items-center justify-center border-2 border-dashed border-neutral-200 dark:border-neutral-800/70 rounded-xl p-4 bg-neutral-50/30 dark:bg-neutral-900/10 min-h-[150px] transition-all relative overflow-hidden">
+                  
+                  {pendingSlipBase64 ? (
+                    <div className="relative w-full max-w-[130px] aspect-[3/4] rounded-lg border border-neutral-300 dark:border-neutral-700 overflow-hidden shadow-lg animate-scale-in">
+                      <img src={pendingSlipBase64} className="w-full h-full object-cover" alt="Captured receipt preview" />
+                      <button
+                        type="button"
+                        onClick={() => setPendingSlipBase64(null)}
+                        className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/85 transition-all cursor-pointer shadow-md"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-center space-y-2.5">
+                      <div className="text-3xl animate-bounce">📸</div>
+                      <p className="text-[11px] text-neutral-400 font-medium">Please snap or upload the receipt slip</p>
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById("modal-pending-slip-input")?.click()}
+                        className="notion-btn text-[11px] px-3.5 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-lg font-bold transition-all shadow-md cursor-pointer inline-flex items-center gap-1.5"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        Snap Receipt Photo
+                      </button>
+                    </div>
+                  )}
+
+                  <input
+                    type="file"
+                    id="modal-pending-slip-input"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const compressed = await compressImage(file);
+                        setPendingSlipBase64(compressed);
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Action Dialog Controls */}
+              <div className="flex items-center gap-3 pt-2.5 border-t border-[#edece9]/60 dark:border-neutral-800/60">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingSlipBase64(null);
+                    setShowPendingModal(false);
+                  }}
+                  className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                >
+                  Cancel / Discard
+                </button>
+                
+                {pendingSlipBase64 ? (
+                  <Form method="post" className="flex-1">
+                    <input type="hidden" name="_action" value="create_expense" />
+                    <input type="hidden" name="isAi" value="false" />
+                    <input type="hidden" name="amount" value={actionData.pendingFuelExpense.amount} />
+                    <input type="hidden" name="type" value={actionData.pendingFuelExpense.type} />
+                    <input type="hidden" name="category" value={actionData.pendingFuelExpense.category} />
+                    <input type="hidden" name="notes" value={actionData.pendingFuelExpense.notes} />
+                    <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
+                    <input type="hidden" name="senderName" value="AI Assistant" />
+                    <input type="hidden" name="imageUrl" value={pendingSlipBase64} />
+                    
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full py-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all cursor-pointer text-center disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
+                    >
+                      {isSubmitting ? "Saving..." : "Complete Log Save"}
+                    </button>
+                  </Form>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => document.getElementById("modal-pending-slip-input")?.click()}
+                    className="flex-1 py-2.5 text-xs bg-[#5D87FF]/10 hover:bg-[#5D87FF]/20 text-[#5D87FF] dark:bg-[#5D87FF]/20 dark:hover:bg-[#5D87FF]/35 font-bold rounded-xl transition-all cursor-pointer text-center"
+                  >
+                    Snap Slip First
+                  </button>
+                )}
               </div>
             </div>
           </div>
