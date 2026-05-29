@@ -166,7 +166,7 @@ export async function action({ request }: { request: Request }) {
           Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
         `;
 
-        // Fast Model Failover Chain — switches to next model on failure with brief cooldown
+        // Fast Model Failover Chain — switches immediately to fallback models without waiting
         const MODEL_CHAIN = [
           "gemini-2.5-flash",      // Primary: latest 2.5 flash, fastest & most available
           "gemini-2.0-flash",      // Fallback 1: stable 2.0 flash
@@ -177,54 +177,41 @@ export async function action({ request }: { request: Request }) {
         let response: Response | null = null;
         let lastError = "";
 
-        const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-        for (let attempt = 0; attempt < 2; attempt++) {
-          for (const model of MODEL_CHAIN) {
-            try {
-              console.log(`🤖 Trying model: ${model} (attempt ${attempt + 1})`);
-              const res = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: requestBody,
-                }
-              );
-
-              if (res.ok) {
-                console.log(`✅ Success with model: ${model}`);
-                response = res;
-                break;
+        for (const model of MODEL_CHAIN) {
+          try {
+            console.log(`🤖 Trying model: ${model}`);
+            const res = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: requestBody,
               }
+            );
 
-              // If server-side capacity error → wait briefly then try next model
-              if (res.status === 503 || res.status === 429 || res.status >= 500) {
-                console.warn(`⚡ ${model} busy (${res.status}). Waiting before next model...`);
-                await delay(1500); // Brief cooldown before trying next model
-                continue;
-              }
-
-              // For client errors (400, 403, etc.) → no point trying other models
-              const errText = await res.text();
-              throw new Error(`Gemini API error: ${errText}`);
-            } catch (err: any) {
-              lastError = err.message || String(err);
-              if (err.message?.includes("Gemini API error")) throw err; // Don't retry client errors
-              console.warn(`⚡ ${model} network error. Switching to next model...`);
-              continue;
+            if (res.ok) {
+              console.log(`✅ Success with model: ${model}`);
+              response = res;
+              break;
             }
-          }
-          if (response) break;
-          // If first full pass failed, wait longer before retrying all models
-          if (attempt === 0) {
-            console.warn("🔄 All models busy on first pass. Retrying in 3 seconds...");
-            await delay(3000);
+
+            // For client errors (400, 403, etc.) → no point trying other models
+            if (res.status === 400 || res.status === 403 || res.status === 401) {
+              const errText = await res.text();
+              throw new Error(`Gemini API config error: ${errText}`);
+            }
+
+            console.warn(`⚡ ${model} returned status ${res.status}. Falling back immediately...`);
+          } catch (err: any) {
+            lastError = err.message || String(err);
+            if (err.message?.includes("Gemini API config error")) throw err; // Don't retry config errors
+            console.warn(`⚡ ${model} network error: ${lastError}. Trying next model...`);
+            continue;
           }
         }
 
         if (!response) {
-          throw new Error("Our AI assistant is taking a short break due to high demand. Please wait a few seconds and try again!");
+          throw new Error("⚠️ All Gemini models are currently busy due to high traffic. Please try again in a moment, or use the ✍️ Manual Form below for instant saving!");
         }
 
         const data = await response.json();
@@ -233,7 +220,7 @@ export async function action({ request }: { request: Request }) {
         const parsed = JSON.parse(cleanedText);
 
         if (!Array.isArray(parsed)) {
-          throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4500 for MH-12-AB-1234'.");
+          throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4500.");
         }
 
         let expensesCreated = 0;
@@ -352,6 +339,27 @@ export async function action({ request }: { request: Request }) {
     return { success: true };
   }
 
+  if (actionType === "update_expense") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
+    const category = formData.get("category")?.toString() || "fuel";
+    const notes = formData.get("notes")?.toString() || "";
+    const type = formData.get("type")?.toString() || "EXPENSE";
+    const vehicle = formData.get("vehicle")?.toString() || "";
+
+    await prisma.expense.update({
+      where: { id },
+      data: {
+        amount,
+        category,
+        notes,
+        type,
+        vehicle: vehicle || null,
+      },
+    });
+    return { success: true };
+  }
+
   if (actionType === "create_delivery") {
     const title = formData.get("title")?.toString() || "Daily Runsheet";
     const category = formData.get("category")?.toString() || "vendor_ship";
@@ -371,6 +379,27 @@ export async function action({ request }: { request: Request }) {
       },
     });
     return { success: true, action: "create_delivery" };
+  }
+
+  if (actionType === "update_delivery") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const category = formData.get("category")?.toString() || "vendor_ship";
+    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || 0;
+    const completedOrders = parseInt(formData.get("completedOrders")?.toString() || "0") || 0;
+    const driverName = formData.get("driverName")?.toString() || "Unassigned";
+    const notes = formData.get("notes")?.toString() || "";
+
+    await prisma.delivery.update({
+      where: { id },
+      data: {
+        category,
+        totalOrders,
+        completedOrders,
+        driverName,
+        notes,
+      },
+    });
+    return { success: true };
   }
 
   if (actionType === "delete_delivery") {
@@ -445,6 +474,10 @@ export default function Home() {
   const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
   const [showPendingModal, setShowPendingModal] = useState(false);
   const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
+
+  // Local edit states
+  const [editingExpense, setEditingExpense] = useState<any | null>(null);
+  const [editingDelivery, setEditingDelivery] = useState<any | null>(null);
 
   // Form references for automated clearing on success
   const manualExpenseFormRef = useRef<HTMLFormElement>(null);
@@ -809,6 +842,10 @@ export default function Home() {
   // Reset raw inputs on action success and set fading success messages
   useEffect(() => {
     if (actionData && "success" in actionData && actionData.success) {
+      // Clear edit states on successful update
+      setEditingExpense(null);
+      setEditingDelivery(null);
+
       // If a fuel slip is still pending, do NOT show the success toast yet —
       // the popup modal will handle the remaining workflow.
       const hasPendingSlip = "needsFuelSlip" in actionData && actionData.needsFuelSlip;
@@ -1415,6 +1452,31 @@ export default function Home() {
                               })}
                             </span>
                           </div>
+
+                          {/* Quick Admin Actions */}
+                          <div className="flex items-center justify-end gap-1.5 mt-1 pt-1.5 border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30">
+                            <button
+                              type="button"
+                              onClick={() => setEditingExpense(exp)}
+                              className="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900/40 cursor-pointer text-[10px] transition-all"
+                            >
+                              Edit
+                            </button>
+                            <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
+                              if (!confirm("Are you sure you want to permanently delete this log?")) {
+                                e.preventDefault();
+                              }
+                            }}>
+                              <input type="hidden" name="_action" value="reject_expense" />
+                              <input type="hidden" name="id" value={exp.id} />
+                              <button
+                                type="submit"
+                                className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900/40 cursor-pointer text-[10px] transition-all"
+                              >
+                                Delete
+                              </button>
+                            </Form>
+                          </div>
                         </div>
                       ))}
                       {expenses.length === 0 && (
@@ -1644,7 +1706,18 @@ export default function Home() {
                                 <td className="p-3.5 text-neutral-400">{new Date(exp.timestamp).toLocaleString()}</td>
                                 <td className="p-3.5 text-right">
                                   <div className="flex items-center justify-end gap-1.5">
-                                    <Form method="post" style={{ display: "inline" }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingExpense(exp)}
+                                      className="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900 cursor-pointer text-[10px]"
+                                    >
+                                      Edit
+                                    </button>
+                                    <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
+                                      if (!confirm("Are you sure you want to permanently delete this log?")) {
+                                        e.preventDefault();
+                                      }
+                                    }}>
                                       <input type="hidden" name="_action" value="reject_expense" />
                                       <input type="hidden" name="id" value={exp.id} />
                                       <button
@@ -1720,8 +1793,19 @@ export default function Home() {
                                 </span>
                               </div>
 
-                              <div className="flex items-center gap-1">
-                                <Form method="post" style={{ display: "inline" }}>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingExpense(exp)}
+                                  className="px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900 text-[10px] cursor-pointer"
+                                >
+                                  Edit
+                                </button>
+                                <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
+                                  if (!confirm("Are you sure you want to permanently delete this log?")) {
+                                    e.preventDefault();
+                                  }
+                                }}>
                                   <input type="hidden" name="_action" value="reject_expense" />
                                   <input type="hidden" name="id" value={exp.id} />
                                   <button
@@ -1995,6 +2079,38 @@ export default function Home() {
                                 })}
                               </span>
                             </div>
+
+                            {/* Quick Admin Actions */}
+                            <div 
+                              className="flex items-center justify-end gap-1.5 mt-1 pt-1.5 border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingDelivery(del);
+                                }}
+                                className="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900/40 cursor-pointer text-[10px] transition-all"
+                              >
+                                Edit
+                              </button>
+                              <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
+                                e.stopPropagation();
+                                if (!confirm("Are you sure you want to permanently delete this runsheet?")) {
+                                  e.preventDefault();
+                                }
+                              }}>
+                                <input type="hidden" name="_action" value="delete_delivery" />
+                                <input type="hidden" name="id" value={del.id} />
+                                <button
+                                  type="submit"
+                                  className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900/40 cursor-pointer text-[10px] transition-all"
+                                >
+                                  Delete
+                                </button>
+                              </Form>
+                            </div>
                           </div>
                         );
                       })}
@@ -2229,16 +2345,29 @@ export default function Home() {
                                     ₹{payout.toLocaleString()}
                                   </td>
                                   <td className="p-3.5 text-right">
-                                    <Form method="post" className="inline-block" style={{ display: "inline" }}>
-                                      <input type="hidden" name="_action" value="delete_delivery" />
-                                      <input type="hidden" name="id" value={del.id} />
+                                    <div className="flex items-center justify-end gap-1.5">
                                       <button
-                                        type="submit"
-                                        className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
+                                        type="button"
+                                        onClick={() => setEditingDelivery(del)}
+                                        className="px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900 text-[10px] cursor-pointer"
                                       >
-                                        Delete
+                                        Edit
                                       </button>
-                                    </Form>
+                                      <Form method="post" className="inline-block" style={{ display: "inline" }} onSubmit={(e) => {
+                                        if (!confirm("Are you sure you want to permanently delete this runsheet?")) {
+                                          e.preventDefault();
+                                        }
+                                      }}>
+                                        <input type="hidden" name="_action" value="delete_delivery" />
+                                        <input type="hidden" name="id" value={del.id} />
+                                        <button
+                                          type="submit"
+                                          className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
+                                        >
+                                          Delete
+                                        </button>
+                                      </Form>
+                                    </div>
                                   </td>
                                 </tr>
                               );
@@ -2374,16 +2503,29 @@ export default function Home() {
                                 />
                               </div>
 
-                              <Form method="post" className="inline-block" style={{ display: "inline" }}>
-                                <input type="hidden" name="_action" value="delete_delivery" />
-                                <input type="hidden" name="id" value={del.id} />
+                              <div className="flex items-center gap-1.5">
                                 <button
-                                  type="submit"
-                                  className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
+                                  type="button"
+                                  onClick={() => setEditingDelivery(del)}
+                                  className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900 text-[10px] cursor-pointer"
                                 >
-                                  Delete Log
+                                  Edit
                                 </button>
-                              </Form>
+                                <Form method="post" className="inline-block" style={{ display: "inline" }} onSubmit={(e) => {
+                                  if (!confirm("Are you sure you want to permanently delete this runsheet?")) {
+                                    e.preventDefault();
+                                  }
+                                }}>
+                                  <input type="hidden" name="_action" value="delete_delivery" />
+                                  <input type="hidden" name="id" value={del.id} />
+                                  <button
+                                    type="submit"
+                                    className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
+                                  >
+                                    Delete Log
+                                  </button>
+                                </Form>
+                              </div>
                             </div>
                           </div>
                         );
@@ -2854,6 +2996,303 @@ export default function Home() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Expense Modal */}
+        {editingExpense && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div 
+              className="absolute inset-0 bg-black/75 backdrop-blur-md transition-opacity duration-300"
+              onClick={() => setEditingExpense(null)}
+            />
+            
+            <div className="relative bg-[#ffffff] dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800/80 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
+              
+              <div className="flex items-center gap-3.5 border-b border-[#edece9]/60 dark:border-neutral-800/60 pb-4">
+                <div className="p-2.5 rounded-xl bg-blue-100 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-md font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
+                    Edit Ledger Log
+                  </h3>
+                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-blue-600 dark:text-blue-400">
+                    Modify Transaction ID: #{editingExpense.id}
+                  </span>
+                </div>
+              </div>
+
+              <Form method="post" className="space-y-4">
+                <input type="hidden" name="_action" value="update_expense" />
+                <input type="hidden" name="id" value={editingExpense.id} />
+
+                {/* Type toggle */}
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-neutral-500">Transaction Type</label>
+                  <div className="grid grid-cols-2 gap-2 bg-neutral-100 dark:bg-neutral-900 p-1 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => setEditingExpense({ ...editingExpense, type: "EXPENSE" })}
+                      className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
+                        editingExpense.type === "EXPENSE"
+                          ? "bg-white dark:bg-neutral-850 shadow-sm text-neutral-800 dark:text-white"
+                          : "text-neutral-500 hover:text-neutral-700"
+                      }`}
+                    >
+                      Expense
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingExpense({ ...editingExpense, type: "INCOME" })}
+                      className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
+                        editingExpense.type === "INCOME"
+                          ? "bg-white dark:bg-neutral-850 shadow-sm text-neutral-800 dark:text-white"
+                          : "text-neutral-500 hover:text-neutral-700"
+                      }`}
+                    >
+                      Income
+                    </button>
+                  </div>
+                  <input type="hidden" name="type" value={editingExpense.type} />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Category Select */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Category</label>
+                    <select
+                      name="category"
+                      value={editingExpense.category}
+                      onChange={(e) => setEditingExpense({ ...editingExpense, category: e.target.value })}
+                      className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-bold capitalize"
+                    >
+                      {editingExpense.type === "INCOME" ? (
+                        <>
+                          <option value="other_income">💰 Other Income</option>
+                        </>
+                      ) : (
+                        <>
+                          <option value="fuel">⛽ Fuel/CNG</option>
+                          <option value="bittu">👤 Bittu</option>
+                          <option value="service">🔧 Service</option>
+                          <option value="other">📦 Other Expense</option>
+                          <option value="shadowfax">🚚 Shadowfax</option>
+                          <option value="factory">🏭 Factory</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+
+                  {/* Amount Input */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Amount (₹)</label>
+                    <input
+                      type="number"
+                      name="amount"
+                      required
+                      step="any"
+                      min="0"
+                      value={editingExpense.amount}
+                      onChange={(e) => setEditingExpense({ ...editingExpense, amount: e.target.value })}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
+                    />
+                  </div>
+                </div>
+
+                {/* Notes/Remarks */}
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-neutral-500">Notes / Remarks</label>
+                  <textarea
+                    name="notes"
+                    value={editingExpense.notes}
+                    onChange={(e) => setEditingExpense({ ...editingExpense, notes: e.target.value })}
+                    rows={2}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
+                    placeholder="Describe transaction details..."
+                  />
+                </div>
+
+                {/* Optional Vehicle Plate (Only for fuel/service expenses) */}
+                {editingExpense.type === "EXPENSE" && (editingExpense.category === "fuel" || editingExpense.category === "service") && (
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Vehicle Number Plate</label>
+                    <input
+                      type="text"
+                      name="vehicle"
+                      value={editingExpense.vehicle || ""}
+                      onChange={(e) => setEditingExpense({ ...editingExpense, vehicle: e.target.value })}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-mono"
+                      placeholder="e.g. MH 12 AB 1234"
+                    />
+                  </div>
+                )}
+
+                {/* Dialog Controls */}
+                <div className="flex items-center gap-3 pt-4 border-t border-[#edece9]/60 dark:border-neutral-800/60">
+                  <button
+                    type="button"
+                    onClick={() => setEditingExpense(null)}
+                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all cursor-pointer text-center"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Runsheet Modal */}
+        {editingDelivery && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div 
+              className="absolute inset-0 bg-black/75 backdrop-blur-md transition-opacity duration-300"
+              onClick={() => setEditingDelivery(null)}
+            />
+            
+            <div className="relative bg-[#ffffff] dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800/80 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
+              
+              <div className="flex items-center gap-3.5 border-b border-[#edece9]/60 dark:border-neutral-800/60 pb-4">
+                <div className="p-2.5 rounded-xl bg-purple-100 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400">
+                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="text-md font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
+                    Edit Daily Runsheet
+                  </h3>
+                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-purple-600 dark:text-purple-400">
+                    Modify Runsheet ID: #{editingDelivery.id}
+                  </span>
+                </div>
+              </div>
+
+              <Form method="post" className="space-y-4">
+                <input type="hidden" name="_action" value="update_delivery" />
+                <input type="hidden" name="id" value={editingDelivery.id} />
+
+                {/* Operator/Driver Selection */}
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-neutral-500">Field Operator Name</label>
+                  <select
+                    name="driverName"
+                    value={editingDelivery.driverName}
+                    onChange={(e) => setEditingDelivery({ ...editingDelivery, driverName: e.target.value })}
+                    className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-bold"
+                  >
+                    {users.map((u: any) => (
+                      <option key={u.id} value={u.name}>{u.name} ({u.role})</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Category Select */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Order Category</label>
+                    <select
+                      name="category"
+                      value={editingDelivery.category}
+                      onChange={(e) => setEditingDelivery({ ...editingDelivery, category: e.target.value })}
+                      className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
+                    >
+                      <option value="vendor_ship">Vendor Ship</option>
+                      <option value="per_order_rate">Per Order Rate</option>
+                    </select>
+                  </div>
+
+                  {/* Calculated Payout Info */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Preview Payout</label>
+                    <div className="w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-neutral-50 dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-100 font-bold">
+                      ₹{
+                        editingDelivery.category === "vendor_ship"
+                          ? (40000 + (Number(editingDelivery.completedOrders || 0) * 35)).toLocaleString()
+                          : (Number(editingDelivery.completedOrders || 0) * 75).toLocaleString()
+                      }
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Assigned Orders */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Assigned Orders</label>
+                    <input
+                      type="number"
+                      name="totalOrders"
+                      required
+                      step="1"
+                      min="0"
+                      value={editingDelivery.totalOrders}
+                      onKeyDown={(e) => {
+                        if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
+                      }}
+                      onChange={(e) => setEditingDelivery({ ...editingDelivery, totalOrders: e.target.value })}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
+                    />
+                  </div>
+
+                  {/* Completed Orders */}
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
+                    <input
+                      type="number"
+                      name="completedOrders"
+                      required
+                      step="1"
+                      min="0"
+                      value={editingDelivery.completedOrders}
+                      onKeyDown={(e) => {
+                        if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
+                      }}
+                      onChange={(e) => setEditingDelivery({ ...editingDelivery, completedOrders: e.target.value })}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
+                    />
+                  </div>
+                </div>
+
+                {/* Notes/Remarks */}
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-neutral-500">Notes / Remarks</label>
+                  <textarea
+                    name="notes"
+                    value={editingDelivery.notes}
+                    onChange={(e) => setEditingDelivery({ ...editingDelivery, notes: e.target.value })}
+                    rows={2}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
+                    placeholder="Additional details..."
+                  />
+                </div>
+
+                {/* Dialog Controls */}
+                <div className="flex items-center gap-3 pt-4 border-t border-[#edece9]/60 dark:border-neutral-800/60">
+                  <button
+                    type="button"
+                    onClick={() => setEditingDelivery(null)}
+                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all cursor-pointer text-center"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </Form>
             </div>
           </div>
         )}
