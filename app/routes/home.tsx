@@ -109,9 +109,9 @@ export async function action({ request }: { request: Request }) {
 
         // Fast Model Failover Chain — instantly switches to next model on failure instead of slow retries
         const MODEL_CHAIN = [
-          "gemini-2.0-flash",        // Primary: fastest and most available
-          "gemini-2.0-flash-lite",   // Fallback 1: lighter model, less load
-          "gemini-1.5-flash",        // Fallback 2: stable older generation
+          "gemini-2.0-flash",              // Primary: fastest and most available
+          "gemini-2.0-flash-lite",         // Fallback 1: lighter model, less load
+          "gemini-2.5-flash-preview-05-20", // Fallback 2: latest preview build
         ];
 
         const requestBody = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] });
