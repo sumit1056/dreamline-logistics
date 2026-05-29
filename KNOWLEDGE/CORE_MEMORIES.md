@@ -6,8 +6,8 @@ This document stores coding patterns, preferences, environment details, and crit
 - **OS**: Windows (Local machine)
 - **Project Root**: `e:\logictic_app`
 - **Primary Framework / Stack**: React Router v7 / Remix (Vite runner)
-- **Database Engine**: Prisma v6 (SQLite local engine: `file:./dev.db`)
-- **AI Core**: Google Gemini 1.5 Flash (Dreamline Logistics API Key active in .env)
+- **Database Engine**: Prisma v6 (Neon PostgreSQL Serverless Cloud Database)
+- **AI Core**: Google Gemini Failover Chain (`gemini-2.5-flash` -> `gemini-2.0-flash` -> `gemini-2.0-flash-lite` REST endpoints)
 
 ## Global Antigravity Rules (from GEMINI.md)
 
@@ -38,9 +38,9 @@ This document stores coding patterns, preferences, environment details, and crit
 ## Home Development & Privacy Setup
 - **Privacy Enforcement**: This project is developed on a corporate workstation but linked exclusively to the personal GitHub account (`sumit1056`).
 - **Git Identity Guidelines**: Global git user settings are intentionally unset to protect privacy. Local repository-level settings are hard-configured inside this folder to stamp all commits with `sumit1056` and `sumit1056@users.noreply.github.com`. Keep this standard local config active!
-- **Project Portability**: `.env` configurations and mock/seeded local SQLite databases (`dev.db` and `prisma/dev.db`) are fully tracked in Git to allow instantaneous zero-config startup on home development environments.
+- **Project Portability**: `.env` configurations are pre-packaged to connect directly to the high-availability Neon cloud PostgreSQL database, allowing seamless data synchronization and zero local database setup on your home development setup.
 - **Home Execution Steps**:
   1. Clone/pull the repository.
   2. Run `npm install` to download dependencies.
-  3. Start the application locally via `npm run dev` (no database setup or keys required, everything is ready-to-run).
+  3. Start the application locally via `npm run dev` (it connects directly to your live cloud database and ready-to-use Gemini failover chain).
 
