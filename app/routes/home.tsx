@@ -224,7 +224,7 @@ export async function action({ request }: { request: Request }) {
         }
 
         if (!response) {
-          throw new Error(`All Gemini models are currently busy. Please try again in a moment. Last error: ${lastError}`);
+          throw new Error("Our AI assistant is taking a short break due to high demand. Please wait a few seconds and try again!");
         }
 
         const data = await response.json();
@@ -233,7 +233,7 @@ export async function action({ request }: { request: Request }) {
         const parsed = JSON.parse(cleanedText);
 
         if (!Array.isArray(parsed)) {
-          throw new Error("AI did not return a valid list of entries.");
+          throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4500 for MH-12-AB-1234'.");
         }
 
         let expensesCreated = 0;
@@ -307,7 +307,7 @@ export async function action({ request }: { request: Request }) {
         };
       } catch (err: any) {
         console.error("AI Parse failed:", err);
-        return { error: "Failed to parse text: " + err.message };
+        return { error: err.message };
       }
     } else {
       // Manual entry
