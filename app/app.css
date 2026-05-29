@@ -358,3 +358,20 @@ html.dark, .dark body, .dark {
   background-color: var(--notion-bg-dark);
   border-top: 1px solid var(--notion-border-dark);
 }
+
+/* Premium PWA Standalone Native-Feel Enhancements */
+@media all and (display-mode: standalone) {
+  html, body {
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: contain; /* Prevents pull-to-refresh pull elastic band effect */
+  }
+
+  /* Keep input fields selectable so users can type */
+  input, textarea {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+  }
+}
+

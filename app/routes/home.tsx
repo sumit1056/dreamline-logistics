@@ -359,6 +359,30 @@ export default function Home() {
     }
   }, []);
 
+  // Read search parameters on mount to support PWA shortcuts
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      const showAddParam = params.get("showAdd");
+      if (tabParam === "expenses") {
+        setActiveTab("expenses");
+        if (showAddParam === "true") {
+          setShowExpenseDashboard(false); // Show Entry Form
+        } else {
+          setShowExpenseDashboard(true);  // Show Ledger
+        }
+      } else if (tabParam === "orders") {
+        setActiveTab("orders");
+        if (showAddParam === "true") {
+          setShowDeliveryDashboard(false); // Show Entry Form
+        } else {
+          setShowDeliveryDashboard(true);  // Show Dashboard
+        }
+      }
+    }
+  }, []);
+
   const toggleTheme = () => {
     if (theme === "light") {
       setTheme("dark");
@@ -1150,7 +1174,7 @@ export default function Home() {
                           <div className="text-[11px] text-neutral-500 dark:text-neutral-400 flex justify-between gap-2">
                             <span className="truncate max-w-[140px] italic">"{exp.notes}"</span>
                             <span className="text-[10px] text-neutral-400 shrink-0 font-medium">
-                              {new Date(exp.timestamp).toLocaleDateString(undefined, {
+                              {new Date(exp.timestamp).toLocaleDateString("en-US", {
                                 month: "short",
                                 day: "numeric",
                               })}
@@ -1656,7 +1680,7 @@ export default function Home() {
                                 {del.completedOrders} / {del.totalOrders} completed
                               </span>
                               <span className="text-[10px] text-neutral-400 shrink-0 font-medium">
-                                {new Date(del.createdAt).toLocaleDateString(undefined, {
+                                {new Date(del.createdAt).toLocaleDateString("en-US", {
                                   month: "short",
                                   day: "numeric",
                                 })}
@@ -1868,7 +1892,7 @@ export default function Home() {
                               return (
                                 <tr key={del.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
                                   <td className="p-3.5 text-neutral-500">
-                                    {new Date(del.createdAt).toLocaleDateString(undefined, {
+                                    {new Date(del.createdAt).toLocaleDateString("en-US", {
                                       year: 'numeric',
                                       month: 'short',
                                       day: 'numeric'
@@ -1933,7 +1957,7 @@ export default function Home() {
                             {/* Card Top Row: Date & Operator */}
                             <div className="flex justify-between items-center">
                               <span className="text-[11px] font-bold text-neutral-400">
-                                📅 {new Date(del.createdAt).toLocaleDateString(undefined, {
+                                📅 {new Date(del.createdAt).toLocaleDateString("en-US", {
                                   month: 'short',
                                   day: 'numeric',
                                   year: 'numeric'

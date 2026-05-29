@@ -1,0 +1,36 @@
+{
+  "name": "Dreamline Logistics",
+  "short_name": "Dreamline",
+  "description": "Notion-styled premium Logistics Entry & Analytics Platform",
+  "id": "/",
+  "start_url": "/?source=pwa",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#5D87FF",
+  "orientation": "portrait-primary",
+  "categories": ["business", "productivity"],
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Log Transaction",
+      "short_name": "Log Expense",
+      "description": "Quick log expenses or incomes",
+      "url": "/?tab=expenses&showAdd=true",
+      "icons": [{ "src": "/logo.png", "sizes": "512x512" }]
+    },
+    {
+      "name": "Add Runsheet",
+      "short_name": "Add Runsheet",
+      "description": "Log daily delivery completions",
+      "url": "/?tab=orders&showAdd=true",
+      "icons": [{ "src": "/logo.png", "sizes": "512x512" }]
+    }
+  ]
+}

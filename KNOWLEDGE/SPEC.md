@@ -25,9 +25,15 @@ The application has been unified to enforce a highly focused, single administrat
     - **Net Cashflow & Cost Metrics**: Real-time aggregation of Total Income, Total Expenses, Net Margin, and Percentage Fuel cost share calculations on the dashboard ledger.
     - **Audit Ledger & Control System**: Allows the Founder and partner to audit, approve, or delete operational logs.
     - **Daily Runsheet & Order Dashboard (Order Tracking)**: Re-architected consignment tracking to daily runsheet totals (assigned vs. completed orders) categorized by "Vendor Ship" (Shadowfax) and "Per Order Rate". Features an interactive runsheet logging console, comprehensive stats cards, custom time-based date and range filters, responsive desktop table layout, and mobile card view.
+- **Progressive Web App (PWA) Mobile Installability**:
+    - **Offline Caching & Fallback**: Configured Service Worker (`sw.js`) supporting offline asset caching and network-first fetch strategies for highly reliable use on the road by logistics drivers.
+    - **Standalone Visual Presentation**: Native-feeling display mode with hidden URL bars, immersive notched layout viewport adaptations (`viewport-fit=cover`), pull-to-refresh overrides, and disabled double-tap zooms.
+    - **Universal Mobile Installation**: Built a custom PWA `manifest.json` enabling immediate, native installation directly onto Android/iOS homescreens.
+    - **PWA Dynamic Shortcuts**: Fully functional long-press launcher shortcuts ("Log Transaction", "Add Runsheet") that deep-link directly into pre-opened forms.
 
 ## 4. Technical Architecture
 - **Framework**: React Router v7 / Remix (Vite-based next-gen compiler).
 - **Database Engine**: Prisma v6 (PostgreSQL via Neon cloud hosting for high availability and robust data operations).
 - **Image Storage**: Base64 datauri persistence for offline-capable, local-first zero-infrastructure slip attachment archiving.
 - **Styling**: Tailwind CSS + custom glassmorphic variables themed with premium Notion styles.
+- **App Wrapper / Mobile Integration**: Progressive Web App (PWA) with client-side shortcuts, cache service worker, and standard Apple Mobile Web App standards.
