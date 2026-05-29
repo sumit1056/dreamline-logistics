@@ -44,3 +44,15 @@ This document stores coding patterns, preferences, environment details, and crit
   2. Run `npm install` to download dependencies.
   3. Start the application locally via `npm run dev` (it connects directly to your live cloud database and ready-to-use Gemini failover chain).
 
+## Next Phase Objectives & Technical Handshake
+When initiating the next coding session (whether at home or on the corporate laptop), prioritize the following outstanding objectives:
+1. **Authentication System Integration:** 
+   - Wrap the dashboard in a secure credentials gate.
+   - Enforce a robust Username/Password login page so that no unauthorized visitor can view or alter the operational ledgers.
+   - Restrict access to authenticated administrators only, preserving existing mock user sessions if driver routing is needed in the future.
+2. **Beta Test Feedback Iterations:**
+   - Gather operational feedback from users testing the production URL.
+   - Iterate on performance improvements, error boundary displays, or any minor UI visual polish requested by operators.
+3. **Post-Beta Production DB Maintenance:**
+   - Coordinate with the founder for a full cloud database reset/purge when ready to exit the beta window, ensuring a pristine schema slate for the official launch.
+
