@@ -107,7 +107,32 @@ export async function action({ request }: { request: Request }) {
           Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
         `;
 
-        const response = await fetch(
+        // Robust retry handler to automatically manage 503 (server overloaded) and 429 (rate limits) errors
+        const fetchWithRetry = async (url: string, options: any, retries = 3, delay = 1000): Promise<Response> => {
+          let lastResponse: Response | null = null;
+          for (let i = 0; i < retries; i++) {
+            try {
+              const res = await fetch(url, options);
+              if (res.ok) return res;
+              
+              lastResponse = res;
+              if (res.status === 503 || res.status === 429 || res.status >= 500) {
+                console.warn(`Gemini API capacity spike (${res.status}). Retrying in ${delay}ms... (Attempt ${i + 1}/${retries})`);
+                await new Promise((resolve) => setTimeout(resolve, delay));
+                delay *= 2; // Exponential backoff
+                continue;
+              }
+              return res; // For client errors (400, 403), return directly
+            } catch (err) {
+              if (i === retries - 1) throw err;
+              await new Promise((resolve) => setTimeout(resolve, delay));
+              delay *= 2;
+            }
+          }
+          return lastResponse!;
+        };
+
+        const response = await fetchWithRetry(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
           {
             method: "POST",
