@@ -228,6 +228,7 @@ export async function action({ request }: { request: Request }) {
         let expensesCreated = 0;
         let deliveriesCreated = 0;
         const imageUrl = formData.get("imageUrl")?.toString() || null;
+        let pendingFuelExpense: any = null;
 
         for (const item of parsed) {
           if (item.targetTable === "expense") {
@@ -236,6 +237,18 @@ export async function action({ request }: { request: Request }) {
             const category = item.category || "other";
             const notes = item.notes || rawText;
             const vehicle = item.vehicle || null;
+
+            // If it is a CNG/Fuel expense, we absolutely need a receipt slip!
+            if (category === "fuel" && !imageUrl) {
+              pendingFuelExpense = {
+                amount,
+                category,
+                notes,
+                vehicle,
+                type,
+              };
+              continue; // Skip saving this one for now!
+            }
 
             await prisma.expense.create({
               data: {
@@ -278,6 +291,8 @@ export async function action({ request }: { request: Request }) {
           isAi: true,
           expensesCreated,
           deliveriesCreated,
+          needsFuelSlip: pendingFuelExpense !== null,
+          pendingFuelExpense,
         };
       } catch (err: any) {
         console.error("AI Parse failed:", err);
@@ -416,6 +431,7 @@ export default function Home() {
   const [manualType, setManualType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [selectedCategory, setSelectedCategory] = useState("fuel");
   const [fuelSlipBase64, setFuelSlipBase64] = useState<string | null>(null);
+  const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
   const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
 
   // Form references for automated clearing on success
@@ -784,6 +800,7 @@ export default function Home() {
       setAiRawInput("");
       setFormCompletedOrders("");
       setFuelSlipBase64(null); // Reset slip receipt image base64
+      setPendingSlipBase64(null); // Reset pending slip receipt image base64
       
       // Native browser form reset for all input text fields
       aiFormRef.current?.reset();
@@ -1125,21 +1142,93 @@ export default function Home() {
                             <div className="flex flex-col sm:flex-row justify-end sm:items-center gap-3">
                               <button
                                 type="submit"
-                                disabled={
-                                  isSubmitting ||
-                                  !aiRawInput.trim() ||
-                                  ((aiRawInput.toLowerCase().includes("fuel") || aiRawInput.toLowerCase().includes("diesel")) && !fuelSlipBase64)
-                                }
+                                disabled={isSubmitting || !aiRawInput.trim()}
                                 className="notion-btn text-xs px-4 py-2.5 bg-[#5D87FF] hover:bg-[#4570EA] font-bold text-white rounded-md disabled:opacity-50 cursor-pointer shadow-sm self-end sm:self-auto transition-all"
                               >
-                                {isSubmitting
-                                  ? "Parsing..."
-                                  : (aiRawInput.toLowerCase().includes("fuel") || aiRawInput.toLowerCase().includes("diesel")) && !fuelSlipBase64
-                                  ? "⚠️ Snap Receipt Slip First"
-                                  : "AI Parse & Save"}
+                                {isSubmitting ? "Parsing..." : "AI Parse & Save"}
                               </button>
                             </div>
                           </Form>
+
+                          {actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip && actionData.pendingFuelExpense && (
+                            <div className="mt-4 p-4 border border-amber-200 bg-amber-50/50 dark:bg-amber-950/20 dark:border-amber-900/50 rounded-lg space-y-3 animate-fade-in text-neutral-800 dark:text-neutral-200">
+                              <div className="flex items-start gap-2.5">
+                                <span className="text-xl">⚠️</span>
+                                <div className="flex-1">
+                                  <h4 className="text-xs font-extrabold text-amber-800 dark:text-amber-300">
+                                    CNG / Fuel Slip Required
+                                  </h4>
+                                  <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5 leading-relaxed">
+                                    Other parsed entries have been saved successfully! However, the fuel/CNG expense of <strong>₹{actionData.pendingFuelExpense.amount}</strong> ({actionData.pendingFuelExpense.notes}) requires a receipt slip photo to save.
+                                  </p>
+                                </div>
+                              </div>
+                              
+                              <div className="flex flex-wrap items-center gap-3 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => document.getElementById("pending-slip-input")?.click()}
+                                  className="notion-btn text-[11px] px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-md font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                  </svg>
+                                  Snap Receipt
+                                </button>
+
+                                <input
+                                  type="file"
+                                  id="pending-slip-input"
+                                  accept="image/*"
+                                  capture="environment"
+                                  className="hidden"
+                                  onChange={async (e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) {
+                                      const compressed = await compressImage(file);
+                                      setPendingSlipBase64(compressed);
+                                    }
+                                  }}
+                                />
+
+                                {pendingSlipBase64 && (
+                                  <Form method="post" className="inline-flex items-center gap-2">
+                                    <input type="hidden" name="_action" value="create_expense" />
+                                    <input type="hidden" name="isAi" value="false" />
+                                    <input type="hidden" name="amount" value={actionData.pendingFuelExpense.amount} />
+                                    <input type="hidden" name="type" value={actionData.pendingFuelExpense.type} />
+                                    <input type="hidden" name="category" value={actionData.pendingFuelExpense.category} />
+                                    <input type="hidden" name="notes" value={actionData.pendingFuelExpense.notes} />
+                                    <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
+                                    <input type="hidden" name="senderName" value="AI Assistant" />
+                                    <input type="hidden" name="imageUrl" value={pendingSlipBase64} />
+                                    
+                                    <div className="relative w-9 h-12 rounded border border-neutral-300 dark:border-neutral-700 overflow-hidden shadow">
+                                      <img src={pendingSlipBase64} className="w-full h-full object-cover" alt="Pending Slip" />
+                                      <button
+                                        type="button"
+                                        onClick={() => setPendingSlipBase64(null)}
+                                        className="absolute top-0.5 right-0.5 p-0.5 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
+                                      >
+                                        <svg className="w-2 h-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                      </button>
+                                    </div>
+
+                                    <button
+                                      type="submit"
+                                      disabled={isSubmitting}
+                                      className="notion-btn text-[11px] px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-bold transition-all shadow-sm cursor-pointer disabled:opacity-50"
+                                    >
+                                      {isSubmitting ? "Saving..." : "Save CNG/Fuel"}
+                                    </button>
+                                  </Form>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-4 animate-fade-in">
