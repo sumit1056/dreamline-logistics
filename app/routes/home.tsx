@@ -1452,31 +1452,6 @@ export default function Home() {
                               })}
                             </span>
                           </div>
-
-                          {/* Quick Admin Actions */}
-                          <div className="flex items-center justify-end gap-1.5 mt-1 pt-1.5 border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30">
-                            <button
-                              type="button"
-                              onClick={() => setEditingExpense(exp)}
-                              className="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900/40 cursor-pointer text-[10px] transition-all"
-                            >
-                              Edit
-                            </button>
-                            <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
-                              if (!confirm("Are you sure you want to permanently delete this log?")) {
-                                e.preventDefault();
-                              }
-                            }}>
-                              <input type="hidden" name="_action" value="reject_expense" />
-                              <input type="hidden" name="id" value={exp.id} />
-                              <button
-                                type="submit"
-                                className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900/40 cursor-pointer text-[10px] transition-all"
-                              >
-                                Delete
-                              </button>
-                            </Form>
-                          </div>
                         </div>
                       ))}
                       {expenses.length === 0 && (
@@ -2078,38 +2053,6 @@ export default function Home() {
                                   day: "numeric",
                                 })}
                               </span>
-                            </div>
-
-                            {/* Quick Admin Actions */}
-                            <div 
-                              className="flex items-center justify-end gap-1.5 mt-1 pt-1.5 border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setEditingDelivery(del);
-                                }}
-                                className="px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900/40 cursor-pointer text-[10px] transition-all"
-                              >
-                                Edit
-                              </button>
-                              <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
-                                e.stopPropagation();
-                                if (!confirm("Are you sure you want to permanently delete this runsheet?")) {
-                                  e.preventDefault();
-                                }
-                              }}>
-                                <input type="hidden" name="_action" value="delete_delivery" />
-                                <input type="hidden" name="id" value={del.id} />
-                                <button
-                                  type="submit"
-                                  className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900/40 cursor-pointer text-[10px] transition-all"
-                                >
-                                  Delete
-                                </button>
-                              </Form>
                             </div>
                           </div>
                         );
@@ -3036,10 +2979,10 @@ export default function Home() {
                   <div className="grid grid-cols-2 gap-2 bg-neutral-100 dark:bg-neutral-900 p-1 rounded-lg">
                     <button
                       type="button"
-                      onClick={() => setEditingExpense({ ...editingExpense, type: "EXPENSE" })}
+                      onClick={() => setEditingExpense({ ...editingExpense, type: "EXPENSE", category: "fuel" })}
                       className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
                         editingExpense.type === "EXPENSE"
-                          ? "bg-white dark:bg-neutral-850 shadow-sm text-neutral-800 dark:text-white"
+                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
                           : "text-neutral-500 hover:text-neutral-700"
                       }`}
                     >
@@ -3047,10 +2990,10 @@ export default function Home() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setEditingExpense({ ...editingExpense, type: "INCOME" })}
+                      onClick={() => setEditingExpense({ ...editingExpense, type: "INCOME", category: "shadowfax" })}
                       className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
                         editingExpense.type === "INCOME"
-                          ? "bg-white dark:bg-neutral-850 shadow-sm text-neutral-800 dark:text-white"
+                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
                           : "text-neutral-500 hover:text-neutral-700"
                       }`}
                     >
@@ -3072,6 +3015,8 @@ export default function Home() {
                     >
                       {editingExpense.type === "INCOME" ? (
                         <>
+                          <option value="shadowfax">🚚 Shadowfax</option>
+                          <option value="factory">🏭 Factory</option>
                           <option value="other_income">💰 Other Income</option>
                         </>
                       ) : (
@@ -3080,8 +3025,6 @@ export default function Home() {
                           <option value="bittu">👤 Bittu</option>
                           <option value="service">🔧 Service</option>
                           <option value="other">📦 Other Expense</option>
-                          <option value="shadowfax">🚚 Shadowfax</option>
-                          <option value="factory">🏭 Factory</option>
                         </>
                       )}
                     </select>
@@ -3116,20 +3059,8 @@ export default function Home() {
                   />
                 </div>
 
-                {/* Optional Vehicle Plate (Only for fuel/service expenses) */}
-                {editingExpense.type === "EXPENSE" && (editingExpense.category === "fuel" || editingExpense.category === "service") && (
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-neutral-500">Vehicle Number Plate</label>
-                    <input
-                      type="text"
-                      name="vehicle"
-                      value={editingExpense.vehicle || ""}
-                      onChange={(e) => setEditingExpense({ ...editingExpense, vehicle: e.target.value })}
-                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-mono"
-                      placeholder="e.g. MH 12 AB 1234"
-                    />
-                  </div>
-                )}
+                {/* Keep existing vehicle plate value hidden and safe */}
+                <input type="hidden" name="vehicle" value={editingExpense.vehicle || ""} />
 
                 {/* Dialog Controls */}
                 <div className="flex items-center gap-3 pt-4 border-t border-[#edece9]/60 dark:border-neutral-800/60">
