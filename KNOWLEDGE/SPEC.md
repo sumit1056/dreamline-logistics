@@ -28,6 +28,6 @@ The application has been unified to enforce a highly focused, single administrat
 
 ## 4. Technical Architecture
 - **Framework**: React Router v7 / Remix (Vite-based next-gen compiler).
-- **Database Engine**: Prisma v6 (SQLite local storage for fast, lightweight local deployment, avoiding heavy remote database host costs).
+- **Database Engine**: Prisma v6 (PostgreSQL via Neon cloud hosting for high availability and robust data operations).
 - **Image Storage**: Base64 datauri persistence for offline-capable, local-first zero-infrastructure slip attachment archiving.
 - **Styling**: Tailwind CSS + custom glassmorphic variables themed with premium Notion styles.

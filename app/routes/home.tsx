@@ -301,7 +301,7 @@ export async function action({ request }: { request: Request }) {
 
 export default function Home() {
   const { users, expenses, deliveries } = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
+  const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
 
   // Tab state & Dashboard workflow controls
