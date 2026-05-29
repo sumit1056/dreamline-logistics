@@ -107,43 +107,54 @@ export async function action({ request }: { request: Request }) {
           Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
         `;
 
-        // Robust retry handler to automatically manage 503 (server overloaded) and 429 (rate limits) errors
-        const fetchWithRetry = async (url: string, options: any, retries = 3, delay = 1000): Promise<Response> => {
-          let lastResponse: Response | null = null;
-          for (let i = 0; i < retries; i++) {
-            try {
-              const res = await fetch(url, options);
-              if (res.ok) return res;
-              
-              lastResponse = res;
-              if (res.status === 503 || res.status === 429 || res.status >= 500) {
-                console.warn(`Gemini API capacity spike (${res.status}). Retrying in ${delay}ms... (Attempt ${i + 1}/${retries})`);
-                await new Promise((resolve) => setTimeout(resolve, delay));
-                delay *= 2; // Exponential backoff
-                continue;
+        // Fast Model Failover Chain — instantly switches to next model on failure instead of slow retries
+        const MODEL_CHAIN = [
+          "gemini-2.0-flash",        // Primary: fastest and most available
+          "gemini-2.0-flash-lite",   // Fallback 1: lighter model, less load
+          "gemini-1.5-flash",        // Fallback 2: stable older generation
+        ];
+
+        const requestBody = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] });
+        let response: Response | null = null;
+        let lastError = "";
+
+        for (const model of MODEL_CHAIN) {
+          try {
+            console.log(`🤖 Trying model: ${model}`);
+            const res = await fetch(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: requestBody,
               }
-              return res; // For client errors (400, 403), return directly
-            } catch (err) {
-              if (i === retries - 1) throw err;
-              await new Promise((resolve) => setTimeout(resolve, delay));
-              delay *= 2;
+            );
+
+            if (res.ok) {
+              console.log(`✅ Success with model: ${model}`);
+              response = res;
+              break;
             }
-          }
-          return lastResponse!;
-        };
 
-        const response = await fetchWithRetry(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-          }
-        );
+            // If server-side capacity error → instantly try next model (no waiting)
+            if (res.status === 503 || res.status === 429 || res.status >= 500) {
+              console.warn(`⚡ ${model} busy (${res.status}). Switching to next model...`);
+              continue;
+            }
 
-        if (!response.ok) {
-          const errText = await response.text();
-          throw new Error(`Gemini API error: ${errText}`);
+            // For client errors (400, 403, etc.) → no point trying other models
+            const errText = await res.text();
+            throw new Error(`Gemini API error: ${errText}`);
+          } catch (err: any) {
+            lastError = err.message || String(err);
+            if (err.message?.includes("Gemini API error")) throw err; // Don't retry client errors
+            console.warn(`⚡ ${model} network error. Switching to next model...`);
+            continue;
+          }
+        }
+
+        if (!response) {
+          throw new Error(`All Gemini models are currently busy. Please try again in a moment. Last error: ${lastError}`);
         }
 
         const data = await response.json();
