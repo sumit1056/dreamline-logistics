@@ -348,6 +348,12 @@ export default function Home() {
   const [formCategory, setFormCategory] = useState<"vendor_ship" | "per_order_rate">("vendor_ship");
   const [formCompletedOrders, setFormCompletedOrders] = useState<string>("");
 
+  // Pagination page states and constants
+  const EXPENSE_PAGE_SIZE = 10;
+  const DELIVERY_PAGE_SIZE = 10;
+  const [expensePage, setExpensePage] = useState(1);
+  const [deliveryPage, setDeliveryPage] = useState(1);
+
   // New Dreamline Logistics transaction and camera state hooks
   const [manualType, setManualType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [selectedCategory, setSelectedCategory] = useState("fuel");
@@ -632,6 +638,23 @@ export default function Home() {
       return true;
     });
   }, [deliveries, deliveryFilter, deliveryCategoryFilter, selectedDeliveryYear, selectedDeliveryMonth, customDeliveryStartDate, customDeliveryEndDate]);
+
+  // Paginated sublists
+  const totalExpensePages = Math.max(1, Math.ceil(filteredExpenses.length / EXPENSE_PAGE_SIZE));
+  const activeExpensePage = Math.min(expensePage, totalExpensePages);
+
+  const totalDeliveryPages = Math.max(1, Math.ceil(filteredDeliveries.length / DELIVERY_PAGE_SIZE));
+  const activeDeliveryPage = Math.min(deliveryPage, totalDeliveryPages);
+
+  const paginatedExpenses = useMemo(() => {
+    const startIndex = (activeExpensePage - 1) * EXPENSE_PAGE_SIZE;
+    return filteredExpenses.slice(startIndex, startIndex + EXPENSE_PAGE_SIZE);
+  }, [filteredExpenses, activeExpensePage]);
+
+  const paginatedDeliveries = useMemo(() => {
+    const startIndex = (activeDeliveryPage - 1) * DELIVERY_PAGE_SIZE;
+    return filteredDeliveries.slice(startIndex, startIndex + DELIVERY_PAGE_SIZE);
+  }, [filteredDeliveries, activeDeliveryPage]);
 
   // Financial calculations based on filtered ledger
   const totals = useMemo(() => {
@@ -1152,7 +1175,6 @@ export default function Home() {
                               <input
                                 type="text"
                                 name="notes"
-                                required
                                 placeholder={manualType === "EXPENSE" ? "What was this expense for?" : "Vendor payout, factory cash receipt details"}
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
                               />
@@ -1486,7 +1508,7 @@ export default function Home() {
                               </td>
                             </tr>
                           ) : (
-                            filteredExpenses.map((exp) => (
+                            paginatedExpenses.map((exp) => (
                               <tr key={exp.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
                                 <td className="p-3.5 font-semibold capitalize flex items-center gap-1.5">
                                   {exp.category === "fuel" && "⛽"}
@@ -1544,7 +1566,7 @@ export default function Home() {
                           No expenses logged within selected timeframe.
                         </div>
                       ) : (
-                        filteredExpenses.map((exp) => (
+                        paginatedExpenses.map((exp) => (
                           <div key={exp.id} className="p-4 flex flex-col gap-2 hover:bg-neutral-50/40 dark:hover:bg-neutral-900/10">
                             {/* Top row: Category, image link */}
                             <div className="flex justify-between items-center w-full">
@@ -1611,6 +1633,64 @@ export default function Home() {
                         ))
                       )}
                     </div>
+
+                    {/* Pagination Bar for Expenses */}
+                    {filteredExpenses.length > 0 && (
+                      <div className="flex flex-col sm:flex-row items-center justify-between border-t border-[#edece9] dark:border-[#2f2f2f] bg-neutral-50/50 dark:bg-neutral-900/30 p-4 gap-4">
+                        <span className="text-xs text-neutral-500 font-medium">
+                          Showing <span className="font-semibold text-neutral-800 dark:text-neutral-200">{(activeExpensePage - 1) * EXPENSE_PAGE_SIZE + 1}</span> to{" "}
+                          <span className="font-semibold text-neutral-800 dark:text-neutral-200">
+                            {Math.min(activeExpensePage * EXPENSE_PAGE_SIZE, filteredExpenses.length)}
+                          </span> of <span className="font-semibold text-neutral-800 dark:text-neutral-200">{filteredExpenses.length}</span> records
+                        </span>
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setExpensePage(p => Math.max(1, p - 1))}
+                            disabled={activeExpensePage === 1}
+                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                          >
+                            ◀ Prev
+                          </button>
+                          <div className="flex items-center gap-1">
+                            {Array.from({ length: totalExpensePages }, (_, i) => i + 1).map((p) => {
+                              if (p === 1 || p === totalExpensePages || Math.abs(p - activeExpensePage) <= 1) {
+                                return (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    onClick={() => setExpensePage(p)}
+                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${
+                                      p === activeExpensePage
+                                        ? "bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25"
+                                        : "hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
+                                    }`}
+                                  >
+                                    {p}
+                                  </button>
+                                );
+                              }
+                              if ((p === 2 && activeExpensePage > 3) || (p === totalExpensePages - 1 && activeExpensePage < totalExpensePages - 2)) {
+                                return (
+                                  <span key={p} className="text-neutral-400 text-xs px-1 select-none">
+                                    ...
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setExpensePage(p => Math.min(totalExpensePages, p + 1))}
+                            disabled={activeExpensePage === totalExpensePages}
+                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                          >
+                            Next ▶
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -2009,7 +2089,7 @@ export default function Home() {
                               </td>
                             </tr>
                           ) : (
-                            filteredDeliveries.map((del) => {
+                            paginatedDeliveries.map((del) => {
                               const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
                               const payout = del.category === "vendor_ship"
                                 ? 40000 + (del.completedOrders * 35)
@@ -2063,6 +2143,64 @@ export default function Home() {
                         </tbody>
                       </table>
                     </div>
+
+                    {/* Desktop Pagination Bar for Deliveries */}
+                    {filteredDeliveries.length > 0 && (
+                      <div className="hidden md:flex items-center justify-between border-t border-[#edece9] dark:border-[#2f2f2f] bg-neutral-50/50 dark:bg-neutral-900/30 p-4">
+                        <span className="text-xs text-neutral-500 font-medium">
+                          Showing <span className="font-semibold text-neutral-800 dark:text-neutral-200">{(activeDeliveryPage - 1) * DELIVERY_PAGE_SIZE + 1}</span> to{" "}
+                          <span className="font-semibold text-neutral-800 dark:text-neutral-200">
+                            {Math.min(activeDeliveryPage * DELIVERY_PAGE_SIZE, filteredDeliveries.length)}
+                          </span> of <span className="font-semibold text-neutral-800 dark:text-neutral-200">{filteredDeliveries.length}</span> daily logs
+                        </span>
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryPage(p => Math.max(1, p - 1))}
+                            disabled={activeDeliveryPage === 1}
+                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                          >
+                            ◀ Prev
+                          </button>
+                          <div className="flex items-center gap-1">
+                            {Array.from({ length: totalDeliveryPages }, (_, i) => i + 1).map((p) => {
+                              if (p === 1 || p === totalDeliveryPages || Math.abs(p - activeDeliveryPage) <= 1) {
+                                return (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    onClick={() => setDeliveryPage(p)}
+                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${
+                                      p === activeDeliveryPage
+                                        ? "bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25"
+                                        : "hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
+                                    }`}
+                                  >
+                                    {p}
+                                  </button>
+                                );
+                              }
+                              if ((p === 2 && activeDeliveryPage > 3) || (p === totalDeliveryPages - 1 && activeDeliveryPage < totalDeliveryPages - 2)) {
+                                return (
+                                  <span key={p} className="text-neutral-400 text-xs px-1 select-none">
+                                    ...
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryPage(p => Math.min(totalDeliveryPages, p + 1))}
+                            disabled={activeDeliveryPage === totalDeliveryPages}
+                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                          >
+                            Next ▶
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Mobile-Responsive Daily Runsheets Card Feed (Mobile Only) */}
@@ -2072,7 +2210,7 @@ export default function Home() {
                         No runsheet logs found in this timeframe.
                       </div>
                     ) : (
-                      filteredDeliveries.map((del) => {
+                      paginatedDeliveries.map((del) => {
                         const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
                         return (
                           <div
@@ -2146,6 +2284,64 @@ export default function Home() {
                           </div>
                         );
                       })
+                    )}
+
+                    {/* Mobile Pagination Bar for Deliveries */}
+                    {filteredDeliveries.length > 0 && (
+                      <div className="flex md:hidden flex-col items-center justify-between border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] p-4 gap-3 mt-3 shadow-sm">
+                        <span className="text-xs text-neutral-500 font-medium">
+                          Showing <span className="font-semibold text-neutral-800 dark:text-neutral-200">{(activeDeliveryPage - 1) * DELIVERY_PAGE_SIZE + 1}</span> to{" "}
+                          <span className="font-semibold text-neutral-800 dark:text-neutral-200">
+                            {Math.min(activeDeliveryPage * DELIVERY_PAGE_SIZE, filteredDeliveries.length)}
+                          </span> of <span className="font-semibold text-neutral-800 dark:text-neutral-200">{filteredDeliveries.length}</span> daily logs
+                        </span>
+                        <div className="flex gap-1.5 w-full justify-between sm:justify-center">
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryPage(p => Math.max(1, p - 1))}
+                            disabled={activeDeliveryPage === 1}
+                            className="px-3 py-2 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-[#202020] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                          >
+                            ◀ Prev
+                          </button>
+                          <div className="flex items-center gap-1">
+                            {Array.from({ length: totalDeliveryPages }, (_, i) => i + 1).map((p) => {
+                              if (p === 1 || p === totalDeliveryPages || Math.abs(p - activeDeliveryPage) <= 1) {
+                                return (
+                                  <button
+                                    key={p}
+                                    type="button"
+                                    onClick={() => setDeliveryPage(p)}
+                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${
+                                      p === activeDeliveryPage
+                                        ? "bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25"
+                                        : "hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
+                                    }`}
+                                  >
+                                    {p}
+                                  </button>
+                                );
+                              }
+                              if ((p === 2 && activeDeliveryPage > 3) || (p === totalDeliveryPages - 1 && activeDeliveryPage < totalDeliveryPages - 2)) {
+                                return (
+                                  <span key={p} className="text-neutral-400 text-xs px-1 select-none">
+                                    ...
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setDeliveryPage(p => Math.min(totalDeliveryPages, p + 1))}
+                            disabled={activeDeliveryPage === totalDeliveryPages}
+                            className="px-3 py-2 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-[#202020] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
+                          >
+                            Next ▶
+                          </button>
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
