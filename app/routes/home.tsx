@@ -166,7 +166,7 @@ export async function action({ request }: { request: Request }) {
           Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
         `;
 
-        // Fast Model Failover Chain — instantly switches to next model on failure instead of slow retries
+        // Fast Model Failover Chain — switches to next model on failure with brief cooldown
         const MODEL_CHAIN = [
           "gemini-2.5-flash",      // Primary: latest 2.5 flash, fastest & most available
           "gemini-2.0-flash",      // Fallback 1: stable 2.0 flash
@@ -177,38 +177,49 @@ export async function action({ request }: { request: Request }) {
         let response: Response | null = null;
         let lastError = "";
 
-        for (const model of MODEL_CHAIN) {
-          try {
-            console.log(`🤖 Trying model: ${model}`);
-            const res = await fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: requestBody,
+        const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+          for (const model of MODEL_CHAIN) {
+            try {
+              console.log(`🤖 Trying model: ${model} (attempt ${attempt + 1})`);
+              const res = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: requestBody,
+                }
+              );
+
+              if (res.ok) {
+                console.log(`✅ Success with model: ${model}`);
+                response = res;
+                break;
               }
-            );
 
-            if (res.ok) {
-              console.log(`✅ Success with model: ${model}`);
-              response = res;
-              break;
-            }
+              // If server-side capacity error → wait briefly then try next model
+              if (res.status === 503 || res.status === 429 || res.status >= 500) {
+                console.warn(`⚡ ${model} busy (${res.status}). Waiting before next model...`);
+                await delay(1500); // Brief cooldown before trying next model
+                continue;
+              }
 
-            // If server-side capacity error → instantly try next model (no waiting)
-            if (res.status === 503 || res.status === 429 || res.status >= 500) {
-              console.warn(`⚡ ${model} busy (${res.status}). Switching to next model...`);
+              // For client errors (400, 403, etc.) → no point trying other models
+              const errText = await res.text();
+              throw new Error(`Gemini API error: ${errText}`);
+            } catch (err: any) {
+              lastError = err.message || String(err);
+              if (err.message?.includes("Gemini API error")) throw err; // Don't retry client errors
+              console.warn(`⚡ ${model} network error. Switching to next model...`);
               continue;
             }
-
-            // For client errors (400, 403, etc.) → no point trying other models
-            const errText = await res.text();
-            throw new Error(`Gemini API error: ${errText}`);
-          } catch (err: any) {
-            lastError = err.message || String(err);
-            if (err.message?.includes("Gemini API error")) throw err; // Don't retry client errors
-            console.warn(`⚡ ${model} network error. Switching to next model...`);
-            continue;
+          }
+          if (response) break;
+          // If first full pass failed, wait longer before retrying all models
+          if (attempt === 0) {
+            console.warn("🔄 All models busy on first pass. Retrying in 3 seconds...");
+            await delay(3000);
           }
         }
 
