@@ -62,8 +62,12 @@ export function meta({}: Route.MetaArgs) {
   ];
 }
 
+import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
+import { requireAdmin } from "../session.server";
+
 // Server Loader - Parallelized database queries (cuts Neon cloud DB lag by 66%)
-export async function loader() {
+export async function loader({ request }: LoaderFunctionArgs) {
+  await requireAdmin(request);
   let [users, expenses, deliveries] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
@@ -119,7 +123,8 @@ export async function loader() {
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
-export async function action({ request }: { request: Request }) {
+export async function action({ request }: ActionFunctionArgs) {
+  await requireAdmin(request);
   const formData = await request.formData();
   const actionType = formData.get("_action")?.toString();
 
@@ -1027,6 +1032,20 @@ export default function Home() {
                 </svg>
               )}
             </button>
+
+            {/* Secure Logout Button */}
+            <Form method="post" action="/login" className="flex items-center">
+              <input type="hidden" name="_action" value="logout" />
+              <button
+                type="submit"
+                className="p-2 rounded-full hover:bg-neutral-100 dark:hover:bg-rose-500/10 text-neutral-600 hover:text-rose-600 dark:text-neutral-300 dark:hover:text-rose-400 transition-all focus:outline-none cursor-pointer flex items-center justify-center"
+                title="Secure Logout"
+              >
+                <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+              </button>
+            </Form>
           </div>
         </header>
 
