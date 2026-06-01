@@ -67,9 +67,6 @@ export default function LoginRoute() {
           <h1 className="text-2xl font-extrabold tracking-tight text-neutral-950 dark:text-neutral-50 font-sans">
             Dreamline Logistics
           </h1>
-          <p className="text-xs font-semibold text-neutral-400 dark:text-neutral-500 mt-1 uppercase tracking-widest">
-            Administrative Console Gate
-          </p>
         </div>
 
         {/* Glassmorphic Login Form Card */}
@@ -78,9 +75,6 @@ export default function LoginRoute() {
             <h2 className="text-lg font-bold text-neutral-900 dark:text-white">
               Identity Verification
             </h2>
-            <p className="text-xs text-neutral-500 dark:text-neutral-400">
-              Only authenticated administrators can load or modify logs.
-            </p>
           </div>
 
           {/* Secure credentials warning error alert banner */}
@@ -107,7 +101,7 @@ export default function LoginRoute() {
                   name="username"
                   required
                   autoFocus
-                  placeholder="Enter administrative identity"
+                  placeholder="Enter username"
                   className="w-full text-sm font-semibold border border-neutral-200 dark:border-neutral-800 rounded-xl px-4 py-3 bg-white/50 dark:bg-[#121212]/50 text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
                 />
                 <div className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none">
@@ -128,7 +122,7 @@ export default function LoginRoute() {
                   type={showPassword ? "text" : "password"}
                   name="password"
                   required
-                  placeholder="Enter access code"
+                  placeholder="Enter password"
                   className="w-full text-sm font-mono border border-neutral-200 dark:border-neutral-800 rounded-xl px-4 py-3 bg-white/50 dark:bg-[#121212]/50 text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
                 />
                 <button
@@ -172,11 +166,6 @@ export default function LoginRoute() {
             </div>
           </Form>
         </div>
-
-        {/* Security watermark */}
-        <p className="text-center text-[10px] uppercase font-bold text-neutral-400 dark:text-neutral-500 mt-6 tracking-widest">
-          🔐 Secure Endpoint • SHA-256 Signed Session
-        </p>
       </div>
     </div>
   );
