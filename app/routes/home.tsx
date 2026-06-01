@@ -63,15 +63,19 @@ export function meta({}: Route.MetaArgs) {
 }
 
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { requireAdmin } from "../session.server";
+import { requireAdmin, hashPassword } from "../session.server";
 
 // Server Loader - Parallelized database queries (cuts Neon cloud DB lag by 66%)
 export async function loader({ request }: LoaderFunctionArgs) {
   await requireAdmin(request);
-  let [users, expenses, deliveries] = await Promise.all([
+  let [users, expenses, deliveries, adminCredentials] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
     prisma.delivery.findMany({ orderBy: { createdAt: "desc" } }),
+    prisma.adminCredential.findMany({
+      select: { id: true, username: true, createdAt: true },
+      orderBy: { createdAt: "desc" }
+    }),
   ]);
 
   let didSeed = false;
@@ -117,9 +121,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
       prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
       prisma.delivery.findMany({ orderBy: { createdAt: "desc" } }),
     ]);
+    adminCredentials = await prisma.adminCredential.findMany({
+      select: { id: true, username: true, createdAt: true },
+      orderBy: { createdAt: "desc" }
+    });
   }
 
-  return { users, expenses, deliveries };
+  return { users, expenses, deliveries, adminCredentials };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -149,6 +157,10 @@ export async function action({ request }: ActionFunctionArgs) {
           Parse the input into a strict JSON array where each item represents an entry to be saved to our database.
           For each item in the array, specify the target table using "targetTable": "expense" or "delivery".
 
+          Reference current time is: ${new Date().toISOString()} (Local current date: ${new Date().toString()}).
+
+          For each item, if the user mentions a past date, relative date (e.g., 'yesterday', '2 days ago', 'last Friday', 'on 25th May'), parse it into a strict UTC ISO 8601 string and set the field "date". Otherwise, if no date is mentioned, omit or set "date" to null.
+
           If targetTable is "expense":
           - amount: (number) The cost or income in rupees/INR.
           - type: (string) Must be either "EXPENSE" or "INCOME".
@@ -157,6 +169,7 @@ export async function action({ request }: ActionFunctionArgs) {
             For "INCOME": 'shadowfax', 'factory', 'other_income'
           - notes: (string) Clean and concise description of the transaction.
           - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234), otherwise null.
+          - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
 
           If targetTable is "delivery":
           - title: (string) A clean title, e.g., "Daily Runsheet - Vendor Shipments" or "Per Order Runsheet".
@@ -165,6 +178,7 @@ export async function action({ request }: ActionFunctionArgs) {
           - completedOrders: (number) Number of successfully completed orders.
           - driverName: (string) The driver's name if mentioned (e.g. "John Driver" or "Sam Driver"), otherwise "Unassigned".
           - notes: (string) Clean operational notes or remarks.
+          - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
 
           User Input: "${rawText}"
 
@@ -225,7 +239,7 @@ export async function action({ request }: ActionFunctionArgs) {
         const parsed = JSON.parse(cleanedText);
 
         if (!Array.isArray(parsed)) {
-          throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4500.");
+          throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4550.");
         }
 
         let expensesCreated = 0;
@@ -234,6 +248,8 @@ export async function action({ request }: ActionFunctionArgs) {
         let pendingFuelExpense: any = null;
 
         for (const item of parsed) {
+          const entryDate = item.date ? new Date(item.date) : new Date();
+
           if (item.targetTable === "expense") {
             const amount = Math.round(parseFloat(item.amount) || 0);
             const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
@@ -249,6 +265,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 notes,
                 vehicle,
                 type,
+                date: item.date || null,
               };
               continue; // Skip saving this one for now!
             }
@@ -263,6 +280,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 approved: false,
                 imageUrl: category === "fuel" ? imageUrl : null,
                 type,
+                timestamp: entryDate,
               },
             });
             expensesCreated++;
@@ -282,6 +300,7 @@ export async function action({ request }: ActionFunctionArgs) {
                 completedOrders,
                 driverName,
                 notes,
+                createdAt: entryDate,
               },
             });
             deliveriesCreated++;
@@ -310,6 +329,8 @@ export async function action({ request }: ActionFunctionArgs) {
       const vehicle = formData.get("vehicle")?.toString() || null;
       const senderName = formData.get("senderName")?.toString() || "Founder";
       const imageUrl = formData.get("imageUrl")?.toString() || null;
+      const customDateStr = formData.get("date")?.toString() || null;
+      const entryDate = customDateStr ? new Date(customDateStr) : new Date();
 
       await prisma.expense.create({
         data: {
@@ -321,6 +342,7 @@ export async function action({ request }: ActionFunctionArgs) {
           approved: false,
           imageUrl,
           type,
+          timestamp: entryDate,
         },
       });
       return { success: true, action: "create_expense" };
@@ -415,16 +437,84 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true };
   }
 
+  if (actionType === "create_driver") {
+    const name = formData.get("name")?.toString()?.trim() || "";
+    const phone = formData.get("phone")?.toString()?.trim() || "";
+    
+    if (!name || !phone) {
+      return { error: "Driver Name and Phone Number are required." };
+    }
+    
+    const existing = await prisma.user.findUnique({ where: { phone } });
+    if (existing) {
+      return { error: `A user with phone number "${phone}" already exists.` };
+    }
+    
+    await prisma.user.create({
+      data: {
+        name,
+        phone,
+        role: "DRIVER",
+      },
+    });
+    return { success: true, action: "create_driver" };
+  }
+
+  if (actionType === "delete_driver") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    await prisma.user.delete({
+      where: { id },
+    });
+    return { success: true, action: "delete_driver" };
+  }
+
+  if (actionType === "create_admin") {
+    const username = formData.get("username")?.toString()?.trim()?.toLowerCase() || "";
+    const password = formData.get("password")?.toString() || "";
+    
+    if (!username || !password) {
+      return { error: "Username and Password are required." };
+    }
+    
+    const existing = await prisma.adminCredential.findUnique({ where: { username } });
+    if (existing) {
+      return { error: `Admin username "${username}" is already taken.` };
+    }
+    
+    await prisma.adminCredential.create({
+      data: {
+        username,
+        passwordHash: hashPassword(password),
+      },
+    });
+    return { success: true, action: "create_admin" };
+  }
+
+  if (actionType === "delete_admin") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    
+    const count = await prisma.adminCredential.count();
+    if (count <= 1) {
+      return { error: "Cannot delete the last remaining administrator account." };
+    }
+    
+    await prisma.adminCredential.delete({
+      where: { id },
+    });
+    return { success: true, action: "delete_admin" };
+  }
+
   return null;
 }
 
 export default function Home() {
-  const { users, expenses, deliveries } = useLoaderData<typeof loader>();
+  const { users, expenses, deliveries, adminCredentials } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
 
   // Tab state & Dashboard workflow controls
-  const [activeTab, setActiveTab] = useState<"expenses" | "orders">("expenses");
+  const [activeTab, setActiveTab] = useState<"expenses" | "orders" | "users">("expenses");
+  const [userSubTab, setUserSubTab] = useState<"drivers" | "admins">("drivers");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
   const [showDeliveryDashboard, setShowDeliveryDashboard] = useState(false);
 
@@ -610,7 +700,7 @@ export default function Home() {
   };
 
   // Automated state resets upon switching tabs
-  const switchTab = (tab: "expenses" | "orders") => {
+  const switchTab = (tab: "expenses" | "orders" | "users") => {
     setActiveTab(tab);
     setShowExpenseDashboard(false);
     setShowDeliveryDashboard(false);
@@ -959,6 +1049,20 @@ export default function Home() {
             </svg>
             <span>Order Tracking</span>
           </button>
+
+          <button
+            onClick={() => switchTab("users")}
+            className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
+              activeTab === "users"
+                ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
+                : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
+            }`}
+          >
+            <svg className={`w-4 h-4 transition-colors ${activeTab === 'users' ? 'text-[#5D87FF]' : 'text-purple-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span>User Control Center</span>
+          </button>
         </nav>
 
         {/* Persistent Install App Button (Hidden when already standalone) */}
@@ -1194,7 +1298,6 @@ export default function Home() {
                                 type="file"
                                 id="ai-slip-input"
                                 accept="image/*"
-                                capture="environment"
                                 className="hidden"
                                 onChange={async (e) => {
                                   const file = e.target.files?.[0];
@@ -1366,7 +1469,6 @@ export default function Home() {
                                   type="file"
                                   id="fuel-slip-input"
                                   accept="image/*"
-                                  capture="environment"
                                   className="hidden"
                                   onChange={async (e) => {
                                     const file = e.target.files?.[0];
@@ -2553,6 +2655,272 @@ export default function Home() {
               )}
             </div>
           )}
+
+          {/* USER MANAGEMENT TAB VIEW */}
+          {activeTab === "users" && (
+            <div className="animate-fade-in space-y-6">
+                  {/* Category Header */}
+                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+                    <div>
+                      <h1 className="text-2xl font-bold tracking-tight">User Control Center</h1>
+                      <p className="text-xs text-neutral-405 dark:text-neutral-400 mt-0.5">Manage administrative credentials and driver directories</p>
+                    </div>
+                  </div>
+
+                  {/* ACTION NOTIFICATIONS */}
+                  {actionData && actionData.error && (
+                    <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
+                      ⚠️ {actionData.error}
+                    </div>
+                  )}
+                  {actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin") && (
+                    <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
+                      ✨ Operation completed successfully!
+                    </div>
+                  )}
+
+                  {/* Sub-tab Selection */}
+                  <div className="flex gap-2 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg max-w-xs">
+                    <button
+                      type="button"
+                      onClick={() => setUserSubTab("drivers")}
+                      className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                        userSubTab === "drivers"
+                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
+                          : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
+                      }`}
+                    >
+                      🚚 Fleet
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUserSubTab("admins")}
+                      className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                        userSubTab === "admins"
+                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
+                          : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
+                      }`}
+                    >
+                      🔑 Admins
+                    </button>
+                  </div>
+
+                  {/* Grid Content */}
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* LIST OF CURRENT ENTRIES */}
+                    <div className="lg:col-span-2 space-y-4">
+                      {userSubTab === "drivers" ? (
+                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl overflow-hidden shadow-sm">
+                          <div className="p-4 border-b border-[#edece9] dark:border-neutral-800 flex justify-between items-center">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-205">
+                              Registered Field Operators ({users.length})
+                            </h3>
+                          </div>
+                          {users.length === 0 ? (
+                            <div className="p-8 text-center text-xs text-neutral-400">
+                              No registered drivers found. Use the form on the right to add a driver.
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-[#edece9] dark:divide-neutral-800">
+                              {users.map((u: any) => (
+                                <div key={u.id} className="p-4 flex items-center justify-between hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-9 h-9 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/10 text-[#5D87FF] flex items-center justify-center font-bold text-sm shrink-0">
+                                      {u.name?.charAt(0) || "D"}
+                                    </div>
+                                    <div>
+                                      <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100">
+                                        {u.name}
+                                      </h4>
+                                      <p className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5">
+                                        📞 {u.phone} • Role: {u.role}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedDriverProfile(u)}
+                                      className="px-2.5 py-1.5 rounded-md text-[10px] font-bold bg-[#5D87FF]/10 text-[#5D87FF] hover:bg-[#5D87FF]/15 transition-all cursor-pointer shrink-0"
+                                    >
+                                      View Card
+                                    </button>
+                                    {u.role !== "FOUNDER" && (
+                                      <Form method="post" onSubmit={(e) => {
+                                        if (!confirm(`Are you sure you want to remove driver ${u.name}?`)) {
+                                          e.preventDefault();
+                                        }
+                                      }}>
+                                        <input type="hidden" name="_action" value="delete_driver" />
+                                        <input type="hidden" name="id" value={u.id} />
+                                        <button
+                                          type="submit"
+                                          disabled={isSubmitting}
+                                          className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
+                                          title="Remove Driver"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                          </svg>
+                                        </button>
+                                      </Form>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl overflow-hidden shadow-sm">
+                          <div className="p-4 border-b border-[#edece9] dark:border-neutral-800">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-205">
+                              Console Administrators ({adminCredentials.length})
+                            </h3>
+                          </div>
+                          {adminCredentials.length === 0 ? (
+                            <div className="p-8 text-center text-xs text-neutral-400">
+                              No administrators found.
+                            </div>
+                          ) : (
+                            <div className="divide-y divide-[#edece9] dark:divide-neutral-800">
+                              {adminCredentials.map((admin: any) => (
+                                <div key={admin.id} className="p-4 flex items-center justify-between hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
+                                  <div className="flex items-center gap-3">
+                                    <div className="w-9 h-9 rounded-full bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 flex items-center justify-center font-bold text-sm shrink-0">
+                                      🔑
+                                    </div>
+                                    <div>
+                                      <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100">
+                                        {admin.username}
+                                      </h4>
+                                      <p className="text-[10px] text-neutral-400 mt-0.5">
+                                        Registered: {new Date(admin.createdAt).toLocaleDateString()}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <Form method="post" onSubmit={(e) => {
+                                    if (adminCredentials.length <= 1) {
+                                      alert("Cannot delete the last remaining administrator account.");
+                                      e.preventDefault();
+                                      return;
+                                    }
+                                    if (!confirm(`Are you sure you want to remove administrator ${admin.username}?`)) {
+                                      e.preventDefault();
+                                    }
+                                  }}>
+                                    <input type="hidden" name="_action" value="delete_admin" />
+                                    <input type="hidden" name="id" value={admin.id} />
+                                    <button
+                                      type="submit"
+                                      disabled={isSubmitting || adminCredentials.length <= 1}
+                                      className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 disabled:hover:bg-transparent shrink-0"
+                                      title={adminCredentials.length <= 1 ? "Cannot delete the last admin" : "Remove Admin"}
+                                    >
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                      </svg>
+                                    </button>
+                                  </Form>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* FORM COLUMN */}
+                    <div>
+                      {userSubTab === "drivers" ? (
+                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
+                          <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
+                            <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-100 flex items-center gap-1.5">
+                              <span>➕</span> Register Driver Operator
+                            </h3>
+                            <p className="text-[10px] text-neutral-400 mt-0.5">Add a new delivery driver to the system roster</p>
+                          </div>
+                          <Form method="post" className="space-y-4">
+                            <input type="hidden" name="_action" value="create_driver" />
+
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Driver Name</label>
+                              <input
+                                type="text"
+                                name="name"
+                                required
+                                placeholder="John Doe"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Phone Number</label>
+                              <input
+                                type="tel"
+                                name="phone"
+                                required
+                                placeholder="+91 99999 99999"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <button
+                              type="submit"
+                              disabled={isSubmitting}
+                              className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                            >
+                              {isSubmitting ? "Registering..." : "Register Operator"}
+                            </button>
+                          </Form>
+                        </div>
+                      ) : (
+                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
+                          <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
+                            <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-100 flex items-center gap-1.5">
+                              <span>➕</span> Create Admin Account
+                            </h3>
+                            <p className="text-[10px] text-neutral-400 mt-0.5">Grant administrative console access to new operator</p>
+                          </div>
+                          <Form method="post" className="space-y-4">
+                            <input type="hidden" name="_action" value="create_admin" />
+
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Username</label>
+                              <input
+                                type="text"
+                                name="username"
+                                required
+                                placeholder="admin_name"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Password / Access Code</label>
+                              <input
+                                type="password"
+                                name="password"
+                                required
+                                placeholder="••••••••"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <button
+                              type="submit"
+                              disabled={isSubmitting}
+                              className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
+                            >
+                              {isSubmitting ? "Creating..." : "Create Administrator"}
+                            </button>
+                          </Form>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
         </div>
 
         {/* Mobile Sticky Bottom Tab Bar (Exactly 2 Tabs) */}
@@ -2899,7 +3267,6 @@ export default function Home() {
                     type="file"
                     id="modal-pending-slip-input"
                     accept="image/*"
-                    capture="environment"
                     className="hidden"
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
@@ -2936,6 +3303,7 @@ export default function Home() {
                     <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
                     <input type="hidden" name="senderName" value="AI Assistant" />
                     <input type="hidden" name="imageUrl" value={pendingSlipBase64} />
+                    <input type="hidden" name="date" value={actionData.pendingFuelExpense.date || ""} />
                     
                     <button
                       type="submit"
