@@ -42,6 +42,7 @@ async function ensureAdminExists() {
         passwordHash: hashPassword("sumitdream6969"),
       },
     });
+    console.log("🌱 Admin credentials seeded in database: sumit@6969");
   }
 }
 
@@ -68,11 +69,22 @@ export async function loginAdmin(request: Request, usernameInput: string, passwo
   await ensureAdminExists();
 
   const username = usernameInput.trim().toLowerCase();
+  const password = passwordInput; // Keep exact characters, no trimming of password to support intentional spaces
+
+  console.log(`🔑 Admin Login Attempt: Username parsed as "${username}"`);
+
   const credential = await prisma.adminCredential.findUnique({
     where: { username },
   });
 
-  if (credential && credential.passwordHash === hashPassword(passwordInput)) {
+  if (!credential) {
+    console.warn(`❌ Auth Failure: Username "${username}" not found in database.`);
+    return null;
+  }
+
+  const computedHash = hashPassword(password);
+  if (credential.passwordHash === computedHash) {
+    console.log(`✅ Auth Success: Username "${username}" matched. Session committed.`);
     const session = await getSession(request);
     session.set("isAuthenticated", true);
     return redirect("/", {
@@ -80,8 +92,12 @@ export async function loginAdmin(request: Request, usernameInput: string, passwo
         "Set-Cookie": await sessionStorage.commitSession(session),
       },
     });
+  } else {
+    console.warn(
+      `❌ Auth Failure: Password mismatch for "${username}". Input Hash: "${computedHash}", DB Hash: "${credential.passwordHash}"`
+    );
+    return null;
   }
-  return null;
 }
 
 /**

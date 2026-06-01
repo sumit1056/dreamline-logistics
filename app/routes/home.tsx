@@ -914,10 +914,7 @@ export default function Home() {
         {/* Workspace Title */}
         <div className="p-4 border-b border-neutral-200/60 dark:border-slate-800 flex justify-between items-center">
           <div className="flex items-center gap-2.5">
-            <svg className="w-5 h-5 text-neutral-800 dark:text-neutral-100 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 4h7a8 8 0 0 1 8 8 8 8 0 0 1-8 8H4z" />
-              <path d="M12 4v16" />
-            </svg>
+            <img src="/logo.png" alt="Logo" className="w-5 h-5 object-contain rounded shrink-0" />
             <span className="font-bold text-sm tracking-tight text-neutral-850 dark:text-neutral-100">
               Dreamline Logistics
             </span>

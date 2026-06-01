@@ -61,20 +61,8 @@ export default function LoginRoute() {
       <div className="w-full max-w-[420px] z-10">
         {/* Logo and Greeting Header */}
         <div className="text-center mb-8 flex flex-col items-center">
-          <div className="w-16 h-16 rounded-2xl bg-neutral-900 dark:bg-white flex items-center justify-center shadow-2xl shadow-blue-500/10 mb-4 transition-transform hover:scale-105 duration-300">
-            <svg
-              className="w-8 h-8 text-white dark:text-neutral-900"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2.5}
-                d="M13 10V3L4 14h7v7l9-11h-7z"
-              />
-            </svg>
+          <div className="w-16 h-16 rounded-2xl bg-white dark:bg-neutral-900 flex items-center justify-center shadow-2xl shadow-blue-500/10 mb-4 transition-transform hover:scale-105 duration-300 p-2 border border-neutral-100 dark:border-neutral-800">
+            <img src="/logo.png" alt="Dreamline Logo" className="w-full h-full object-contain rounded-xl" />
           </div>
           <h1 className="text-2xl font-extrabold tracking-tight text-neutral-950 dark:text-neutral-50 font-sans">
             Dreamline Logistics
