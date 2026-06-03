@@ -107,9 +107,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (deliveries.length === 0) {
     await prisma.delivery.createMany({
       data: [
-        { title: "Daily Runsheet - Vendor Shipments", category: "vendor_ship", totalOrders: 42, completedOrders: 40, driverName: "John Driver", notes: "Completed all regular shipments. 2 pending due to customer unavailability.", createdAt: new Date() },
+        { title: "Daily Runsheet - Vendor Shipments", category: "vendor_ship", totalOrders: 40, completedOrders: 40, driverName: "John Driver", notes: "Completed all regular shipments. 2 pending due to customer unavailability.", createdAt: new Date() },
         { title: "Daily Runsheet - Per Order Deliveries", category: "per_order_rate", totalOrders: 25, completedOrders: 25, driverName: "Sam Driver", notes: "All orders completed successfully.", createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        { title: "Daily Runsheet - Vendor Shipments", category: "vendor_ship", totalOrders: 50, completedOrders: 48, driverName: "John Driver", notes: "Slight delay at Shadowfax hub.", createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) },
+        { title: "Daily Runsheet - Vendor Shipments", category: "vendor_ship", totalOrders: 48, completedOrders: 48, driverName: "John Driver", notes: "Slight delay at Shadowfax hub.", createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) },
       ],
     });
     didSeed = true;
@@ -174,7 +174,7 @@ export async function action({ request }: ActionFunctionArgs) {
           If targetTable is "delivery":
           - title: (string) A clean title, e.g., "Daily Runsheet - Vendor Shipments" or "Per Order Runsheet".
           - category: (string) Must be either "vendor_ship" or "per_order_rate" based on context.
-          - totalOrders: (number) Total orders assigned to the driver (default to completedOrders if not explicitly mentioned).
+          - totalOrders: (number) Total orders completed (always default/set equal to completedOrders).
           - completedOrders: (number) Number of successfully completed orders.
           - driverName: (string) The driver's name if mentioned (e.g. "John Driver" or "Sam Driver"), otherwise "Unassigned".
           - notes: (string) Clean operational notes or remarks.
@@ -390,8 +390,8 @@ export async function action({ request }: ActionFunctionArgs) {
   if (actionType === "create_delivery") {
     const title = formData.get("title")?.toString() || "Daily Runsheet";
     const category = formData.get("category")?.toString() || "vendor_ship";
-    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || 0;
     const completedOrders = parseInt(formData.get("completedOrders")?.toString() || "0") || 0;
+    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || completedOrders;
     const driverName = formData.get("driverName")?.toString() || "Unassigned";
     const notes = formData.get("notes")?.toString() || "";
 
@@ -411,8 +411,8 @@ export async function action({ request }: ActionFunctionArgs) {
   if (actionType === "update_delivery") {
     const id = parseInt(formData.get("id")?.toString() || "0") || 0;
     const category = formData.get("category")?.toString() || "vendor_ship";
-    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || 0;
     const completedOrders = parseInt(formData.get("completedOrders")?.toString() || "0") || 0;
+    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || completedOrders;
     const driverName = formData.get("driverName")?.toString() || "Unassigned";
     const notes = formData.get("notes")?.toString() || "";
 
@@ -2052,25 +2052,7 @@ export default function Home() {
                             </select>
                           </div>
 
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-neutral-500">Total Orders Assigned</label>
-                            <input
-                              type="number"
-                              name="totalOrders"
-                              required
-                              step="1"
-                              min="0"
-                              placeholder="e.g. 50"
-                              onKeyDown={(e) => {
-                                if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
-                              }}
-                              onPaste={(e) => {
-                                const text = e.clipboardData.getData("text");
-                                if (/[.,\-+eE]/.test(text)) e.preventDefault();
-                              }}
-                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
-                            />
-                          </div>
+                          <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
                           <div className="space-y-1">
                             <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
@@ -2163,7 +2145,7 @@ export default function Home() {
                             
                             <div className="text-[11px] text-neutral-500 dark:text-neutral-400 flex justify-between gap-2 text-right">
                               <span className="truncate max-w-[140px] text-left">
-                                {del.completedOrders} / {del.totalOrders} completed
+                                {del.completedOrders} completed
                               </span>
                               <span className="text-[10px] text-neutral-400 shrink-0 font-medium">
                                 {new Date(del.createdAt).toLocaleDateString("en-US", {
@@ -2185,12 +2167,7 @@ export default function Home() {
                 /* RUNSHEET DASHBOARD VIEW MODE */
                 <div className="space-y-6">
                   {/* Daily runsheet stats cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Assigned Orders</div>
-                      <div className="text-2xl font-bold mt-1 text-neutral-900 dark:text-white">{orderCounts.totalAssigned}</div>
-                    </div>
-
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
                       <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Completed Orders</div>
                       <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">{orderCounts.totalCompleted}</div>
@@ -2356,7 +2333,6 @@ export default function Home() {
                             <th className="p-3.5">Log Date</th>
                             <th className="p-3.5">Field Operator</th>
                             <th className="p-3.5">Category</th>
-                            <th className="p-3.5 text-center">Assigned</th>
                             <th className="p-3.5 text-center">Completed</th>
                             <th className="p-3.5 text-center">Payout</th>
                             <th className="p-3.5 text-right">Actions</th>
@@ -2365,7 +2341,7 @@ export default function Home() {
                         <tbody className="divide-y divide-[#edece9] dark:divide-[#2f2f2f] text-xs">
                           {filteredDeliveries.length === 0 ? (
                             <tr>
-                              <td colSpan={7} className="p-8 text-center text-neutral-400 dark:text-neutral-500 font-medium">
+                              <td colSpan={6} className="p-8 text-center text-neutral-400 dark:text-neutral-500 font-medium">
                                 No runsheet logs found in this timeframe.
                               </td>
                             </tr>
@@ -2395,9 +2371,6 @@ export default function Home() {
                                     }`}>
                                       {del.category === "vendor_ship" ? "Vendor Ship" : "Per Order"}
                                     </span>
-                                  </td>
-                                  <td className="p-3.5 text-center font-semibold text-neutral-700 dark:text-neutral-300">
-                                    {del.totalOrders}
                                   </td>
                                   <td className="p-3.5 text-center font-semibold text-emerald-600 dark:text-emerald-400">
                                     {del.completedOrders}
@@ -2537,8 +2510,7 @@ export default function Home() {
                               
                               <div className="text-xs text-neutral-600 dark:text-neutral-300">
                                 <span className="font-semibold text-neutral-800 dark:text-neutral-100">{del.completedOrders}</span>
-                                <span className="text-neutral-400"> / {del.totalOrders} completed</span>
-                                <span className="ml-1.5 font-bold text-emerald-600 dark:text-emerald-400">({rate}%)</span>
+                                <span className="text-neutral-400"> completed</span>
                               </div>
                             </div>
 
@@ -2549,21 +2521,8 @@ export default function Home() {
                               </span>
                             </div>
 
-                            {/* Card Bottom Row: Progress & Delete */}
-                            <div className="flex justify-between items-center pt-1 border-t border-[#edece9]/30 dark:border-[#2f2f2f]/10">
-                              <div className="w-1/2 bg-neutral-100 dark:bg-neutral-800 h-1.5 rounded-full overflow-hidden">
-                                <div
-                                  className={`h-full rounded-full ${
-                                    rate === 100
-                                      ? "bg-emerald-500"
-                                      : rate >= 80
-                                      ? "bg-blue-500"
-                                      : "bg-amber-500"
-                                  }`}
-                                  style={{ width: `${rate}%` }}
-                                />
-                              </div>
-
+                            {/* Card Bottom Row: Actions */}
+                            <div className="flex justify-end items-center pt-1 border-t border-[#edece9]/30 dark:border-[#2f2f2f]/10">
                               <div className="flex items-center gap-1.5">
                                 <button
                                   type="button"
@@ -3540,42 +3499,22 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Assigned Orders */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-neutral-500">Assigned Orders</label>
-                    <input
-                      type="number"
-                      name="totalOrders"
-                      required
-                      step="1"
-                      min="0"
-                      value={editingDelivery.totalOrders}
-                      onKeyDown={(e) => {
-                        if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
-                      }}
-                      onChange={(e) => setEditingDelivery({ ...editingDelivery, totalOrders: e.target.value })}
-                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
-                    />
-                  </div>
-
-                  {/* Completed Orders */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
-                    <input
-                      type="number"
-                      name="completedOrders"
-                      required
-                      step="1"
-                      min="0"
-                      value={editingDelivery.completedOrders}
-                      onKeyDown={(e) => {
-                        if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
-                      }}
-                      onChange={(e) => setEditingDelivery({ ...editingDelivery, completedOrders: e.target.value })}
-                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
-                    />
-                  </div>
+                <div className="space-y-1">
+                  <input type="hidden" name="totalOrders" value={editingDelivery.completedOrders} />
+                  <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
+                  <input
+                    type="number"
+                    name="completedOrders"
+                    required
+                    step="1"
+                    min="0"
+                    value={editingDelivery.completedOrders}
+                    onKeyDown={(e) => {
+                      if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
+                    }}
+                    onChange={(e) => setEditingDelivery({ ...editingDelivery, completedOrders: e.target.value })}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
+                  />
                 </div>
 
                 {/* Notes/Remarks */}

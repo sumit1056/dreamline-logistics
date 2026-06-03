@@ -60,6 +60,7 @@ This log registers every major technical decision, design pattern adoption, scop
 | 2026-06-01 | AI / Temporal Logging | **AI Smart Parser Historical and Relative Date Recognition** | Upgraded the prompt instruction matrix of the Gemini Smart AI Parser to accurately parse historical and relative date inputs (e.g. yesterday, 2 days ago, 25th May) and map them into UTC ISO 8601 timestamps, allowing retroactive expense and runsheet logging. | Completed |
 | 2026-06-01 | Mobile UI/UX | **Device Image Gallery Selector Integration** | Removed camera-only hardware restrictions (`capture="environment"`) from petrol slip receipt files uploads, allowing mobile operators to capture receipts live or choose physical receipts directly from local picture galleries. | Completed |
 | 2026-06-01 | Tech Stack / Compilation | **JSX Nesting & Braces Syntax Correction** | Resolved a compilation blocker caused by missing braces at the end of the orders tracking view. Re-nested the tab blocks so the expenses, orders, and users dashboards reside as direct adjacent siblings of the main workspace container. Verified 100% stable Vite and React Router production compile. | Completed |
+| 2026-06-03 | Operational / UI Refactor | **Removed Assigned Orders & Completion Rate Metrics** | Purged the 'Total Orders Assigned' input fields from both manual and edit runsheet forms. Removed 'Assigned Orders' card, table column, progress bars, and percentage calculations from desktop and mobile views, defaulting totalOrders to completedOrders. | Completed |
 
 
 
