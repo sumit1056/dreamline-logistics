@@ -394,6 +394,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || completedOrders;
     const driverName = formData.get("driverName")?.toString() || "Unassigned";
     const notes = formData.get("notes")?.toString() || "";
+    const dateStr = formData.get("createdAt")?.toString() || null;
+    const createdAt = dateStr ? new Date(dateStr) : new Date();
 
     await prisma.delivery.create({
       data: {
@@ -403,6 +405,7 @@ export async function action({ request }: ActionFunctionArgs) {
         completedOrders,
         driverName,
         notes,
+        createdAt,
       },
     });
     return { success: true, action: "create_delivery" };
@@ -415,6 +418,8 @@ export async function action({ request }: ActionFunctionArgs) {
     const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || completedOrders;
     const driverName = formData.get("driverName")?.toString() || "Unassigned";
     const notes = formData.get("notes")?.toString() || "";
+    const dateStr = formData.get("createdAt")?.toString() || null;
+    const createdAt = dateStr ? new Date(dateStr) : undefined;
 
     await prisma.delivery.update({
       where: { id },
@@ -424,6 +429,7 @@ export async function action({ request }: ActionFunctionArgs) {
         completedOrders,
         driverName,
         notes,
+        createdAt,
       },
     });
     return { success: true };
@@ -504,6 +510,79 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true, action: "delete_admin" };
   }
 
+  if (actionType === "mark_payout_paid") {
+    const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
+    const category = formData.get("category")?.toString() || "";
+    const notes = formData.get("notes")?.toString() || "";
+    const mondayStr = formData.get("mondayStr")?.toString() || "";
+    const paymentDateStr = formData.get("paymentDate")?.toString() || null;
+    const paymentDate = paymentDateStr ? new Date(paymentDateStr) : new Date();
+
+    let expenseCategory = "other_income";
+    if (category === "vendor_ship") {
+      expenseCategory = "shadowfax";
+    } else if (category === "per_order_rate") {
+      expenseCategory = "factory";
+    }
+
+    const refTag = `[Ref: Weekly-Payout-${category === "vendor_ship" ? "VS" : "PO"}-${mondayStr}]`;
+    const finalNotes = notes ? `${notes} ${refTag}` : refTag;
+
+    // Create corresponding INCOME entry in Expense table for unified cashflow ledger
+    await prisma.expense.create({
+      data: {
+        amount,
+        category: expenseCategory,
+        notes: finalNotes,
+        vehicle: null,
+        senderName: "Founder",
+        approved: true,
+        type: "INCOME",
+        timestamp: paymentDate,
+      },
+    });
+
+    // Also persist in the Payout table for database-backed tracking
+    try {
+      const parsedMonday = new Date(mondayStr);
+      const sundayDate = new Date(parsedMonday);
+      sundayDate.setDate(parsedMonday.getDate() + 6);
+      
+      const weekIdentifier = `${mondayStr}_${category}`;
+
+      await prisma.payout.upsert({
+        where: {
+          weekIdentifier_category: {
+            weekIdentifier,
+            category,
+          },
+        },
+        update: {
+          actualAmount: amount,
+          status: "PAID",
+          paidAt: paymentDate,
+          notes,
+        },
+        create: {
+          weekIdentifier,
+          startDate: parsedMonday,
+          endDate: sundayDate,
+          category,
+          completedOrders: 0, // calculated on the fly, default to 0 here
+          calculatedAmount: amount,
+          actualAmount: amount,
+          status: "PAID",
+          paidAt: paymentDate,
+          notes,
+        },
+      });
+    } catch (err) {
+      console.error("Failed to upsert Payout tracker record:", err);
+    }
+
+    return { success: true, action: "mark_payout_paid" };
+  }
+
   return null;
 }
 
@@ -569,6 +648,14 @@ export default function Home() {
   const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
   const [showPendingModal, setShowPendingModal] = useState(false);
   const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
+
+  // Weekly Payout Tracker states
+  const [ordersViewMode, setOrdersViewMode] = useState<"form" | "dashboard" | "payouts">("form");
+  const [payoutToPay, setPayoutToPay] = useState<any | null>(null);
+  const [payAmountInput, setPayAmountInput] = useState<string>("");
+  const [payDateInput, setPayDateInput] = useState<string>("");
+  const [payNotesInput, setPayNotesInput] = useState<string>("");
+  const [payoutSuccessVisible, setPayoutSuccessVisible] = useState(false);
 
   // Local edit states
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
@@ -934,6 +1021,105 @@ export default function Home() {
     };
   }, [filteredDeliveries]);
 
+  // Weekly Payout Tracker memoized calculations
+  const weeklyPayouts = useMemo(() => {
+    const groups: {
+      [key: string]: {
+        mondayStr: string;
+        mondayDate: Date;
+        sundayDate: Date;
+        category: "vendor_ship" | "per_order_rate";
+        completedOrders: number;
+        deliveriesCount: number;
+      };
+    } = {};
+
+    deliveries.forEach((d) => {
+      const date = new Date(d.createdAt);
+      const day = date.getDay();
+      const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+      const monday = new Date(date);
+      monday.setDate(diff);
+      monday.setHours(0, 0, 0, 0);
+
+      const yyyy = monday.getFullYear();
+      const mm = String(monday.getMonth() + 1).padStart(2, "0");
+      const dd = String(monday.getDate()).padStart(2, "0");
+      const mondayStr = `${yyyy}-${mm}-${dd}`;
+
+      const key = `${mondayStr}_${d.category}`;
+
+      if (!groups[key]) {
+        const sunday = new Date(monday);
+        sunday.setDate(monday.getDate() + 6);
+        sunday.setHours(23, 59, 59, 999);
+
+        groups[key] = {
+          mondayStr,
+          mondayDate: monday,
+          sundayDate: sunday,
+          category: d.category as "vendor_ship" | "per_order_rate",
+          completedOrders: 0,
+          deliveriesCount: 0,
+        };
+      }
+
+      groups[key].completedOrders += d.completedOrders;
+      groups[key].deliveriesCount += 1;
+    });
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const list = Object.values(groups).map((group) => {
+      let calculatedPayout = 0;
+      if (group.category === "vendor_ship") {
+        calculatedPayout = 40000 + (group.completedOrders * 35);
+      } else {
+        calculatedPayout = group.completedOrders * 75;
+      }
+
+      let expectedDate = new Date(group.sundayDate);
+      if (group.category === "vendor_ship") {
+        expectedDate = new Date(group.mondayDate);
+        expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
+      } else {
+        expectedDate.setDate(group.sundayDate.getDate() + 45); // Sunday + 45 days
+      }
+      expectedDate.setHours(0, 0, 0, 0);
+
+      const refTag = `[Ref: Weekly-Payout-${group.category === "vendor_ship" ? "VS" : "PO"}-${group.mondayStr}]`;
+      
+      const matchingExpense = expenses.find(
+        (exp) => exp.type === "INCOME" && exp.notes && exp.notes.includes(refTag)
+      );
+
+      let status: "PAID" | "UNPAID" | "ONGOING" = "UNPAID";
+      if (matchingExpense) {
+        status = "PAID";
+      } else if (group.sundayDate.getTime() > today.getTime()) {
+        status = "ONGOING";
+      }
+
+      const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
+      const startStr = group.mondayDate.toLocaleDateString("en-US", formatOption);
+      const endStr = group.sundayDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      const weekLabel = `${startStr} - ${endStr}`;
+
+      return {
+        ...group,
+        calculatedPayout,
+        expectedDate,
+        status,
+        matchingExpense,
+        refTag,
+        weekLabel,
+      };
+    });
+
+    return list.sort((a, b) => b.mondayStr.localeCompare(a.mondayStr));
+  }, [deliveries, expenses]);
+
   // Reset raw inputs on action success and set fading success messages
   useEffect(() => {
     if (actionData && "success" in actionData && actionData.success) {
@@ -966,6 +1152,11 @@ export default function Home() {
         } else if (actionData.action === "create_expense") {
           setExpenseSuccessVisible(true);
           const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
+          return () => clearTimeout(timer);
+        } else if (actionData.action === "mark_payout_paid") {
+          setPayoutToPay(null);
+          setPayoutSuccessVisible(true);
+          const timer = setTimeout(() => setPayoutSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
         }
       }
@@ -1282,21 +1473,48 @@ export default function Home() {
                                     <span>⛽ Petrol Pump Slip Receipt</span>
                                   </h4>
                                 </div>
-                                <button
-                                  type="button"
-                                  onClick={() => document.getElementById("ai-slip-input")?.click()}
-                                  className="p-2.5 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                >
-                                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                                  </svg>
-                                </button>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => document.getElementById("ai-slip-input-camera")?.click()}
+                                    title="Take Photo using Camera"
+                                    className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => document.getElementById("ai-slip-input-gallery")?.click()}
+                                    title="Select from Gallery"
+                                    className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                    </svg>
+                                  </button>
+                                </div>
                               </div>
 
                               <input
                                 type="file"
-                                id="ai-slip-input"
+                                id="ai-slip-input-camera"
+                                accept="image/*"
+                                capture="environment"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) {
+                                    const compressed = await compressImage(file);
+                                    setFuelSlipBase64(compressed);
+                                  }
+                                }}
+                              />
+                              <input
+                                type="file"
+                                id="ai-slip-input-gallery"
                                 accept="image/*"
                                 className="hidden"
                                 onChange={async (e) => {
@@ -1453,21 +1671,48 @@ export default function Home() {
                                     </h4>
                                     <p className="text-[10px] text-neutral-400 mt-0.5">Attach a photo of the receipt to log fuel expense.</p>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => document.getElementById("fuel-slip-input")?.click()}
-                                    className="p-2.5 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                  >
-                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                                    </svg>
-                                  </button>
+                                  <div className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => document.getElementById("fuel-slip-input-camera")?.click()}
+                                      title="Take Photo using Camera"
+                                      className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                                    >
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                      </svg>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => document.getElementById("fuel-slip-input-gallery")?.click()}
+                                      title="Select from Gallery"
+                                      className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                                    >
+                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                      </svg>
+                                    </button>
+                                  </div>
                                 </div>
 
                                 <input
                                   type="file"
-                                  id="fuel-slip-input"
+                                  id="fuel-slip-input-camera"
+                                  accept="image/*"
+                                  capture="environment"
+                                  className="hidden"
+                                  onChange={async (e) => {
+                                    const file = e.target.files?.[0];
+                                    if (file) {
+                                      const compressed = await compressImage(file);
+                                      setFuelSlipBase64(compressed);
+                                    }
+                                  }}
+                                />
+                                <input
+                                  type="file"
+                                  id="fuel-slip-input-gallery"
                                   accept="image/*"
                                   className="hidden"
                                   onChange={async (e) => {
@@ -1982,31 +2227,47 @@ export default function Home() {
           {activeTab === "orders" && (
             <div className="animate-fade-in space-y-6">
               {/* Category Header with Toggle Dashboard */}
-              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                 <div>
-                  <h1 className="text-2xl font-bold tracking-tight">Orders Summary Board</h1>
+                  <h1 className="text-2xl font-bold tracking-tight">Order Tracking</h1>
+                  <p className="text-xs text-neutral-450 dark:text-neutral-400 mt-0.5">
+                    Log runsheets, analyze fleet performance, and audit weekly vendor/per-order payouts
+                  </p>
                 </div>
 
-                <div>
+                <div className="flex gap-1.5 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg shrink-0 w-full sm:w-auto overflow-x-auto">
                   <button
-                    onClick={() => setShowDeliveryDashboard(!showDeliveryDashboard)}
-                    className="notion-btn text-xs px-3.5 py-2 font-semibold flex items-center gap-1.5 bg-[#2383e2] hover:bg-[#1a6ab8] text-white rounded-md shadow-sm border border-transparent transition-all cursor-pointer"
+                    type="button"
+                    onClick={() => setOrdersViewMode("form")}
+                    className={`flex-1 sm:flex-none px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      ordersViewMode === "form"
+                        ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
+                        : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
+                    }`}
                   >
-                    {showDeliveryDashboard ? (
-                      <>
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
-                        </svg>
-                        <span>New Daily Entry Form</span>
-                      </>
-                    ) : (
-                      <>
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 002 2h2a2 2 0 002-2z" />
-                        </svg>
-                        <span>View Runsheets Dashboard</span>
-                      </>
-                    )}
+                    📝 Log Runsheet
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrdersViewMode("dashboard")}
+                    className={`flex-1 sm:flex-none px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      ordersViewMode === "dashboard"
+                        ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
+                        : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
+                    }`}
+                  >
+                    📊 Runsheets History
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrdersViewMode("payouts")}
+                    className={`flex-1 sm:flex-none px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                      ordersViewMode === "payouts"
+                        ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
+                        : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
+                    }`}
+                  >
+                    💰 Weekly Payouts
                   </button>
                 </div>
               </div>
@@ -2017,9 +2278,14 @@ export default function Home() {
                   ✅ Daily runsheet status logged successfully!
                 </div>
               )}
+              {payoutSuccessVisible && (
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
+                  ✅ Payout recorded and logged in ledger successfully!
+                </div>
+              )}
 
-              {/* FORM MODE (DEFAULT) */}
-              {!showDeliveryDashboard ? (
+              {/* FORM MODE */}
+              {ordersViewMode === "form" && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                   {/* Unified Dispatch Console */}
                   <div className="lg:col-span-2 space-y-6">
@@ -2039,14 +2305,14 @@ export default function Home() {
                         <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                           <div className="space-y-1">
                             <label className="text-xs font-semibold text-neutral-500">Order Category</label>
                             <select
                               name="category"
                               value={formCategory}
                               onChange={(e) => setFormCategory(e.target.value as "vendor_ship" | "per_order_rate")}
-                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer"
+                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
                             >
                               <option value="vendor_ship">Vendor Ship</option>
                               <option value="per_order_rate">Per Order Rate</option>
@@ -2071,7 +2337,18 @@ export default function Home() {
                                 const text = e.clipboardData.getData("text");
                                 if (/[.,\-+eE]/.test(text)) e.preventDefault();
                               }}
-                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
+                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <label className="text-xs font-semibold text-neutral-500">Runsheet Date</label>
+                            <input
+                              type="date"
+                              name="createdAt"
+                              required
+                              defaultValue={new Date().toISOString().split("T")[0]}
+                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
                             />
                           </div>
                         </div>
@@ -2162,8 +2439,10 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
-              ) : (
-                /* RUNSHEET DASHBOARD VIEW MODE */
+              )}
+
+              {/* RUNSHEET DASHBOARD VIEW MODE */}
+              {ordersViewMode === "dashboard" && (
                 <div className="space-y-6">
                   {/* Daily runsheet stats cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -2608,6 +2887,162 @@ export default function Home() {
                         </div>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* WEEKLY PAYOUT TRACKER BOARD */}
+              {ordersViewMode === "payouts" && (
+                <div className="space-y-6 animate-fade-in">
+                  {/* Summary Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Shadowfax)</div>
+                      <div className="text-2xl font-bold mt-1 text-[#2383e2]">
+                        ₹{weeklyPayouts
+                          .filter(w => w.category === "vendor_ship" && w.status === "UNPAID")
+                          .reduce((sum, w) => sum + w.calculatedPayout, 0)
+                          .toLocaleString()}
+                      </div>
+                    </div>
+                    
+                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Factory PO)</div>
+                      <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">
+                        ₹{weeklyPayouts
+                          .filter(w => w.category === "per_order_rate" && w.status === "UNPAID")
+                          .reduce((sum, w) => sum + w.calculatedPayout, 0)
+                          .toLocaleString()}
+                      </div>
+                    </div>
+
+                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Received (This Month)</div>
+                      <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
+                        ₹{expenses
+                          .filter(e => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory") && new Date(e.timestamp).getMonth() === new Date().getMonth())
+                          .reduce((sum, e) => sum + e.amount, 0)
+                          .toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Main Payouts Board */}
+                  <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] shadow-sm overflow-hidden">
+                    <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-neutral-900/30 flex justify-between items-center">
+                      <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
+                        Weekly Settlement Cycles
+                      </h3>
+                      <span className="text-xs text-neutral-400">Monday - Sunday cycles</span>
+                    </div>
+
+                    <div className="divide-y divide-[#edece9]/60 dark:divide-neutral-800/60">
+                      {weeklyPayouts.length === 0 ? (
+                        <div className="p-8 text-center text-neutral-400 italic text-xs">
+                          No runsheet logs recorded yet to calculate weekly payouts.
+                        </div>
+                      ) : (
+                        weeklyPayouts.map((w) => {
+                          const isOverdue = w.status === "UNPAID" && new Date().getTime() > new Date(w.expectedDate).getTime();
+                          const diffTime = new Date(w.expectedDate).getTime() - new Date().getTime();
+                          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+                          return (
+                            <div 
+                              key={`${w.mondayStr}_${w.category}`} 
+                              className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/10 transition-colors"
+                            >
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                                    w.category === "vendor_ship"
+                                      ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
+                                      : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
+                                  }`}>
+                                    {w.category === "vendor_ship" ? "Vendor Ship (Shadowfax)" : "Per Order Rate (Factory)"}
+                                  </span>
+
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                                    w.status === "PAID"
+                                      ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-200/30 dark:border-emerald-900/30"
+                                      : w.status === "ONGOING"
+                                      ? "bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/30 dark:border-amber-900/30"
+                                      : "bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-200/30 dark:border-rose-900/30"
+                                  }`}>
+                                    {w.status === "PAID" ? "PAID" : w.status === "ONGOING" ? "IN PROGRESS" : "UNPAID"}
+                                  </span>
+                                </div>
+
+                                <div className="text-sm font-bold text-neutral-800 dark:text-neutral-100">
+                                  {w.weekLabel}
+                                </div>
+
+                                <div className="text-xs text-neutral-450 dark:text-neutral-400 flex flex-wrap items-center gap-x-3 gap-y-1 font-medium">
+                                  <span>📊 {w.deliveriesCount} runsheets</span>
+                                  <span>•</span>
+                                  <span>📦 {w.completedOrders} completed orders</span>
+                                </div>
+                              </div>
+
+                              <div className="flex flex-col md:items-end justify-center gap-2">
+                                <div className="text-left md:text-right">
+                                  <div className="text-xs text-neutral-400 font-semibold uppercase">Calculated Payout</div>
+                                  <div className="text-lg font-extrabold text-neutral-900 dark:text-neutral-50">
+                                    ₹{w.calculatedPayout.toLocaleString()}
+                                  </div>
+                                  {w.status === "PAID" && w.matchingExpense && (
+                                    <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                      Received: ₹{w.matchingExpense.amount.toLocaleString()}
+                                      {w.matchingExpense.amount !== w.calculatedPayout && (
+                                        <span className="text-amber-600 dark:text-amber-400 ml-1">
+                                          (Diff: ₹{(w.matchingExpense.amount - w.calculatedPayout).toLocaleString()})
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="text-[11px] text-neutral-500 dark:text-neutral-400 font-medium">
+                                  {w.status === "PAID" && w.matchingExpense ? (
+                                    <div className="flex flex-col md:items-end gap-0.5">
+                                      <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
+                                        ✨ Recorded in Ledger on {new Date(w.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                      </span>
+                                      {w.matchingExpense.notes && w.matchingExpense.notes.replace(/\[Ref: Weekly-Payout-.*\]/, '').trim() && (
+                                        <span className="text-[10px] text-neutral-400 italic max-w-[200px] text-right truncate" title={w.matchingExpense.notes.replace(/\[Ref: Weekly-Payout-.*\]/, '').trim()}>
+                                          Note: "{w.matchingExpense.notes.replace(/\[Ref: Weekly-Payout-.*\]/, '').trim()}"
+                                        </span>
+                                      )}
+                                    </div>
+                                  ) : w.status === "ONGOING" ? (
+                                    <span className="text-amber-600 dark:text-amber-450 font-bold">
+                                      Settlement expected on {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                    </span>
+                                  ) : (
+                                    <span className={isOverdue ? "text-rose-600 dark:text-rose-450 font-extrabold" : "text-neutral-550 dark:text-neutral-350"}>
+                                      📅 Due date: {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} 
+                                      {isOverdue ? " (Overdue!)" : ` (in ${diffDays} days)`}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {w.status === "UNPAID" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPayoutToPay(w);
+                                    }}
+                                    className="mt-1 px-3 py-1.5 text-xs font-bold bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 rounded-md shadow-sm transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                                  >
+                                    Check & Record Payout
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -3207,23 +3642,49 @@ export default function Home() {
                     <div className="text-center space-y-2.5">
                       <div className="text-3xl animate-bounce">📸</div>
                       <p className="text-[11px] text-neutral-400 font-medium">Please snap or upload the receipt slip</p>
-                      <button
-                        type="button"
-                        onClick={() => document.getElementById("modal-pending-slip-input")?.click()}
-                        className="notion-btn text-[11px] px-3.5 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-lg font-bold transition-all shadow-md cursor-pointer inline-flex items-center gap-1.5"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                        </svg>
-                        Snap Receipt Photo
-                      </button>
+                      <div className="flex flex-wrap justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => document.getElementById("modal-pending-slip-input-camera")?.click()}
+                          className="notion-btn text-[11px] px-3 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-lg font-bold transition-all shadow-md cursor-pointer inline-flex items-center gap-1"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                          </svg>
+                          Snap Photo
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => document.getElementById("modal-pending-slip-input-gallery")?.click()}
+                          className="notion-btn text-[11px] px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-805 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200 rounded-lg font-bold transition-all shadow-md cursor-pointer inline-flex items-center gap-1 border border-neutral-200 dark:border-neutral-800"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                          </svg>
+                          From Gallery
+                        </button>
+                      </div>
                     </div>
                   )}
 
                   <input
                     type="file"
-                    id="modal-pending-slip-input"
+                    id="modal-pending-slip-input-camera"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const compressed = await compressImage(file);
+                        setPendingSlipBase64(compressed);
+                      }
+                    }}
+                  />
+                  <input
+                    type="file"
+                    id="modal-pending-slip-input-gallery"
                     accept="image/*"
                     className="hidden"
                     onChange={async (e) => {
@@ -3470,6 +3931,19 @@ export default function Home() {
                   </select>
                 </div>
 
+                {/* Runsheet Date Selection */}
+                <div className="space-y-1">
+                  <label className="text-xs font-semibold text-neutral-500">Runsheet Date</label>
+                  <input
+                    type="date"
+                    name="createdAt"
+                    required
+                    value={editingDelivery.createdAt ? new Date(editingDelivery.createdAt).toISOString().split("T")[0] : ""}
+                    onChange={(e) => setEditingDelivery({ ...editingDelivery, createdAt: e.target.value })}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
+                  />
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   {/* Category Select */}
                   <div className="space-y-1">
@@ -3543,6 +4017,118 @@ export default function Home() {
                     className="flex-1 py-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all cursor-pointer text-center"
                   >
                     Save Changes
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* Payout Confirmation Modal */}
+        {payoutToPay && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
+            <div className="notion-card w-full max-w-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] p-6 shadow-2xl space-y-5 rounded-2xl animate-scale-up">
+              
+              <div className="pb-3 border-b border-[#edece9] dark:border-[#2f2f2f] flex justify-between items-start">
+                <div>
+                  <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
+                    Verify & Confirm Payout Receipt
+                  </h3>
+                  <p className="text-[11px] text-neutral-450 mt-1 font-semibold">
+                    Ensure the received amount matches the week's calculated payout before marking as paid.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPayoutToPay(null)}
+                  className="p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-all cursor-pointer"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 space-y-3">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-neutral-500 font-semibold">Settlement Period:</span>
+                  <span className="text-neutral-800 dark:text-neutral-200 font-bold">{payoutToPay.weekLabel}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-neutral-500 font-semibold">Category Type:</span>
+                  <span className="text-neutral-800 dark:text-neutral-200 font-bold capitalize">
+                    {payoutToPay.category === "vendor_ship" ? "Shadowfax (Vendor Ship)" : "Factory (Per Order)"}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-neutral-500 font-semibold">Expected On:</span>
+                  <span className="text-neutral-850 dark:text-neutral-150 font-semibold flex items-center">
+                    {new Date(payoutToPay.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                  </span>
+                </div>
+                <div className="pt-2 border-t border-neutral-200/50 dark:border-neutral-800/50 flex justify-between items-center text-sm">
+                  <span className="text-neutral-500 font-bold">Calculated Amount:</span>
+                  <span className="text-emerald-600 dark:text-emerald-400 font-extrabold text-base">
+                    ₹{payoutToPay.calculatedPayout.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              <Form method="post" className="space-y-4">
+                <input type="hidden" name="_action" value="mark_payout_paid" />
+                <input type="hidden" name="mondayStr" value={payoutToPay.mondayStr} />
+                <input type="hidden" name="category" value={payoutToPay.category} />
+
+                {/* Amount Cross-Check */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Received Amount (₹)</label>
+                  <input
+                    type="number"
+                    name="amount"
+                    required
+                    step="any"
+                    min="0"
+                    defaultValue={payoutToPay.calculatedPayout}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
+                  />
+                </div>
+
+                {/* Payment Date Selection */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Date Received</label>
+                  <input
+                    type="date"
+                    name="paymentDate"
+                    required
+                    defaultValue={new Date().toISOString().split("T")[0]}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
+                  />
+                </div>
+
+                {/* Optional reference notes */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Transaction Notes (Optional)</label>
+                  <textarea
+                    name="notes"
+                    rows={2}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
+                    placeholder="e.g. Bank Ref #, cross check adjustments..."
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => setPayoutToPay(null)}
+                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
+                  >
+                    Confirm & Record
                   </button>
                 </div>
               </Form>
