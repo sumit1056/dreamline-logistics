@@ -2036,9 +2036,10 @@ export default function Home() {
 
                         <input type="hidden" name="title" value="Daily Runsheet Summary" />
                         <input type="hidden" name="driverName" value={users.find(u => u.role === "DRIVER")?.name || "John Driver"} />
+                        <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
 
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                           <div className="space-y-1">
                             <label className="text-xs font-semibold text-neutral-500">Order Category</label>
                             <select
@@ -2051,8 +2052,6 @@ export default function Home() {
                               <option value="per_order_rate">Per Order Rate</option>
                             </select>
                           </div>
-
-                          <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
                           <div className="space-y-1">
                             <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
