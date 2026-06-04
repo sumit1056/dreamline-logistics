@@ -67,7 +67,13 @@ import { requireAdmin, hashPassword } from "../session.server";
 
 // Server Loader - Parallelized database queries (cuts Neon cloud DB lag by 66%)
 export async function loader({ request }: LoaderFunctionArgs) {
-  await requireAdmin(request);
+  const session = await requireAdmin(request);
+  const loggedInUser = {
+    name: session.get("userName") || "User",
+    role: session.get("userRole") || "ADMIN",
+    phone: session.get("userPhone") || null,
+  };
+
   let [users, expenses, deliveries, adminCredentials] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
@@ -127,7 +133,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     });
   }
 
-  return { users, expenses, deliveries, adminCredentials };
+  return { users, expenses, deliveries, adminCredentials, loggedInUser };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -446,6 +452,9 @@ export async function action({ request }: ActionFunctionArgs) {
   if (actionType === "create_driver") {
     const name = formData.get("name")?.toString()?.trim() || "";
     const phone = formData.get("phone")?.toString()?.trim() || "";
+    const password = formData.get("password")?.toString() || "";
+    const vehicleNumber = formData.get("vehicleNumber")?.toString()?.trim() || null;
+    const loginEnabled = formData.get("loginEnabled") === "true" || formData.get("loginEnabled") === "on";
     
     if (!name || !phone) {
       return { error: "Driver Name and Phone Number are required." };
@@ -461,9 +470,25 @@ export async function action({ request }: ActionFunctionArgs) {
         name,
         phone,
         role: "DRIVER",
+        passwordHash: password ? hashPassword(password) : null,
+        vehicleNumber,
+        loginEnabled,
       },
     });
     return { success: true, action: "create_driver" };
+  }
+
+  if (actionType === "toggle_driver_login") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      return { error: "User not found." };
+    }
+    await prisma.user.update({
+      where: { id },
+      data: { loginEnabled: !user.loginEnabled },
+    });
+    return { success: true, action: "toggle_driver_login" };
   }
 
   if (actionType === "delete_driver") {
@@ -604,7 +629,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Home() {
-  const { users, expenses, deliveries, adminCredentials } = useLoaderData<typeof loader>();
+  const { users, expenses, deliveries, adminCredentials, loggedInUser } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
 
@@ -613,6 +638,16 @@ export default function Home() {
   const [userSubTab, setUserSubTab] = useState<"drivers" | "admins">("drivers");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
   const [showDeliveryDashboard, setShowDeliveryDashboard] = useState(false);
+  const [driverPassword, setDriverPassword] = useState("");
+
+  const generateRandomPassword = () => {
+    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%";
+    let pwd = "";
+    for (let i = 0; i < 10; i++) {
+      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    setDriverPassword(pwd);
+  };
 
   // Timeframe filter state
   const [expenseFilter, setExpenseFilter] = useState<"ALL" | "YEAR" | "MONTH" | "TODAY" | "CUSTOM">("ALL");
@@ -720,6 +755,13 @@ export default function Home() {
       }
     }
   }, []);
+
+  // Redirect driver role away from user control center if they try to access it
+  useEffect(() => {
+    if (loggedInUser?.role === "DRIVER" && activeTab === "users") {
+      setActiveTab("expenses");
+    }
+  }, [loggedInUser, activeTab]);
 
   // PWA Install Prompt & Compatibility Logic
   useEffect(() => {
@@ -1357,19 +1399,21 @@ export default function Home() {
             <span>Order Tracking</span>
           </button>
 
-          <button
-            onClick={() => switchTab("users")}
-            className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
-              activeTab === "users"
-                ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
-                : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
-            }`}
-          >
-            <svg className={`w-4 h-4 transition-colors ${activeTab === 'users' ? 'text-[#5D87FF]' : 'text-purple-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            <span>User Control Center</span>
-          </button>
+          {loggedInUser?.role !== "DRIVER" && (
+            <button
+              onClick={() => switchTab("users")}
+              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
+                activeTab === "users"
+                  ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
+                  : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
+              }`}
+            >
+              <svg className={`w-4 h-4 transition-colors ${activeTab === 'users' ? 'text-[#5D87FF]' : 'text-purple-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              <span>User Control Center</span>
+            </button>
+          )}
         </nav>
 
         {/* Persistent Install App Button (Hidden when already standalone) */}
@@ -3225,7 +3269,7 @@ export default function Home() {
                       ⚠️ {actionData.error}
                     </div>
                   )}
-                  {actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin") && (
+                  {actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin" || actionData.action === "toggle_driver_login") && (
                     <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
                       ✨ Operation completed successfully!
                     </div>
@@ -3275,21 +3319,33 @@ export default function Home() {
                           ) : (
                             <div className="divide-y divide-[#edece9] dark:divide-neutral-800">
                               {users.map((u: any) => (
-                                <div key={u.id} className="p-4 flex items-center justify-between hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
+                                <div key={u.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
                                   <div className="flex items-center gap-3">
                                     <div className="w-9 h-9 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/10 text-[#5D87FF] flex items-center justify-center font-bold text-sm shrink-0">
                                       {u.name?.charAt(0) || "D"}
                                     </div>
                                     <div>
-                                      <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100">
+                                      <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-2 flex-wrap">
                                         {u.name}
+                                        {u.role === "DRIVER" && (
+                                          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
+                                            u.loginEnabled 
+                                              ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/20 dark:text-emerald-400" 
+                                              : "bg-rose-50 text-rose-600 dark:bg-rose-950/20 dark:text-rose-400"
+                                          }`}>
+                                            {u.loginEnabled ? "Login Allowed" : "Login Blocked"}
+                                          </span>
+                                        )}
                                       </h4>
-                                      <p className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5">
-                                        📞 {u.phone} • Role: {u.role}
-                                      </p>
+                                      <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5">
+                                        <div>📞 {u.phone} • 🚗 {u.vehicleNumber || "No Vehicle Number"}</div>
+                                        {u.role === "DRIVER" && !u.passwordHash && (
+                                          <div className="text-rose-500 font-semibold text-[9px]">⚠️ No password set! Admin needs to set one.</div>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
                                     <button
                                       type="button"
                                       onClick={() => setSelectedDriverProfile(u)}
@@ -3298,24 +3354,41 @@ export default function Home() {
                                       View Card
                                     </button>
                                     {u.role !== "FOUNDER" && (
-                                      <Form method="post" onSubmit={(e) => {
-                                        if (!confirm(`Are you sure you want to remove driver ${u.name}?`)) {
-                                          e.preventDefault();
-                                        }
-                                      }}>
-                                        <input type="hidden" name="_action" value="delete_driver" />
-                                        <input type="hidden" name="id" value={u.id} />
-                                        <button
-                                          type="submit"
-                                          disabled={isSubmitting}
-                                          className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
-                                          title="Remove Driver"
-                                        >
-                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                          </svg>
-                                        </button>
-                                      </Form>
+                                      <>
+                                        <Form method="post" className="shrink-0">
+                                          <input type="hidden" name="_action" value="toggle_driver_login" />
+                                          <input type="hidden" name="id" value={u.id} />
+                                          <button
+                                            type="submit"
+                                            disabled={isSubmitting}
+                                            className={`px-2.5 py-1.5 rounded-md text-[10px] font-bold transition-all cursor-pointer ${
+                                              u.loginEnabled
+                                                ? "bg-amber-50 hover:bg-amber-100 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400 dark:hover:bg-amber-950/40"
+                                                : "bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/20 dark:text-emerald-400 dark:hover:bg-emerald-950/40"
+                                            }`}
+                                          >
+                                            {u.loginEnabled ? "Block Login" : "Allow Login"}
+                                          </button>
+                                        </Form>
+                                        <Form method="post" className="shrink-0" onSubmit={(e) => {
+                                          if (!confirm(`Are you sure you want to remove driver ${u.name}?`)) {
+                                            e.preventDefault();
+                                          }
+                                        }}>
+                                          <input type="hidden" name="_action" value="delete_driver" />
+                                          <input type="hidden" name="id" value={u.id} />
+                                          <button
+                                            type="submit"
+                                            disabled={isSubmitting}
+                                            className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
+                                            title="Remove Driver"
+                                          >
+                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                            </svg>
+                                          </button>
+                                        </Form>
+                                      </>
                                     )}
                                   </div>
                                 </div>
@@ -3415,6 +3488,50 @@ export default function Home() {
                                 placeholder="+91 99999 99999"
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
                               />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Vehicle Number</label>
+                              <input
+                                type="text"
+                                name="vehicleNumber"
+                                placeholder="MH-12-AB-1234"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500 flex justify-between items-center">
+                                <span>Password</span>
+                                <button
+                                  type="button"
+                                  onClick={generateRandomPassword}
+                                  className="text-[10px] text-[#5D87FF] hover:underline font-bold"
+                                >
+                                  ⚡ Generate Password
+                                </button>
+                              </label>
+                              <input
+                                type="text"
+                                name="password"
+                                value={driverPassword}
+                                onChange={(e) => setDriverPassword(e.target.value)}
+                                placeholder="Secure password"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 font-mono focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <div className="flex items-center gap-2 py-1">
+                              <input
+                                type="checkbox"
+                                name="loginEnabled"
+                                id="loginEnabled"
+                                defaultChecked
+                                className="w-4 h-4 text-[#5D87FF] border-neutral-300 rounded focus:ring-[#5D87FF]"
+                              />
+                              <label htmlFor="loginEnabled" className="text-xs font-semibold text-neutral-600 dark:text-neutral-300 select-none">
+                                Enable dashboard login
+                              </label>
                             </div>
 
                             <button
@@ -3545,15 +3662,27 @@ export default function Home() {
                     <span>Fleet Assignment:</span>
                     <span className="font-semibold text-neutral-700 dark:text-neutral-300">Dreamline Primary</span>
                   </div>
-                  <div className="flex justify-between">
+                   <div className="flex justify-between">
                     <span>Contact:</span>
                     <span className="font-semibold text-neutral-700 dark:text-neutral-300">
                       {selectedDriverProfile.phone || "+91 88888 88888"}
                     </span>
                   </div>
                   <div className="flex justify-between">
+                    <span>Vehicle Number:</span>
+                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
+                      {selectedDriverProfile.vehicleNumber || "Not Set"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Login Status:</span>
+                    <span className={`font-semibold ${selectedDriverProfile.loginEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-450"}`}>
+                      {selectedDriverProfile.loginEnabled ? "Allowed" : "Blocked"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
                     <span>Role:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">Field Operator</span>
+                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">{selectedDriverProfile.role}</span>
                   </div>
                 </div>
               </div>

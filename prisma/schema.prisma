@@ -11,11 +11,14 @@ datasource db {
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  name      String
-  phone     String   @unique
-  role      String   @default("DRIVER") // "FOUNDER", "DRIVER"
-  createdAt DateTime @default(now())
+  id            Int      @id @default(autoincrement())
+  name          String
+  phone         String   @unique
+  role          String   @default("DRIVER") // "FOUNDER", "DRIVER"
+  passwordHash  String?
+  vehicleNumber String?
+  loginEnabled  Boolean  @default(true)
+  createdAt     DateTime @default(now())
 }
 
 model Expense {

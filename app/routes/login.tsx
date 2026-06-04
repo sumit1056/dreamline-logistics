@@ -42,6 +42,10 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: "Invalid administrative credentials. Access Denied." };
   }
 
+  if (typeof redirectResponse === "object" && "error" in redirectResponse) {
+    return { error: redirectResponse.error };
+  }
+
   return redirectResponse;
 }
 

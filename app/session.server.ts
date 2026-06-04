@@ -68,36 +68,73 @@ export async function requireAdmin(request: Request) {
 export async function loginAdmin(request: Request, usernameInput: string, passwordInput: string) {
   await ensureAdminExists();
 
-  const username = usernameInput.trim().toLowerCase();
-  const password = passwordInput; // Keep exact characters, no trimming of password to support intentional spaces
+  const username = usernameInput.trim();
+  const password = passwordInput; // Keep exact characters
 
-  console.log(`🔑 Admin Login Attempt: Username parsed as "${username}"`);
+  console.log(`🔑 Login Attempt: "${username}"`);
 
+  // 1. Try AdminCredential
   const credential = await prisma.adminCredential.findUnique({
-    where: { username },
+    where: { username: username.toLowerCase() },
   });
 
-  if (!credential) {
-    console.warn(`❌ Auth Failure: Username "${username}" not found in database.`);
-    return null;
+  if (credential) {
+    const computedHash = hashPassword(password);
+    if (credential.passwordHash === computedHash) {
+      console.log(`✅ Auth Success: Admin "${username}" matched. Session committed.`);
+      const session = await getSession(request);
+      session.set("isAuthenticated", true);
+      session.set("userRole", "ADMIN");
+      session.set("userName", credential.username);
+      return redirect("/", {
+        headers: {
+          "Set-Cookie": await sessionStorage.commitSession(session),
+        },
+      });
+    } else {
+      console.warn(`❌ Auth Failure: Password mismatch for admin "${username}".`);
+      return null;
+    }
   }
 
-  const computedHash = hashPassword(password);
-  if (credential.passwordHash === computedHash) {
-    console.log(`✅ Auth Success: Username "${username}" matched. Session committed.`);
-    const session = await getSession(request);
-    session.set("isAuthenticated", true);
-    return redirect("/", {
-      headers: {
-        "Set-Cookie": await sessionStorage.commitSession(session),
-      },
-    });
-  } else {
-    console.warn(
-      `❌ Auth Failure: Password mismatch for "${username}". Input Hash: "${computedHash}", DB Hash: "${credential.passwordHash}"`
-    );
-    return null;
+  // 2. Try User (Driver or Founder)
+  const user = await prisma.user.findUnique({
+    where: { phone: username },
+  });
+
+  if (user) {
+    if (!user.loginEnabled && user.role !== "FOUNDER") {
+      console.warn(`❌ Auth Failure: Operator login disabled for phone "${username}".`);
+      return { error: "Login disabled for this account. Please contact administrator." };
+    }
+
+    if (!user.passwordHash) {
+      console.warn(`❌ Auth Failure: No password set for operator phone "${username}".`);
+      return { error: "No login password set. Please contact administrator." };
+    }
+
+    const computedHash = hashPassword(password);
+    if (user.passwordHash === computedHash) {
+      console.log(`✅ Auth Success: Operator "${user.name}" matched. Session committed.`);
+      const session = await getSession(request);
+      session.set("isAuthenticated", true);
+      session.set("userRole", user.role); // "DRIVER" or "FOUNDER"
+      session.set("userName", user.name);
+      session.set("userPhone", user.phone);
+      session.set("userId", user.id);
+      return redirect("/", {
+        headers: {
+          "Set-Cookie": await sessionStorage.commitSession(session),
+        },
+      });
+    } else {
+      console.warn(`❌ Auth Failure: Password mismatch for operator phone "${username}".`);
+      return null;
+    }
   }
+
+  console.warn(`❌ Auth Failure: Username/Phone "${username}" not found in database.`);
+  return null;
 }
 
 /**
