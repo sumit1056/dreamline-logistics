@@ -2505,13 +2505,13 @@ export default function Home() {
                         <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
 
-                        <div className={`grid grid-cols-1 gap-4 ${drivers.length > 1 ? "sm:grid-cols-2 lg:grid-cols-4" : "sm:grid-cols-3"}`}>
+                        <div className={`grid grid-cols-1 gap-5 ${drivers.length > 1 ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
                           {drivers.length > 1 && (
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Field Operator</label>
+                            <div className="space-y-1 flex flex-col">
+                              <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Field Operator</label>
                               <select
                                 name="driverName"
-                                className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
+                                className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
                               >
                                 {drivers.map((d: any) => (
                                   <option key={d.id} value={d.name}>
@@ -2522,21 +2522,21 @@ export default function Home() {
                             </div>
                           )}
 
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-neutral-500">Order Category</label>
+                          <div className="space-y-1 flex flex-col">
+                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Order Category</label>
                             <select
                               name="category"
                               value={formCategory}
                               onChange={(e) => setFormCategory(e.target.value as "vendor_ship" | "per_order_rate")}
-                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
+                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
                             >
                               <option value="vendor_ship">🚚 Shadowfax (Weekly Plan)</option>
                               <option value="per_order_rate">🚚 Shadowfax (45-Day Plan)</option>
                             </select>
                           </div>
 
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
+                          <div className="space-y-1 flex flex-col">
+                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Completed Orders</label>
                             <input
                               type="number"
                               name="completedOrders"
@@ -2553,18 +2553,18 @@ export default function Home() {
                                 const text = e.clipboardData.getData("text");
                                 if (/[.,\-+eE]/.test(text)) e.preventDefault();
                               }}
-                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
+                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none font-semibold shadow-sm"
                             />
                           </div>
 
-                          <div className="space-y-1">
-                            <label className="text-xs font-semibold text-neutral-500">Runsheet Date</label>
+                          <div className="space-y-1 flex flex-col">
+                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Runsheet Date</label>
                             <input
                               type="date"
                               name="createdAt"
                               required
                               defaultValue={new Date().toISOString().split("T")[0]}
-                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
+                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
                             />
                           </div>
                         </div>
