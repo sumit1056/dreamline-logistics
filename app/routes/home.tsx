@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { useLoaderData, Form, useNavigation, useActionData } from "react-router";
+import { useLoaderData, Form, useNavigation, useActionData, useSubmit } from "react-router";
 import type { Route } from "./+types/home";
 import { prisma } from "../db.server";
 
@@ -633,6 +633,41 @@ export default function Home() {
   const drivers = users.filter((u: any) => u.role === "DRIVER");
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
+  const submit = useSubmit();
+
+  const [deliveryDriverFilter, setDeliveryDriverFilter] = useState<string>("ALL");
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [customDialog, setCustomDialog] = useState<{
+    isOpen: boolean;
+    type: "alert" | "confirm";
+    title: string;
+    message: string;
+    onConfirm?: () => void;
+  }>({
+    isOpen: false,
+    type: "alert",
+    title: "",
+    message: "",
+  });
+
+  const triggerAlert = (title: string, message: string) => {
+    setCustomDialog({
+      isOpen: true,
+      type: "alert",
+      title,
+      message,
+    });
+  };
+
+  const triggerConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setCustomDialog({
+      isOpen: true,
+      type: "confirm",
+      title,
+      message,
+      onConfirm,
+    });
+  };
 
   // Tab state & Dashboard workflow controls
   const [activeTab, setActiveTab] = useState<"expenses" | "orders" | "users">("expenses");
@@ -821,7 +856,10 @@ export default function Home() {
 
   const handleInstallApp = async () => {
     if (!deferredPrompt) {
-      alert("To install: tap your browser's menu button and select 'Add to Home screen' or 'Install App'.");
+      triggerAlert(
+        "Installation Instructions",
+        "To install: tap your browser's menu button and select 'Add to Home screen' or 'Install App'."
+      );
       return;
     }
     deferredPrompt.prompt();
@@ -960,6 +998,11 @@ export default function Home() {
   // Filtered Deliveries
   const filteredDeliveries = useMemo(() => {
     return deliveries.filter((del) => {
+      // 0. Filter by Driver
+      if (deliveryDriverFilter !== "ALL" && del.driverName !== deliveryDriverFilter) {
+        return false;
+      }
+
       // 1. First apply Category filter
       if (deliveryCategoryFilter === "VENDOR_SHIP" && del.category !== "vendor_ship") {
         return false;
@@ -1008,7 +1051,7 @@ export default function Home() {
 
       return true;
     });
-  }, [deliveries, deliveryFilter, deliveryCategoryFilter, selectedDeliveryYear, selectedDeliveryMonth, customDeliveryStartDate, customDeliveryEndDate]);
+  }, [deliveries, deliveryFilter, deliveryCategoryFilter, selectedDeliveryYear, selectedDeliveryMonth, customDeliveryStartDate, customDeliveryEndDate, deliveryDriverFilter]);
 
   // Paginated sublists
   const totalExpensePages = Math.max(1, Math.ceil(filteredExpenses.length / EXPENSE_PAGE_SIZE));
@@ -1460,7 +1503,10 @@ export default function Home() {
                 } else if (isIOS) {
                   // Keep banner open with iOS instructions
                 } else {
-                  alert("To install: tap your browser's menu (three vertical dots in Chrome) and select 'Add to Home screen' or 'Install App'.");
+                  triggerAlert(
+                    "Installation Instructions",
+                    "To install: tap your browser's menu (three vertical dots in Chrome) and select 'Add to Home screen' or 'Install App'."
+                  );
                 }
               }}
               className="w-full py-2 text-xs font-bold text-[#5D87FF] hover:text-[#4570EA] bg-[#5D87FF]/10 hover:bg-[#5D87FF]/15 border border-[#5D87FF]/20 dark:border-[#5D87FF]/35 rounded-md flex items-center justify-center gap-1.5 cursor-pointer transition-all shadow-sm"
@@ -2244,20 +2290,24 @@ export default function Home() {
                                     >
                                       Edit
                                     </button>
-                                    <Form method="post" style={{ display: "inline" }} onSubmit={(e) => {
-                                      if (!confirm("Are you sure you want to permanently delete this log?")) {
-                                        e.preventDefault();
-                                      }
-                                    }}>
-                                      <input type="hidden" name="_action" value="reject_expense" />
-                                      <input type="hidden" name="id" value={exp.id} />
-                                      <button
-                                        type="submit"
-                                        className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 cursor-pointer"
-                                      >
-                                        Delete
-                                      </button>
-                                    </Form>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        triggerConfirm(
+                                          "Delete Log?",
+                                          "Are you sure you want to permanently delete this log?",
+                                          () => {
+                                            const fd = new FormData();
+                                            fd.append("_action", "reject_expense");
+                                            fd.append("id", exp.id.toString());
+                                            submit(fd, { method: "post" });
+                                          }
+                                        );
+                                      }}
+                                      className="px-2 py-0.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 cursor-pointer text-[10px]"
+                                    >
+                                      Delete
+                                    </button>
                                   </div>
                                 </td>
                               </tr>
@@ -2423,9 +2473,7 @@ export default function Home() {
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                 <div>
                   <h1 className="text-2xl font-bold tracking-tight">Order Tracking</h1>
-                  <p className="text-xs text-neutral-450 dark:text-neutral-400 mt-0.5">
-                    Log runsheets, analyze fleet performance, and audit weekly vendor/per-order payouts
-                  </p>
+                  {/* Small subheader description removed */}
                 </div>
 
                 <div className="flex gap-1.5 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg shrink-0 w-full sm:w-auto overflow-x-auto">
@@ -2619,7 +2667,7 @@ export default function Home() {
                           <div
                             key={del.id}
                             onClick={() => {
-                              const driverInfo = users.find(u => u.role === "DRIVER") || { name: "John Driver", phone: "+91 88888 88888" };
+                              const driverInfo = users.find(u => u.name === del.driverName && u.role === "DRIVER") || { name: del.driverName, phone: "N/A" };
                               setSelectedDriverProfile(driverInfo);
                             }}
                             className="flex flex-col gap-1.5 p-3 hover:bg-[#fbfbfa] dark:hover:bg-[#202020]/40 rounded-lg transition-all border border-transparent hover:border-[#edece9] dark:hover:border-[#2f2f2f] cursor-pointer"
@@ -2815,6 +2863,26 @@ export default function Home() {
                         ))}
                       </div>
                     </div>
+
+                    {/* Driver Selector Row */}
+                    <div className="flex flex-col md:flex-row md:items-center gap-3 w-full border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30 pt-3">
+                      <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Driver:</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={deliveryDriverFilter}
+                          onChange={(e) => setDeliveryDriverFilter(e.target.value)}
+                          className="bg-white dark:bg-[#1a1a1a] border border-[#edece9] dark:border-neutral-800 text-xs font-semibold text-neutral-700 dark:text-neutral-300 rounded-md px-3 py-1.5 outline-none cursor-pointer"
+                        >
+                          <option value="ALL">All Field Operators / Drivers</option>
+                          {Array.from(new Set([
+                            ...drivers.map((d: any) => d.name),
+                            ...deliveries.map((del: any) => del.driverName)
+                          ])).filter(Boolean).map((name) => (
+                            <option key={name} value={name}>{name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
                   </div>
 
                   {/* Table of Daily Runsheet Logs (Desktop Only) */}
@@ -2880,20 +2948,24 @@ export default function Home() {
                                       >
                                         Edit
                                       </button>
-                                      <Form method="post" className="inline-block" style={{ display: "inline" }} onSubmit={(e) => {
-                                        if (!confirm("Are you sure you want to permanently delete this runsheet?")) {
-                                          e.preventDefault();
-                                        }
-                                      }}>
-                                        <input type="hidden" name="_action" value="delete_delivery" />
-                                        <input type="hidden" name="id" value={del.id} />
-                                        <button
-                                          type="submit"
-                                          className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
-                                        >
-                                          Delete
-                                        </button>
-                                      </Form>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          triggerConfirm(
+                                            "Delete Runsheet?",
+                                            "Are you sure you want to permanently delete this runsheet?",
+                                            () => {
+                                              const fd = new FormData();
+                                              fd.append("_action", "delete_delivery");
+                                              fd.append("id", del.id.toString());
+                                              submit(fd, { method: "post" });
+                                            }
+                                          );
+                                        }}
+                                        className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
+                                      >
+                                        Delete
+                                      </button>
                                     </div>
                                   </td>
                                 </tr>
@@ -3024,20 +3096,24 @@ export default function Home() {
                                 >
                                   Edit
                                 </button>
-                                <Form method="post" className="inline-block" style={{ display: "inline" }} onSubmit={(e) => {
-                                  if (!confirm("Are you sure you want to permanently delete this runsheet?")) {
-                                    e.preventDefault();
-                                  }
-                                }}>
-                                  <input type="hidden" name="_action" value="delete_delivery" />
-                                  <input type="hidden" name="id" value={del.id} />
-                                  <button
-                                    type="submit"
-                                    className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
-                                  >
-                                    Delete Log
-                                  </button>
-                                </Form>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    triggerConfirm(
+                                      "Delete Runsheet?",
+                                      "Are you sure you want to permanently delete this runsheet?",
+                                      () => {
+                                        const fd = new FormData();
+                                        fd.append("_action", "delete_delivery");
+                                        fd.append("id", del.id.toString());
+                                        submit(fd, { method: "post" });
+                                      }
+                                    );
+                                  }}
+                                  className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
+                                >
+                                  Delete Log
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -3394,7 +3470,17 @@ export default function Home() {
                                         )}
                                       </h4>
                                       <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5">
-                                        <div>📞 {u.phone} • 🚗 {u.vehicleNumber || "No Vehicle Number"}</div>
+                                        <div>
+                                          📞 {u.phone} • 🚗 {u.vehicleNumber || "No Vehicle Number"}
+                                          {u.passwordText && (
+                                            <>
+                                              {" • 🔑 Pwd: "}
+                                              <span className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded font-bold text-neutral-800 dark:text-neutral-200 select-all">
+                                                {u.passwordText}
+                                              </span>
+                                            </>
+                                          )}
+                                        </div>
                                         {u.role === "DRIVER" && !u.passwordHash && (
                                           <div className="text-rose-500 font-semibold text-[9px]">⚠️ No password set! Admin needs to set one.</div>
                                         )}
@@ -3426,24 +3512,28 @@ export default function Home() {
                                             {u.loginEnabled ? "Block Login" : "Allow Login"}
                                           </button>
                                         </Form>
-                                        <Form method="post" className="shrink-0" onSubmit={(e) => {
-                                          if (!confirm(`Are you sure you want to remove driver ${u.name}?`)) {
-                                            e.preventDefault();
-                                          }
-                                        }}>
-                                          <input type="hidden" name="_action" value="delete_driver" />
-                                          <input type="hidden" name="id" value={u.id} />
-                                          <button
-                                            type="submit"
-                                            disabled={isSubmitting}
-                                            className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
-                                            title="Remove Driver"
-                                          >
-                                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                            </svg>
-                                          </button>
-                                        </Form>
+                                        <button
+                                          type="button"
+                                          disabled={isSubmitting}
+                                          onClick={() => {
+                                            triggerConfirm(
+                                              "Remove Driver?",
+                                              `Are you sure you want to remove driver ${u.name}?`,
+                                              () => {
+                                                const fd = new FormData();
+                                                fd.append("_action", "delete_driver");
+                                                fd.append("id", u.id.toString());
+                                                submit(fd, { method: "post" });
+                                              }
+                                            );
+                                          }}
+                                          className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
+                                          title="Remove Driver"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                          </svg>
+                                        </button>
                                       </>
                                     )}
                                   </div>
@@ -3480,29 +3570,32 @@ export default function Home() {
                                       </p>
                                     </div>
                                   </div>
-                                  <Form method="post" onSubmit={(e) => {
-                                    if (adminCredentials.length <= 1) {
-                                      alert("Cannot delete the last remaining administrator account.");
-                                      e.preventDefault();
-                                      return;
-                                    }
-                                    if (!confirm(`Are you sure you want to remove administrator ${admin.username}?`)) {
-                                      e.preventDefault();
-                                    }
-                                  }}>
-                                    <input type="hidden" name="_action" value="delete_admin" />
-                                    <input type="hidden" name="id" value={admin.id} />
-                                    <button
-                                      type="submit"
-                                      disabled={isSubmitting || adminCredentials.length <= 1}
-                                      className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 disabled:hover:bg-transparent shrink-0"
-                                      title={adminCredentials.length <= 1 ? "Cannot delete the last admin" : "Remove Admin"}
-                                    >
-                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                      </svg>
-                                    </button>
-                                  </Form>
+                                  <button
+                                    type="button"
+                                    disabled={isSubmitting || adminCredentials.length <= 1}
+                                    onClick={() => {
+                                      if (adminCredentials.length <= 1) {
+                                        triggerAlert("Action Blocked", "Cannot delete the last remaining administrator account.");
+                                        return;
+                                      }
+                                      triggerConfirm(
+                                        "Remove Admin?",
+                                        `Are you sure you want to remove administrator ${admin.username}?`,
+                                        () => {
+                                          const fd = new FormData();
+                                          fd.append("_action", "delete_admin");
+                                          fd.append("id", admin.id.toString());
+                                          submit(fd, { method: "post" });
+                                        }
+                                      );
+                                    }}
+                                    className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 disabled:hover:bg-transparent shrink-0"
+                                    title={adminCredentials.length <= 1 ? "Cannot delete the last admin" : "Remove Admin"}
+                                  >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  </button>
                                 </div>
                               ))}
                             </div>
@@ -3516,10 +3609,9 @@ export default function Home() {
                       {userSubTab === "drivers" ? (
                         <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
                           <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
-                            <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-100 flex items-center gap-1.5">
+                            <h3 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-1.5">
                               <span>➕</span> Register Driver Operator
                             </h3>
-                            <p className="text-[10px] text-neutral-400 mt-0.5">Add a new delivery driver to the system roster</p>
                           </div>
                           <Form method="post" className="space-y-4">
                             <input type="hidden" name="_action" value="create_driver" />
@@ -3605,7 +3697,6 @@ export default function Home() {
                             <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-100 flex items-center gap-1.5">
                               <span>➕</span> Create Admin Account
                             </h3>
-                            <p className="text-[10px] text-neutral-400 mt-0.5">Grant administrative console access to new operator</p>
                           </div>
                           <Form method="post" className="space-y-4">
                             <input type="hidden" name="_action" value="create_admin" />
@@ -3621,15 +3712,33 @@ export default function Home() {
                               />
                             </div>
 
-                            <div className="space-y-1">
+                             <div className="space-y-1">
                               <label className="text-xs font-semibold text-neutral-500">Password / Access Code</label>
-                              <input
-                                type="password"
-                                name="password"
-                                required
-                                placeholder="••••••••"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
+                              <div className="relative">
+                                <input
+                                  type={showAdminPassword ? "text" : "password"}
+                                  name="password"
+                                  required
+                                  placeholder="••••••••"
+                                  className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md pl-3 pr-10 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setShowAdminPassword(!showAdminPassword)}
+                                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 cursor-pointer"
+                                >
+                                  {showAdminPassword ? (
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112  19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                                    </svg>
+                                  ) : (
+                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                    </svg>
+                                  )}
+                                </button>
+                              </div>
                             </div>
 
                             <button
@@ -3736,6 +3845,14 @@ export default function Home() {
                       {selectedDriverProfile.loginEnabled ? "Allowed" : "Blocked"}
                     </span>
                   </div>
+                  {selectedDriverProfile.passwordText && (
+                    <div className="flex justify-between">
+                      <span>Console Password:</span>
+                      <span className="font-mono font-bold text-neutral-750 dark:text-neutral-250 select-all bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
+                        {selectedDriverProfile.passwordText}
+                      </span>
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <span>Role:</span>
                     <span className="font-semibold text-neutral-700 dark:text-neutral-300">{selectedDriverProfile.role}</span>
@@ -4476,6 +4593,83 @@ export default function Home() {
                   </button>
                 </div>
               </Form>
+            </div>
+          </div>
+        )}
+        {/* Custom Confirmation / Alert Dialog Modal */}
+        {customDialog.isOpen && (
+          <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 animate-fade-in">
+            {/* Glass backdrop */}
+            <div 
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300"
+              onClick={() => {
+                if (customDialog.type === "alert") {
+                  setCustomDialog(prev => ({ ...prev, isOpen: false }));
+                }
+              }}
+            />
+            
+            {/* Modal Card */}
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200 dark:border-neutral-800 rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
+              {/* Title & Icon */}
+              <div className="flex items-center gap-3 pb-3 border-b border-[#edece9]/60 dark:border-neutral-800/60">
+                <div className={`p-2.5 rounded-xl ${
+                  customDialog.type === "confirm" 
+                    ? "bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-450" 
+                    : "bg-blue-100 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400"
+                }`}>
+                  {customDialog.type === "confirm" ? (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  )}
+                </div>
+                <h3 className="text-sm font-bold text-neutral-950 dark:text-neutral-50">
+                  {customDialog.title}
+                </h3>
+              </div>
+
+              {/* Message */}
+              <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed font-sans">
+                {customDialog.message}
+              </p>
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                {customDialog.type === "confirm" ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setCustomDialog(prev => ({ ...prev, isOpen: false }))}
+                      className="flex-1 py-2 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-lg border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomDialog(prev => ({ ...prev, isOpen: false }));
+                        if (customDialog.onConfirm) customDialog.onConfirm();
+                      }}
+                      className="flex-1 py-2 text-xs bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-lg shadow-lg hover:shadow-xl transition-all cursor-pointer text-center"
+                    >
+                      Confirm Delete
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setCustomDialog(prev => ({ ...prev, isOpen: false }))}
+                    className="w-full py-2 text-xs bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold rounded-lg shadow-md transition-all cursor-pointer text-center"
+                  >
+                    OK
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}

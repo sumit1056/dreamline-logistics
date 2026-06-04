@@ -16,6 +16,7 @@ model User {
   phone         String   @unique
   role          String   @default("DRIVER") // "FOUNDER", "DRIVER"
   passwordHash  String?
+  passwordText  String?
   vehicleNumber String?
   loginEnabled  Boolean  @default(true)
   createdAt     DateTime @default(now())
