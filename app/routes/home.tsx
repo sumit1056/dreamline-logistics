@@ -471,6 +471,7 @@ export async function action({ request }: ActionFunctionArgs) {
         phone,
         role: "DRIVER",
         passwordHash: password ? hashPassword(password) : null,
+        passwordText: password || null,
         vehicleNumber,
         loginEnabled,
       },
@@ -3391,7 +3392,6 @@ export default function Home() {
                   <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                     <div>
                       <h1 className="text-2xl font-bold tracking-tight">User Control Center</h1>
-                      <p className="text-xs text-neutral-405 dark:text-neutral-400 mt-0.5">Manage administrative credentials and driver directories</p>
                     </div>
                   </div>
 
