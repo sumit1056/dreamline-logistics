@@ -63,3 +63,11 @@ When initiating the next coding session (whether at home or on the corporate lap
 5. **Post-Beta Production DB Maintenance:**
    - Coordinate with the founder for a full cloud database reset/purge when ready to exit the beta window, ensuring a pristine schema slate for the official launch.
 
+## Shadowfax Payout Rate Configuration
+- **Shadowfax (Weekly Plan)** (internal category key: `vendor_ship`):
+  - Formula: **₹75 per order** completed.
+  - Frequency: Weekly (Monday to Sunday), expected payout on Wednesday of the following week (Net-9).
+- **Shadowfax (45-Day Plan)** (internal category key: `per_order_rate`):
+  - Formula: **₹40,000 fixed base rate + ₹35 per order** completed.
+  - Frequency: Deferred 45-day monthly payout (expected payout on the 15th of month M+2, e.g., work done in June is paid on August 15th).
+

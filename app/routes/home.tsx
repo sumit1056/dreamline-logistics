@@ -107,9 +107,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (deliveries.length === 0) {
     await prisma.delivery.createMany({
       data: [
-        { title: "Daily Runsheet - Vendor Shipments", category: "vendor_ship", totalOrders: 40, completedOrders: 40, driverName: "John Driver", notes: "Completed all regular shipments. 2 pending due to customer unavailability.", createdAt: new Date() },
-        { title: "Daily Runsheet - Per Order Deliveries", category: "per_order_rate", totalOrders: 25, completedOrders: 25, driverName: "Sam Driver", notes: "All orders completed successfully.", createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        { title: "Daily Runsheet - Vendor Shipments", category: "vendor_ship", totalOrders: 48, completedOrders: 48, driverName: "John Driver", notes: "Slight delay at Shadowfax hub.", createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) },
+        { title: "Daily Runsheet - Shadowfax (Weekly)", category: "vendor_ship", totalOrders: 40, completedOrders: 40, driverName: "John Driver", notes: "Completed all regular shipments. 2 pending due to customer unavailability.", createdAt: new Date() },
+        { title: "Daily Runsheet - Shadowfax (45-Day)", category: "per_order_rate", totalOrders: 25, completedOrders: 25, driverName: "Sam Driver", notes: "All orders completed successfully.", createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        { title: "Daily Runsheet - Shadowfax (Weekly)", category: "vendor_ship", totalOrders: 48, completedOrders: 48, driverName: "John Driver", notes: "Slight delay at Shadowfax hub.", createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) },
       ],
     });
     didSeed = true;
@@ -172,7 +172,7 @@ export async function action({ request }: ActionFunctionArgs) {
           - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
 
           If targetTable is "delivery":
-          - title: (string) A clean title, e.g., "Daily Runsheet - Vendor Shipments" or "Per Order Runsheet".
+          - title: (string) A clean title, e.g., "Daily Runsheet - Shadowfax (Weekly)" or "Shadowfax (45-Day) Runsheet".
           - category: (string) Must be either "vendor_ship" or "per_order_rate" based on context.
           - totalOrders: (number) Total orders completed (always default/set equal to completedOrders).
           - completedOrders: (number) Number of successfully completed orders.
@@ -673,6 +673,8 @@ export default function Home() {
   const [payDateInput, setPayDateInput] = useState<string>("");
   const [payNotesInput, setPayNotesInput] = useState<string>("");
   const [payoutSuccessVisible, setPayoutSuccessVisible] = useState(false);
+  const [payoutStatusFilter, setPayoutStatusFilter] = useState<"ALL" | "PAID" | "UNPAID" | "ONGOING">("ALL");
+  const [payoutSortOrder, setPayoutSortOrder] = useState<"date_desc" | "date_asc" | "amount_desc" | "amount_asc">("date_desc");
 
   // Local edit states
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
@@ -1018,10 +1020,10 @@ export default function Home() {
       totalCompleted += d.completedOrders;
       if (d.category === "vendor_ship") {
         vendorShipOrders += d.completedOrders;
-        vendorShipValue += 40000 + (d.completedOrders * 35);
+        vendorShipValue += d.completedOrders * 75;
       } else {
         perOrderRateOrders += d.completedOrders;
-        perOrderRateValue += d.completedOrders * 75;
+        perOrderRateValue += 40000 + (d.completedOrders * 35);
       }
     });
 
@@ -1129,7 +1131,7 @@ export default function Home() {
 
     // Map weekly vendor_ship groups
     Object.values(weeklyGroups).forEach((group) => {
-      const calculatedPayout = 40000 + (group.completedOrders * 35);
+      const calculatedPayout = group.completedOrders * 75;
       
       const expectedDate = new Date(group.mondayDate);
       expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
@@ -1170,7 +1172,7 @@ export default function Home() {
 
     // Map monthly per_order_rate groups
     Object.values(monthlyGroups).forEach((group) => {
-      const calculatedPayout = group.completedOrders * 75;
+      const calculatedPayout = 40000 + (group.completedOrders * 35);
 
       // Payout of month M is on the 15th of month M+2 (e.g. work in June -> paid on August 15th)
       const mDate = new Date(group.startDate);
@@ -1208,6 +1210,31 @@ export default function Home() {
 
     return list.sort((a, b) => b.mondayStr.localeCompare(a.mondayStr));
   }, [deliveries, expenses]);
+
+  const filteredAndSortedPayouts = useMemo(() => {
+    let result = [...weeklyPayouts];
+    
+    // Filter
+    if (payoutStatusFilter !== "ALL") {
+      result = result.filter(w => w.status === payoutStatusFilter);
+    }
+    
+    // Sort
+    result.sort((a, b) => {
+      if (payoutSortOrder === "date_desc") {
+        return new Date(b.expectedDate).getTime() - new Date(a.expectedDate).getTime();
+      } else if (payoutSortOrder === "date_asc") {
+        return new Date(a.expectedDate).getTime() - new Date(b.expectedDate).getTime();
+      } else if (payoutSortOrder === "amount_desc") {
+        return b.calculatedPayout - a.calculatedPayout;
+      } else if (payoutSortOrder === "amount_asc") {
+        return a.calculatedPayout - b.calculatedPayout;
+      }
+      return 0;
+    });
+    
+    return result;
+  }, [weeklyPayouts, payoutStatusFilter, payoutSortOrder]);
 
   // Reset raw inputs on action success and set fading success messages
   useEffect(() => {
@@ -1264,8 +1291,8 @@ export default function Home() {
   // Live Payout Preview for Runsheet Console
   const parsedCompleted = parseInt(formCompletedOrders) || 0;
   const previewPayout = formCategory === "vendor_ship"
-    ? 40000 + (parsedCompleted * 35)
-    : parsedCompleted * 75;
+    ? parsedCompleted * 75
+    : 40000 + (parsedCompleted * 35);
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -2486,8 +2513,8 @@ export default function Home() {
                     <div className="space-y-1">
                       {deliveries.slice(0, 5).map((del) => {
                         const payout = del.category === "vendor_ship"
-                          ? 40000 + (del.completedOrders * 35)
-                          : del.completedOrders * 75;
+                          ? del.completedOrders * 75
+                          : 40000 + (del.completedOrders * 35);
                         return (
                           <div
                             key={del.id}
@@ -2540,13 +2567,13 @@ export default function Home() {
                     </div>
 
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Vendor Ship Volume</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Shadowfax (Weekly) Volume</div>
                       <div className="text-2xl font-bold mt-1 text-[#2383e2]">{orderCounts.vendorShipOrders} <span className="text-xs text-neutral-400 font-normal">orders</span></div>
                       <div className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300 mt-1">₹{orderCounts.vendorShipValue.toLocaleString()}</div>
                     </div>
 
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Per Order Volume</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Shadowfax (45-Day) Volume</div>
                       <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">{orderCounts.perOrderRateOrders} <span className="text-xs text-neutral-400 font-normal">orders</span></div>
                       <div className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300 mt-1">₹{orderCounts.perOrderRateValue.toLocaleString()}</div>
                     </div>
@@ -2670,8 +2697,8 @@ export default function Home() {
                       <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-1 sm:pb-0 -mx-1 px-1">
                         {[
                           { value: "ALL", label: "All Categories" },
-                          { value: "VENDOR_SHIP", label: "Vendor Ship" },
-                          { value: "PER_ORDER", label: "Per Order Rate" },
+                          { value: "VENDOR_SHIP", label: "Shadowfax (Weekly)" },
+                          { value: "PER_ORDER", label: "Shadowfax (45-Day)" },
                         ].map((cat) => (
                           <button
                             key={cat.value}
@@ -2715,8 +2742,8 @@ export default function Home() {
                             paginatedDeliveries.map((del) => {
                               const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
                               const payout = del.category === "vendor_ship"
-                                ? 40000 + (del.completedOrders * 35)
-                                : del.completedOrders * 75;
+                                ? del.completedOrders * 75
+                                : 40000 + (del.completedOrders * 35);
                               return (
                                 <tr key={del.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
                                   <td className="p-3.5 text-neutral-500">
@@ -2883,7 +2910,7 @@ export default function Home() {
                             <div className="flex justify-between items-center text-xs pt-1">
                               <span className="text-neutral-500 font-semibold">Payout:</span>
                               <span className="font-bold text-neutral-800 dark:text-neutral-200">
-                                ₹{(del.category === "vendor_ship" ? 40000 + (del.completedOrders * 35) : del.completedOrders * 75).toLocaleString()}
+                                ₹{(del.category === "vendor_ship" ? del.completedOrders * 75 : 40000 + (del.completedOrders * 35)).toLocaleString()}
                               </span>
                             </div>
 
@@ -3021,16 +3048,60 @@ export default function Home() {
                       <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
                         Settlement Cycles Tracker
                       </h3>
-                      <span className="text-xs text-neutral-400">Weekly & Monthly settlement windows</span>
+                      <span className="text-xs text-neutral-450">Weekly & Monthly settlement windows</span>
+                    </div>
+
+                    {/* Filter and Sort Row */}
+                    <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+                      {/* Status Filter Pills */}
+                      <div className="flex flex-wrap gap-1.5 items-center">
+                        <span className="text-xs font-semibold text-[#5A6A85] dark:text-[#7C8BA1] mr-1.5">Status:</span>
+                        {[
+                          { label: "All", value: "ALL" },
+                          { label: "Unpaid", value: "UNPAID" },
+                          { label: "Paid", value: "PAID" },
+                          { label: "In Progress", value: "ONGOING" }
+                        ].map((item) => (
+                          <button
+                            key={item.value}
+                            type="button"
+                            onClick={() => setPayoutStatusFilter(item.value as any)}
+                            className={`text-xs px-3 py-1 rounded-md font-semibold border transition-all cursor-pointer ${
+                              payoutStatusFilter === item.value
+                                ? "bg-[#5D87FF] border-[#5D87FF] text-white"
+                                : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
+                            }`}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Sort Controls */}
+                      <div className="flex items-center gap-2 w-full sm:w-auto">
+                        <span className="text-xs font-semibold text-[#5A6A85] dark:text-[#7C8BA1] whitespace-nowrap">Sort By:</span>
+                        <select
+                          value={payoutSortOrder}
+                          onChange={(e) => setPayoutSortOrder(e.target.value as any)}
+                          className="text-xs px-2 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-transparent dark:bg-[#1e1e1e] text-neutral-700 dark:text-neutral-300 font-semibold focus:outline-none focus:border-[#5D87FF]"
+                        >
+                          <option value="date_desc">Due Date: Newest First</option>
+                          <option value="date_asc">Due Date: Oldest First</option>
+                          <option value="amount_desc">Amount: High to Low</option>
+                          <option value="amount_asc">Amount: Low to High</option>
+                        </select>
+                      </div>
                     </div>
 
                     <div className="divide-y divide-[#edece9]/60 dark:divide-neutral-800/60">
-                      {weeklyPayouts.length === 0 ? (
+                      {filteredAndSortedPayouts.length === 0 ? (
                         <div className="p-8 text-center text-neutral-400 italic text-xs">
-                          No runsheet logs recorded yet to calculate payouts.
+                          {weeklyPayouts.length === 0 
+                            ? "No runsheet logs recorded yet to calculate payouts." 
+                            : "No payouts match the selected status filter."}
                         </div>
                       ) : (
-                        weeklyPayouts.map((w) => {
+                        filteredAndSortedPayouts.map((w) => {
                           const isOverdue = w.status === "UNPAID" && new Date().getTime() > new Date(w.expectedDate).getTime();
                           const diffTime = new Date(w.expectedDate).getTime() - new Date().getTime();
                           const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
@@ -4053,8 +4124,8 @@ export default function Home() {
                     <div className="w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-neutral-50 dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-100 font-bold">
                       ₹{
                         editingDelivery.category === "vendor_ship"
-                          ? (40000 + (Number(editingDelivery.completedOrders || 0) * 35)).toLocaleString()
-                          : (Number(editingDelivery.completedOrders || 0) * 75).toLocaleString()
+                          ? (Number(editingDelivery.completedOrders || 0) * 75).toLocaleString()
+                          : (40000 + (Number(editingDelivery.completedOrders || 0) * 35)).toLocaleString()
                       }
                     </div>
                   </div>
