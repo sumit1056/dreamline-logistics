@@ -658,6 +658,9 @@ export default function Home() {
   // Auto-hiding notification and driver profile states
   const [runsheetSuccessVisible, setRunsheetSuccessVisible] = useState(false);
   const [expenseSuccessVisible, setExpenseSuccessVisible] = useState(false);
+  const [actionErrorVisible, setActionErrorVisible] = useState(false);
+  const [parsedExpenseVisible, setParsedExpenseVisible] = useState(false);
+  const [userControlSuccessVisible, setUserControlSuccessVisible] = useState(false);
   const [selectedDriverProfile, setSelectedDriverProfile] = useState<any | null>(null);
   const [selectedYear, setSelectedYear] = useState<string>("ALL");
   const [selectedMonth, setSelectedMonth] = useState<string>("ALL");
@@ -1321,6 +1324,35 @@ export default function Home() {
     }
   }, [actionData]);
 
+  // Manage visibility timers for generic action errors
+  useEffect(() => {
+    if (actionData) {
+      if ("error" in actionData && actionData.error) {
+        setActionErrorVisible(true);
+        const timer = setTimeout(() => setActionErrorVisible(false), 6000);
+        return () => clearTimeout(timer);
+      }
+    }
+  }, [actionData]);
+
+  // Manage visibility timers for AI parsed expense messages
+  useEffect(() => {
+    if (actionData && "parsedExpense" in actionData && actionData.parsedExpense) {
+      setParsedExpenseVisible(true);
+      const timer = setTimeout(() => setParsedExpenseVisible(false), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [actionData]);
+
+  // Manage visibility timers for User Control Center success operations
+  useEffect(() => {
+    if (actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin" || actionData.action === "toggle_driver_login")) {
+      setUserControlSuccessVisible(true);
+      const timer = setTimeout(() => setUserControlSuccessVisible(false), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [actionData]);
+
   // Synchronize needsFuelSlip action validation to automatically open the step-by-step modal
   useEffect(() => {
     if (actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip) {
@@ -1538,7 +1570,7 @@ export default function Home() {
               </div>
 
               {/* ACTION NOTIFICATIONS */}
-              {actionData && "error" in actionData && (
+              {actionData && "error" in actionData && actionErrorVisible && (
                 <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
                   ⚠️ {actionData.error}
                 </div>
@@ -2433,6 +2465,11 @@ export default function Home() {
               </div>
 
               {/* ACTION NOTIFICATIONS */}
+              {actionData && "error" in actionData && actionErrorVisible && (
+                <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
+                  ⚠️ {actionData.error}
+                </div>
+              )}
               {runsheetSuccessVisible && (
                 <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
                   ✅ Daily runsheet status logged successfully!
@@ -3264,12 +3301,12 @@ export default function Home() {
                   </div>
 
                   {/* ACTION NOTIFICATIONS */}
-                  {actionData && actionData.error && (
+                  {actionData && actionData.error && actionErrorVisible && (
                     <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
                       ⚠️ {actionData.error}
                     </div>
                   )}
-                  {actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin" || actionData.action === "toggle_driver_login") && (
+                  {actionData && actionData.success && userControlSuccessVisible && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin" || actionData.action === "toggle_driver_login") && (
                     <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
                       ✨ Operation completed successfully!
                     </div>

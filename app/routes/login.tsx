@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Form, useNavigation, useActionData, redirect } from "react-router";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { getSession, loginAdmin, logoutAdmin } from "../session.server";
@@ -53,6 +53,15 @@ export default function LoginRoute() {
   const actionData = useActionData() as { error?: string } | undefined;
   const navigation = useNavigation();
   const [showPassword, setShowPassword] = useState(false);
+  const [errorVisible, setErrorVisible] = useState(false);
+
+  useEffect(() => {
+    if (actionData?.error) {
+      setErrorVisible(true);
+      const timer = setTimeout(() => setErrorVisible(false), 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [actionData]);
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -82,7 +91,7 @@ export default function LoginRoute() {
           </div>
 
           {/* Secure credentials warning error alert banner */}
-          {actionData?.error && (
+          {actionData?.error && errorVisible && (
             <div className="p-4 bg-rose-500/10 dark:bg-rose-500/5 border border-rose-500/20 rounded-2xl flex items-start gap-3 animate-headShake">
               <svg className="w-5 h-5 text-rose-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
