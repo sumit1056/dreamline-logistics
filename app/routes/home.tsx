@@ -525,7 +525,30 @@ export async function action({ request }: ActionFunctionArgs) {
       expenseCategory = "factory";
     }
 
-    const refTag = `[Ref: Weekly-Payout-${category === "vendor_ship" ? "VS" : "PO"}-${mondayStr}]`;
+    let refTag = "";
+    let weekIdentifier = "";
+    let startDate = new Date();
+    let endDate = new Date();
+
+    if (category === "vendor_ship") {
+      refTag = `[Ref: Weekly-Payout-VS-${mondayStr}]`;
+      weekIdentifier = `${mondayStr}_${category}`;
+      startDate = new Date(mondayStr);
+      endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      endDate.setHours(23, 59, 59, 999);
+    } else {
+      const monthStr = mondayStr.substring(0, 7); // "YYYY-MM"
+      refTag = `[Ref: Monthly-Payout-PO-${monthStr}]`;
+      weekIdentifier = `${monthStr}_${category}`;
+      
+      const parsedDate = new Date(mondayStr);
+      const yyyy = parsedDate.getFullYear();
+      const mm = parsedDate.getMonth();
+      startDate = new Date(yyyy, mm, 1, 0, 0, 0, 0);
+      endDate = new Date(yyyy, mm + 1, 0, 23, 59, 59, 999);
+    }
+
     const finalNotes = notes ? `${notes} ${refTag}` : refTag;
 
     // Create corresponding INCOME entry in Expense table for unified cashflow ledger
@@ -544,12 +567,6 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Also persist in the Payout table for database-backed tracking
     try {
-      const parsedMonday = new Date(mondayStr);
-      const sundayDate = new Date(parsedMonday);
-      sundayDate.setDate(parsedMonday.getDate() + 6);
-      
-      const weekIdentifier = `${mondayStr}_${category}`;
-
       await prisma.payout.upsert({
         where: {
           weekIdentifier_category: {
@@ -565,8 +582,8 @@ export async function action({ request }: ActionFunctionArgs) {
         },
         create: {
           weekIdentifier,
-          startDate: parsedMonday,
-          endDate: sundayDate,
+          startDate,
+          endDate,
           category,
           completedOrders: 0, // calculated on the fly, default to 0 here
           calculatedAmount: amount,
@@ -1023,12 +1040,23 @@ export default function Home() {
 
   // Weekly Payout Tracker memoized calculations
   const weeklyPayouts = useMemo(() => {
-    const groups: {
+    const weeklyGroups: {
       [key: string]: {
         mondayStr: string;
         mondayDate: Date;
         sundayDate: Date;
-        category: "vendor_ship" | "per_order_rate";
+        category: "vendor_ship";
+        completedOrders: number;
+        deliveriesCount: number;
+      };
+    } = {};
+
+    const monthlyGroups: {
+      [key: string]: {
+        monthStr: string;
+        startDate: Date;
+        endDate: Date;
+        category: "per_order_rate";
         completedOrders: number;
         deliveriesCount: number;
       };
@@ -1036,60 +1064,78 @@ export default function Home() {
 
     deliveries.forEach((d) => {
       const date = new Date(d.createdAt);
-      const day = date.getDay();
-      const diff = date.getDate() - day + (day === 0 ? -6 : 1);
-      const monday = new Date(date);
-      monday.setDate(diff);
-      monday.setHours(0, 0, 0, 0);
+      
+      if (d.category === "vendor_ship") {
+        const day = date.getDay();
+        const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+        const monday = new Date(date);
+        monday.setDate(diff);
+        monday.setHours(0, 0, 0, 0);
 
-      const yyyy = monday.getFullYear();
-      const mm = String(monday.getMonth() + 1).padStart(2, "0");
-      const dd = String(monday.getDate()).padStart(2, "0");
-      const mondayStr = `${yyyy}-${mm}-${dd}`;
+        const yyyy = monday.getFullYear();
+        const mm = String(monday.getMonth() + 1).padStart(2, "0");
+        const dd = String(monday.getDate()).padStart(2, "0");
+        const mondayStr = `${yyyy}-${mm}-${dd}`;
 
-      const key = `${mondayStr}_${d.category}`;
+        const key = `${mondayStr}_vendor_ship`;
 
-      if (!groups[key]) {
-        const sunday = new Date(monday);
-        sunday.setDate(monday.getDate() + 6);
-        sunday.setHours(23, 59, 59, 999);
+        if (!weeklyGroups[key]) {
+          const sunday = new Date(monday);
+          sunday.setDate(monday.getDate() + 6);
+          sunday.setHours(23, 59, 59, 999);
 
-        groups[key] = {
-          mondayStr,
-          mondayDate: monday,
-          sundayDate: sunday,
-          category: d.category as "vendor_ship" | "per_order_rate",
-          completedOrders: 0,
-          deliveriesCount: 0,
-        };
+          weeklyGroups[key] = {
+            mondayStr,
+            mondayDate: monday,
+            sundayDate: sunday,
+            category: "vendor_ship",
+            completedOrders: 0,
+            deliveriesCount: 0,
+          };
+        }
+
+        weeklyGroups[key].completedOrders += d.completedOrders;
+        weeklyGroups[key].deliveriesCount += 1;
+      } else if (d.category === "per_order_rate") {
+        const yyyy = date.getFullYear();
+        const mm = String(date.getMonth() + 1).padStart(2, "0");
+        const monthStr = `${yyyy}-${mm}`;
+
+        const key = `${monthStr}_per_order_rate`;
+
+        if (!monthlyGroups[key]) {
+          const startDate = new Date(yyyy, date.getMonth(), 1, 0, 0, 0, 0);
+          const endDate = new Date(yyyy, date.getMonth() + 1, 0, 23, 59, 59, 999);
+
+          monthlyGroups[key] = {
+            monthStr,
+            startDate,
+            endDate,
+            category: "per_order_rate",
+            completedOrders: 0,
+            deliveriesCount: 0,
+          };
+        }
+
+        monthlyGroups[key].completedOrders += d.completedOrders;
+        monthlyGroups[key].deliveriesCount += 1;
       }
-
-      groups[key].completedOrders += d.completedOrders;
-      groups[key].deliveriesCount += 1;
     });
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const list = Object.values(groups).map((group) => {
-      let calculatedPayout = 0;
-      if (group.category === "vendor_ship") {
-        calculatedPayout = 40000 + (group.completedOrders * 35);
-      } else {
-        calculatedPayout = group.completedOrders * 75;
-      }
+    const list: any[] = [];
 
-      let expectedDate = new Date(group.sundayDate);
-      if (group.category === "vendor_ship") {
-        expectedDate = new Date(group.mondayDate);
-        expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
-      } else {
-        expectedDate.setDate(group.sundayDate.getDate() + 45); // Sunday + 45 days
-      }
+    // Map weekly vendor_ship groups
+    Object.values(weeklyGroups).forEach((group) => {
+      const calculatedPayout = 40000 + (group.completedOrders * 35);
+      
+      const expectedDate = new Date(group.mondayDate);
+      expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
       expectedDate.setHours(0, 0, 0, 0);
 
-      const refTag = `[Ref: Weekly-Payout-${group.category === "vendor_ship" ? "VS" : "PO"}-${group.mondayStr}]`;
-      
+      const refTag = `[Ref: Weekly-Payout-VS-${group.mondayStr}]`;
       const matchingExpense = expenses.find(
         (exp) => exp.type === "INCOME" && exp.notes && exp.notes.includes(refTag)
       );
@@ -1106,15 +1152,58 @@ export default function Home() {
       const endStr = group.sundayDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
       const weekLabel = `${startStr} - ${endStr}`;
 
-      return {
-        ...group,
+      list.push({
+        mondayStr: group.mondayStr,
+        startDate: group.mondayDate,
+        endDate: group.sundayDate,
+        category: group.category,
+        completedOrders: group.completedOrders,
+        deliveriesCount: group.deliveriesCount,
         calculatedPayout,
         expectedDate,
         status,
         matchingExpense,
         refTag,
         weekLabel,
-      };
+      });
+    });
+
+    // Map monthly per_order_rate groups
+    Object.values(monthlyGroups).forEach((group) => {
+      const calculatedPayout = group.completedOrders * 75;
+
+      // Payout of month M is on the 15th of month M+2 (e.g. work in June -> paid on August 15th)
+      const mDate = new Date(group.startDate);
+      const expectedDate = new Date(mDate.getFullYear(), mDate.getMonth() + 2, 15, 0, 0, 0, 0);
+
+      const refTag = `[Ref: Monthly-Payout-PO-${group.monthStr}]`;
+      const matchingExpense = expenses.find(
+        (exp) => exp.type === "INCOME" && exp.notes && exp.notes.includes(refTag)
+      );
+
+      let status: "PAID" | "UNPAID" | "ONGOING" = "UNPAID";
+      if (matchingExpense) {
+        status = "PAID";
+      } else if (group.endDate.getTime() > today.getTime()) {
+        status = "ONGOING";
+      }
+
+      const weekLabel = group.startDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+      list.push({
+        mondayStr: `${group.monthStr}-01`, // sorting key
+        startDate: group.startDate,
+        endDate: group.endDate,
+        category: group.category,
+        completedOrders: group.completedOrders,
+        deliveriesCount: group.deliveriesCount,
+        calculatedPayout,
+        expectedDate,
+        status,
+        matchingExpense,
+        refTag,
+        weekLabel,
+      });
     });
 
     return list.sort((a, b) => b.mondayStr.localeCompare(a.mondayStr));
@@ -1640,8 +1729,8 @@ export default function Home() {
                                   </>
                                 ) : (
                                   <>
-                                    <option value="shadowfax">🚚 Vendor Ship - Shadowfax</option>
-                                    <option value="factory">🏭 Factory</option>
+                                    <option value="shadowfax">🚚 Shadowfax (Weekly Plan)</option>
+                                    <option value="factory">🚚 Shadowfax (45-Day Plan)</option>
                                     <option value="other_income">💰 Other Income</option>
                                   </>
                                 )}
@@ -1784,9 +1873,9 @@ export default function Home() {
                               {exp.category === "other" && "📦"}
                               {exp.category === "shadowfax" && "🚚"}
                               {exp.category === "rate_change" && "📈"}
-                              {exp.category === "factory" && "🏭"}
+                              {exp.category === "factory" && "🚚"}
                               {exp.category === "other_income" && "💰"}
-                              {exp.category}
+                              {exp.category === "shadowfax" ? "Shadowfax (Weekly)" : exp.category === "factory" ? "Shadowfax (45-Day)" : exp.category}
                               {exp.imageUrl && (
                                 <button
                                   type="button"
@@ -2020,9 +2109,9 @@ export default function Home() {
                                   {exp.category === "service" && "🔧"}
                                   {exp.category === "other" && "📦"}
                                   {exp.category === "shadowfax" && "🚚"}
-                                  {exp.category === "factory" && "🏭"}
+                                  {exp.category === "factory" && "🚚"}
                                   {exp.category === "other_income" && "💰"}
-                                  <span>{exp.category}</span>
+                                  <span>{exp.category === "shadowfax" ? "Shadowfax (Weekly)" : exp.category === "factory" ? "Shadowfax (45-Day)" : exp.category}</span>
                                   {exp.imageUrl && (
                                     <button
                                       type="button"
@@ -2091,9 +2180,9 @@ export default function Home() {
                                 {exp.category === "service" && "🔧"}
                                 {exp.category === "other" && "📦"}
                                 {exp.category === "shadowfax" && "🚚"}
-                                {exp.category === "factory" && "🏭"}
+                                {exp.category === "factory" && "🚚"}
                                 {exp.category === "other_income" && "💰"}
-                                <span>{exp.category}</span>
+                                <span>{exp.category === "shadowfax" ? "Shadowfax (Weekly)" : exp.category === "factory" ? "Shadowfax (45-Day)" : exp.category}</span>
                                 {exp.imageUrl && (
                                   <button
                                     type="button"
@@ -2314,8 +2403,8 @@ export default function Home() {
                               onChange={(e) => setFormCategory(e.target.value as "vendor_ship" | "per_order_rate")}
                               className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
                             >
-                              <option value="vendor_ship">Vendor Ship</option>
-                              <option value="per_order_rate">Per Order Rate</option>
+                              <option value="vendor_ship">🚚 Shadowfax (Weekly Plan)</option>
+                              <option value="per_order_rate">🚚 Shadowfax (45-Day Plan)</option>
                             </select>
                           </div>
 
@@ -2411,8 +2500,7 @@ export default function Home() {
                           >
                             <div className="flex justify-between items-center">
                               <span className="capitalize text-xs font-bold text-neutral-700 dark:text-neutral-300 flex items-center gap-1.5">
-                                {del.category === "vendor_ship" ? "🚚" : "📦"}
-                                {del.category === "vendor_ship" ? "Vendor Ship" : "Per Order"}
+                                🚚 {del.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
                               </span>
                               <span className="text-xs font-bold text-neutral-900 dark:text-neutral-100">
                                 ₹{payout.toLocaleString()}
@@ -2647,7 +2735,7 @@ export default function Home() {
                                         ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                         : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                                     }`}>
-                                      {del.category === "vendor_ship" ? "Vendor Ship" : "Per Order"}
+                                      {del.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
                                     </span>
                                   </td>
                                   <td className="p-3.5 text-center font-semibold text-emerald-600 dark:text-emerald-400">
@@ -2783,7 +2871,7 @@ export default function Home() {
                                   ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                   : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                               }`}>
-                                {del.category === "vendor_ship" ? "Vendor Ship" : "Per Order"}
+                                {del.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
                               </span>
                               
                               <div className="text-xs text-neutral-600 dark:text-neutral-300">
@@ -2897,7 +2985,7 @@ export default function Home() {
                   {/* Summary Cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Shadowfax)</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Shadowfax - Weekly)</div>
                       <div className="text-2xl font-bold mt-1 text-[#2383e2]">
                         ₹{weeklyPayouts
                           .filter(w => w.category === "vendor_ship" && w.status === "UNPAID")
@@ -2907,7 +2995,7 @@ export default function Home() {
                     </div>
                     
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Factory PO)</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Shadowfax - 45-Day)</div>
                       <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">
                         ₹{weeklyPayouts
                           .filter(w => w.category === "per_order_rate" && w.status === "UNPAID")
@@ -2931,15 +3019,15 @@ export default function Home() {
                   <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] shadow-sm overflow-hidden">
                     <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-neutral-900/30 flex justify-between items-center">
                       <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
-                        Weekly Settlement Cycles
+                        Settlement Cycles Tracker
                       </h3>
-                      <span className="text-xs text-neutral-400">Monday - Sunday cycles</span>
+                      <span className="text-xs text-neutral-400">Weekly & Monthly settlement windows</span>
                     </div>
 
                     <div className="divide-y divide-[#edece9]/60 dark:divide-neutral-800/60">
                       {weeklyPayouts.length === 0 ? (
                         <div className="p-8 text-center text-neutral-400 italic text-xs">
-                          No runsheet logs recorded yet to calculate weekly payouts.
+                          No runsheet logs recorded yet to calculate payouts.
                         </div>
                       ) : (
                         weeklyPayouts.map((w) => {
@@ -2959,7 +3047,7 @@ export default function Home() {
                                       ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                       : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                                   }`}>
-                                    {w.category === "vendor_ship" ? "Vendor Ship (Shadowfax)" : "Per Order Rate (Factory)"}
+                                    {w.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
                                   </span>
 
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
@@ -3008,9 +3096,9 @@ export default function Home() {
                                       <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
                                         ✨ Recorded in Ledger on {new Date(w.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                                       </span>
-                                      {w.matchingExpense.notes && w.matchingExpense.notes.replace(/\[Ref: Weekly-Payout-.*\]/, '').trim() && (
-                                        <span className="text-[10px] text-neutral-400 italic max-w-[200px] text-right truncate" title={w.matchingExpense.notes.replace(/\[Ref: Weekly-Payout-.*\]/, '').trim()}>
-                                          Note: "{w.matchingExpense.notes.replace(/\[Ref: Weekly-Payout-.*\]/, '').trim()}"
+                                      {w.matchingExpense.notes && w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim() && (
+                                        <span className="text-[10px] text-neutral-400 italic max-w-[200px] text-right truncate" title={w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}>
+                                          Note: "{w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}"
                                         </span>
                                       )}
                                     </div>
@@ -3818,8 +3906,8 @@ export default function Home() {
                     >
                       {editingExpense.type === "INCOME" ? (
                         <>
-                          <option value="shadowfax">🚚 Shadowfax</option>
-                          <option value="factory">🏭 Factory</option>
+                          <option value="shadowfax">🚚 Shadowfax (Weekly Plan)</option>
+                          <option value="factory">🚚 Shadowfax (45-Day Plan)</option>
                           <option value="other_income">💰 Other Income</option>
                         </>
                       ) : (
@@ -3954,8 +4042,8 @@ export default function Home() {
                       onChange={(e) => setEditingDelivery({ ...editingDelivery, category: e.target.value })}
                       className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
                     >
-                      <option value="vendor_ship">Vendor Ship</option>
-                      <option value="per_order_rate">Per Order Rate</option>
+                      <option value="vendor_ship">🚚 Shadowfax (Weekly Plan)</option>
+                      <option value="per_order_rate">🚚 Shadowfax (45-Day Plan)</option>
                     </select>
                   </div>
 
@@ -4057,7 +4145,7 @@ export default function Home() {
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-neutral-500 font-semibold">Category Type:</span>
                   <span className="text-neutral-800 dark:text-neutral-200 font-bold capitalize">
-                    {payoutToPay.category === "vendor_ship" ? "Shadowfax (Vendor Ship)" : "Factory (Per Order)"}
+                    {payoutToPay.category === "vendor_ship" ? "Shadowfax (Weekly Plan)" : "Shadowfax (45-Day Plan)"}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-xs">
