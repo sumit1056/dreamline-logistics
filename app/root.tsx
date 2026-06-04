@@ -51,7 +51,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   useEffect(() => {
-    if ("serviceWorker" in navigator && typeof window !== "undefined") {
+    if ("serviceWorker" in navigator && typeof window !== "undefined" && import.meta.env.PROD) {
       const registerSW = () => {
         navigator.serviceWorker
           .register("/sw.js")
