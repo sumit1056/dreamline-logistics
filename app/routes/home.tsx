@@ -630,6 +630,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function Home() {
   const { users, expenses, deliveries, adminCredentials, loggedInUser } = useLoaderData<typeof loader>();
+  const drivers = users.filter((u: any) => u.role === "DRIVER");
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
 
@@ -2498,11 +2499,29 @@ export default function Home() {
                         <input type="hidden" name="_action" value="create_delivery" />
 
                         <input type="hidden" name="title" value="Daily Runsheet Summary" />
-                        <input type="hidden" name="driverName" value={users.find(u => u.role === "DRIVER")?.name || "John Driver"} />
+                        {drivers.length <= 1 && (
+                          <input type="hidden" name="driverName" value={drivers[0]?.name || "John Driver"} />
+                        )}
                         <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
 
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className={`grid grid-cols-1 gap-4 ${drivers.length > 1 ? "sm:grid-cols-2 lg:grid-cols-4" : "sm:grid-cols-3"}`}>
+                          {drivers.length > 1 && (
+                            <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Field Operator</label>
+                              <select
+                                name="driverName"
+                                className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
+                              >
+                                {drivers.map((d: any) => (
+                                  <option key={d.id} value={d.name}>
+                                    👤 {d.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
                           <div className="space-y-1">
                             <label className="text-xs font-semibold text-neutral-500">Order Category</label>
                             <select
