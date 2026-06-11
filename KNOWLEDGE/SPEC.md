@@ -37,3 +37,21 @@ The application has been unified to enforce a highly focused, single administrat
 - **Image Storage**: Base64 datauri persistence for offline-capable, local-first zero-infrastructure slip attachment archiving.
 - **Styling**: Tailwind CSS + custom glassmorphic variables themed with premium Notion styles.
 - **App Wrapper / Mobile Integration**: Progressive Web App (PWA) with client-side shortcuts, cache service worker, and standard Apple Mobile Web App standards.
+
+## 5. Mid-Beta Enhancements & UI/UX Refinements (Phase 1.1)
+- **Auto-Hiding Notification Timers**: 
+    - Implemented a 6-second auto-hiding delay for all workspace status alerts, validation errors, AI parsed expense helpers, and login authentication errors to prevent sticky message blocking.
+- **Dynamic Driver Assignment in Runsheet Console**:
+    - The Daily Runsheet Console conditionally displays the driver selection dropdown based on active driver count. 
+    - If 0 or 1 drivers are registered, the selector is hidden and the lone driver is passed automatically as a hidden input.
+    - If multiple drivers exist, the dropdown is displayed in a balanced, responsive column layout grid.
+- **Custom Notion-Styled Popup Modals**:
+    - Replaced all default browser-native `alert()` and `confirm()` popup alerts with a unified, custom responsive slide-up overlay modal matching the Notion aesthetics.
+- **User Control Center Credentials Visibility**:
+    - Registered driver operator profiles display their plain-text passwords (`passwordText` field in the database) to allow administrators to directly view/copy them for dashboard access.
+    - Added a togglable eye-icon toggle to show/hide plaintext values on the Create Admin password input.
+    - Streamlined layout by removing descriptive subheadings across the administrative forms.
+- **Runsheet History Advanced Filtering**:
+    - Integrated a dynamic "Filter Driver" option in the Runsheet History tracker dashboard to sort/view logs per driver operator.
+    - Corrected the click details mapping inside "Recent Daily Logs" to display the specific driver profile modal details instead of defaulting to the first record.
+

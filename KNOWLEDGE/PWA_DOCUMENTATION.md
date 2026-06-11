@@ -54,3 +54,14 @@ This guarantees identical output on both the server and all client browsers, res
 3. Tap **Install app** or **Add to Home screen**.
 4. Confirm installation. The app will be available in the drawer and home screen.
 5. **Shortcuts**: Touch and hold the app icon to view launcher shortcuts for instant transaction/runsheet entries.
+
+## 5. Development vs. Production Service Worker Guard
+To prevent development caching conflicts (where local changes are blocked by cached resources), the Service Worker is registered exclusively in production environments. 
+In [root.tsx](file:///e:/logictic_app/app/root.tsx), the registration block is guarded with:
+```typescript
+if (typeof window !== "undefined" && "serviceWorker" in navigator && import.meta.env.PROD) {
+  // Service Worker registration logic
+}
+```
+This ensures developers receive immediate hot-module updates during local development, while production PWA installs retain fully functioning offline capabilities.
+

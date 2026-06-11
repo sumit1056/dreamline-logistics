@@ -71,3 +71,11 @@ When initiating the next coding session (whether at home or on the corporate lap
   - Formula: **₹40,000 fixed base rate + ₹35 per order** completed.
   - Frequency: Deferred 45-day monthly payout (expected payout on the 15th of month M+2, e.g., work done in June is paid on August 15th).
 
+## 8. UI/UX Patterns & Caching Guidelines
+- **Auto-Hiding Banners**: All notification banner states (e.g. `actionErrorVisible`, `parsedExpenseVisible`, `userControlSuccessVisible`, `errorVisible`) must be controlled by a `useEffect` timer that resets the visibility state to `false` after 6000ms.
+- **Custom Notion-Styled Modals**: Do not use browser-native `alert()` or `confirm()`. Use the custom popup modal implementation in `home.tsx` for confirming critical actions (e.g. delete, mark paid, notifications).
+- **Runsheet Console Layout**: Maintain the responsive grid adjustments. If multiple drivers exist, use a 2-column layout on large screens to prevent input field squeezing. If a single driver exists, use a 3-column layout. Form inputs should use solid backgrounds (`bg-white` in light mode, `dark:bg-[#1e1e1e]` in dark mode) to prevent OS rendering overrides.
+- **Operator Passwords**: Plain-text passwords must be stored as `passwordText` on creation and shown on the Operator details cards in the User Control Center.
+- **PWA Service Worker Registration**: The service worker in `app/root.tsx` must only be registered in production (`import.meta.env.PROD`) to avoid aggressive developer-mode caching.
+
+
