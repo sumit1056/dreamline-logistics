@@ -78,4 +78,18 @@ When initiating the next coding session (whether at home or on the corporate lap
 - **Operator Passwords**: Plain-text passwords must be stored as `passwordText` on creation and shown on the Operator details cards in the User Control Center.
 - **PWA Service Worker Registration**: The service worker in `app/root.tsx` must only be registered in production (`import.meta.env.PROD`) to avoid aggressive developer-mode caching.
 
+## 9. Bootstrap Admin Credentials (Automatic Seed)
+- If the database `AdminCredential` table is empty, a seed administrator is automatically registered by the authentication loader/action.
+- Default Login:
+  - **Username**: `sumit@6969`
+  - **Password**: `sumitdream6969`
+This acts as the fallback gateway to initialize other accounts if the DB is reset or migrations wipe data.
+
+## 10. Settlement Payout Reconciliation Reference Tags
+To mark payouts as "PAID" in the Settlement Cycles Tracker, an INCOME transaction note must contain a matching reference tag:
+- **Weekly Plan (`vendor_ship`)**: `[Ref: Weekly-Payout-VS-YYYY-MM-DD]` (where `YYYY-MM-DD` is the Monday of the week).
+- **45-Day Plan (`per_order_rate`)**: `[Ref: Monthly-Payout-PO-YYYY-MM]` (where `YYYY-MM` is the year and month of the cycle).
+Status transitions to `PAID` automatically when an `Expense` of type `INCOME` matches the tag in the `notes` field.
+
+
 
