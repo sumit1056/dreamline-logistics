@@ -1041,13 +1041,13 @@ Great thinking! Here's the plan:
 
 ### Your Current Setup is Already Perfect for Beta Testing
 
-Your app is already deployed on **Vercel** with a live URL. Since there's **no login yet**, anyone with the link can open it, install the PWA, and start testing — which is exactly what you want for this phase.
+Your app is already deployed on **Render** with a live URL. Since there's **no login yet**, anyone with the link can open it, install the PWA, and start testing — which is exactly what you want for this phase.
 
 ### The Strategy (2 Phases)
 
 | Phase | What | Details |
 |---|---|---|
-| **Phase 1: Beta Testing** (Now) | Share the current Vercel URL with your testers | They can use everything — AI parser, manual entry, dashboards, PWA install. All entries save to the real Neon Postgres database. No login needed. |
+| **Phase 1: Beta Testing** (Now) | Share the current Render URL with your testers | They can use everything — AI parser, manual entry, dashboards, PWA install. All entries save to the real Neon Postgres database. No login needed. |
 | **Phase 2: Lock It Down** (After testing) | Add a login page with username & password | After testers report bugs and we fix them, we add authentication so **nobody** can access the app without credentials. |
 
 ### Why You Don't Need a Separate "Testing Link"
@@ -1058,7 +1058,7 @@ Your app is already deployed on **Vercel** with a live URL. Since there's **no l
 
 ### What You Should Do Right Now
 
-1. **Share your Vercel URL** (e.g. `https://dreamline-logistics.vercel.app`) with your testers
+1. **Share your Render URL** (e.g. `https://dreamline-logistics.onrender.com/`) with your testers
 2. Ask them to:
    - Open it on their phones
    - Install the PWA (the install prompt will show up)
@@ -1075,7 +1075,7 @@ Your app is already deployed on **Vercel** with a live URL. Since there's **no l
 
 ---
 
-**So to summarize**: Just share your current Vercel URL with the testers right now. It's safe, fully functional, and everything saves to the database. Once they're done testing and we've fixed all bugs, I'll add the login system to lock it down. 
+**So to summarize**: Just share your current Render URL with the testers right now. It's safe, fully functional, and everything saves to the database. Once they're done testing and we've fixed all bugs, I'll add the login system to lock it down. 
 
 Want to proceed with sharing the link for testing? Or should we add anything else before sharing (like a "Beta Tester" badge on the UI so they know it's a test version)?
 
