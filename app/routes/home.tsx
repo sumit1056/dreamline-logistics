@@ -796,12 +796,12 @@ export default function Home() {
     }
   }, []);
 
-  // Redirect driver role away from user control center if they try to access it
+  // Redirect away from user control center if they try to access it
   useEffect(() => {
-    if (loggedInUser?.role === "DRIVER" && activeTab === "users") {
+    if (activeTab === "users") {
       setActiveTab("expenses");
     }
-  }, [loggedInUser, activeTab]);
+  }, [activeTab]);
 
   // PWA Install Prompt & Compatibility Logic
   useEffect(() => {
@@ -1476,7 +1476,7 @@ export default function Home() {
             <span>Order Tracking</span>
           </button>
 
-          {loggedInUser?.role !== "DRIVER" && (
+          {/* {loggedInUser?.role !== "DRIVER" && (
             <button
               onClick={() => switchTab("users")}
               className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
@@ -1490,7 +1490,7 @@ export default function Home() {
               </svg>
               <span>User Control Center</span>
             </button>
-          )}
+          )} */}
         </nav>
 
         {/* Persistent Install App Button (Hidden when already standalone) */}
