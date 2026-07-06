@@ -172,7 +172,7 @@ export async function action({ request }: ActionFunctionArgs) {
           - type: (string) Must be either "EXPENSE" or "INCOME".
           - category: (string) Must be one of the following exactly:
             For "EXPENSE": 'fuel', 'bittu', 'service', 'other'
-            For "INCOME": 'shadowfax', 'factory', 'other_income'
+            For "INCOME": 'shadowfax', 'factory', 'vendor_income', 'other_income'
           - notes: (string) Clean and concise description of the transaction.
           - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234), otherwise null.
           - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
@@ -547,8 +547,10 @@ export async function action({ request }: ActionFunctionArgs) {
     let expenseCategory = "other_income";
     if (category === "vendor_ship") {
       expenseCategory = "shadowfax";
-    } else if (category === "per_order_rate_weekly" || category === "per_order_rate_monthly" || category === "per_order_rate") {
+    } else if (category === "per_order_rate_weekly" || category === "per_order_rate") {
       expenseCategory = "factory";
+    } else if (category === "per_order_rate_monthly") {
+      expenseCategory = "vendor_income";
     }
 
     let refTag = "";
@@ -1927,8 +1929,9 @@ export default function Home() {
                                   </>
                                 ) : (
                                   <>
-                                    <option value="shadowfax">🚚 Shadowfax (Weekly Plan)</option>
-                                    <option value="factory">🚚 Shadowfax (45-Day Plan)</option>
+                                    <option value="shadowfax">🚚 70 Per Order Income</option>
+                                    <option value="factory">🚚 Vendor Per Order Income</option>
+                                    <option value="vendor_income">🚚 Vendor Income</option>
                                     <option value="other_income">💰 Other Income</option>
                                   </>
                                 )}
@@ -1943,7 +1946,7 @@ export default function Home() {
                               <input
                                 type="text"
                                 name="notes"
-                                placeholder={manualType === "EXPENSE" ? "What was this expense for?" : "Vendor payout, factory cash receipt details"}
+                                placeholder={manualType === "EXPENSE" ? "What was this expense for?" : "70 per order payout, vendor weekly order pay, vendor base pay details"}
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
                               />
                             </div>
@@ -2072,8 +2075,9 @@ export default function Home() {
                               {exp.category === "shadowfax" && "🚚"}
                               {exp.category === "rate_change" && "📈"}
                               {exp.category === "factory" && "🚚"}
+                              {exp.category === "vendor_income" && "🚚"}
                               {exp.category === "other_income" && "💰"}
-                              {exp.category === "shadowfax" ? "Shadowfax (Weekly)" : exp.category === "factory" ? "Shadowfax (45-Day)" : exp.category}
+                              {exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}
                               {exp.imageUrl && (
                                 <button
                                   type="button"
@@ -2308,8 +2312,9 @@ export default function Home() {
                                   {exp.category === "other" && "📦"}
                                   {exp.category === "shadowfax" && "🚚"}
                                   {exp.category === "factory" && "🚚"}
+                                  {exp.category === "vendor_income" && "🚚"}
                                   {exp.category === "other_income" && "💰"}
-                                  <span>{exp.category === "shadowfax" ? "Shadowfax (Weekly)" : exp.category === "factory" ? "Shadowfax (45-Day)" : exp.category}</span>
+                                  <span>{exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}</span>
                                   {exp.imageUrl && (
                                     <button
                                       type="button"
@@ -2383,8 +2388,9 @@ export default function Home() {
                                 {exp.category === "other" && "📦"}
                                 {exp.category === "shadowfax" && "🚚"}
                                 {exp.category === "factory" && "🚚"}
+                                {exp.category === "vendor_income" && "🚚"}
                                 {exp.category === "other_income" && "💰"}
-                                <span>{exp.category === "shadowfax" ? "Shadowfax (Weekly)" : exp.category === "factory" ? "Shadowfax (45-Day)" : exp.category}</span>
+                                <span>{exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}</span>
                                 {exp.imageUrl && (
                                   <button
                                     type="button"
@@ -2730,7 +2736,7 @@ export default function Home() {
                           >
                             <div className="flex justify-between items-center">
                               <span className="capitalize text-xs font-bold text-neutral-700 dark:text-neutral-300 flex items-center gap-1.5">
-                                🚚 {del.category === "vendor_ship" ? "Vendor Ship (Weekly)" : "Split Plan (Weekly)"}
+                                🚚 {del.category === "vendor_ship" ? "70 Per Order" : "Vendor Per Order"}
                               </span>
                               <span className="text-xs font-bold text-neutral-900 dark:text-neutral-100">
                                 ₹{payout.toLocaleString()}
@@ -2770,13 +2776,13 @@ export default function Home() {
                     </div>
 
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Shadowfax (Weekly) Volume</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">70 Per Order Volume</div>
                       <div className="text-2xl font-bold mt-1 text-[#2383e2]">{orderCounts.vendorShipOrders} <span className="text-xs text-neutral-400 font-normal">orders</span></div>
                       <div className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300 mt-1">₹{orderCounts.vendorShipValue.toLocaleString()}</div>
                     </div>
 
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Shadowfax (45-Day) Volume</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Vendor Per Order Volume</div>
                       <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">{orderCounts.perOrderRateOrders} <span className="text-xs text-neutral-400 font-normal">orders</span></div>
                       <div className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300 mt-1">₹{orderCounts.perOrderRateValue.toLocaleString()}</div>
                     </div>
@@ -2900,8 +2906,8 @@ export default function Home() {
                       <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-1 sm:pb-0 -mx-1 px-1">
                         {[
                           { value: "ALL", label: "All Categories" },
-                          { value: "VENDOR_SHIP", label: "Shadowfax (Weekly)" },
-                          { value: "PER_ORDER", label: "Shadowfax (45-Day)" },
+                          { value: "VENDOR_SHIP", label: "70 Per Order" },
+                          { value: "PER_ORDER", label: "Vendor Per Order" },
                         ].map((cat) => (
                           <button
                             key={cat.value}
@@ -2985,7 +2991,7 @@ export default function Home() {
                                         ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                         : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                                     }`}>
-                                      {del.category === "vendor_ship" ? "Vendor Ship (Weekly)" : "Split Plan (Weekly)"}
+                                      {del.category === "vendor_ship" ? "70 Per Order" : "Vendor Per Order"}
                                     </span>
                                   </td>
                                   <td className="p-3.5 text-center font-semibold text-emerald-600 dark:text-emerald-400">
@@ -3125,7 +3131,7 @@ export default function Home() {
                                   ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                   : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                               }`}>
-                                {del.category === "vendor_ship" ? "Vendor Ship (Weekly)" : "Split Plan (Weekly)"}
+                                {del.category === "vendor_ship" ? "70 Per Order" : "Vendor Per Order"}
                               </span>
                               
                               <div className="text-xs text-neutral-600 dark:text-neutral-300">
@@ -3276,7 +3282,7 @@ export default function Home() {
                       <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Received (This Month)</div>
                       <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
                         ₹{expenses
-                          .filter(e => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory") && new Date(e.timestamp).getMonth() === new Date().getMonth())
+                          .filter(e => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory" || e.category === "vendor_income") && new Date(e.timestamp).getMonth() === new Date().getMonth())
                           .reduce((sum, e) => sum + e.amount, 0)
                           .toLocaleString()}
                       </div>
@@ -4349,8 +4355,9 @@ export default function Home() {
                     >
                       {editingExpense.type === "INCOME" ? (
                         <>
-                          <option value="shadowfax">🚚 Shadowfax (Weekly Plan)</option>
-                          <option value="factory">🚚 Shadowfax (45-Day Plan)</option>
+                          <option value="shadowfax">🚚 70 Per Order Income</option>
+                          <option value="factory">🚚 Vendor Per Order Income</option>
+                          <option value="vendor_income">🚚 Vendor Income</option>
                           <option value="other_income">💰 Other Income</option>
                         </>
                       ) : (
