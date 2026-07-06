@@ -74,7 +74,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     phone: session.get("userPhone") || null,
   };
 
-  let [users, expenses, deliveries, adminCredentials] = await Promise.all([
+  let [users, expenses, deliveries, adminCredentials, settings] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
     prisma.delivery.findMany({ orderBy: { createdAt: "desc" } }),
@@ -82,6 +82,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       select: { id: true, username: true, createdAt: true },
       orderBy: { createdAt: "desc" }
     }),
+    prisma.systemSetting.findMany(),
   ]);
 
   let didSeed = false;
@@ -121,11 +122,24 @@ export async function loader({ request }: LoaderFunctionArgs) {
     didSeed = true;
   }
 
+  if (settings.length === 0) {
+    await prisma.systemSetting.createMany({
+      data: [
+        { key: "rate_vendor_ship", value: "70" },
+        { key: "rate_per_order_weekly", value: "35" },
+        { key: "rate_per_order_monthly_base", value: "53000" },
+        { key: "cc_fuel_cycle_end_day", value: "4" },
+      ],
+    });
+    didSeed = true;
+  }
+
   if (didSeed) {
-    [users, expenses, deliveries] = await Promise.all([
+    [users, expenses, deliveries, settings] = await Promise.all([
       prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
       prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
       prisma.delivery.findMany({ orderBy: { createdAt: "desc" } }),
+      prisma.systemSetting.findMany(),
     ]);
     adminCredentials = await prisma.adminCredential.findMany({
       select: { id: true, username: true, createdAt: true },
@@ -133,7 +147,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
     });
   }
 
-  return { users, expenses, deliveries, adminCredentials, loggedInUser };
+  const getSetting = (key: string, defaultValue: string) => {
+    return settings.find((s) => s.key === key)?.value || defaultValue;
+  };
+
+  const systemSettings = {
+    rateVendorShip: parseFloat(getSetting("rate_vendor_ship", "70")),
+    ratePerOrderWeekly: parseFloat(getSetting("rate_per_order_weekly", "35")),
+    ratePerOrderMonthlyBase: parseFloat(getSetting("rate_per_order_monthly_base", "53000")),
+    ccFuelCycleEndDay: parseInt(getSetting("cc_fuel_cycle_end_day", "4"), 10),
+  };
+
+  return { users, expenses, deliveries, adminCredentials, loggedInUser, systemSettings };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -637,12 +662,16 @@ export async function action({ request }: ActionFunctionArgs) {
     const paymentDateStr = formData.get("paymentDate")?.toString() || null;
     const paymentDate = paymentDateStr ? new Date(paymentDateStr) : new Date();
 
+    const endDaySetting = await prisma.systemSetting.findUnique({ where: { key: "cc_fuel_cycle_end_day" } });
+    const endDay = endDaySetting ? parseInt(endDaySetting.value, 10) : 4;
+
     // Generate the start and end of the billing cycle
-    const parsedDate = new Date(`${billingMonth}-04`); // ends on 4th
+    const endDayStr = String(endDay).padStart(2, "0");
+    const parsedDate = new Date(`${billingMonth}-${endDayStr}`);
     const yyyy = parsedDate.getFullYear();
     const mm = parsedDate.getMonth(); // 0-indexed month
-    const startDate = new Date(yyyy, mm - 1, 5, 0, 0, 0, 0); // starts 5th of M-1
-    const endDate = new Date(yyyy, mm, 4, 23, 59, 59, 999); // ends 4th of M
+    const startDate = new Date(yyyy, mm - 1, endDay + 1, 0, 0, 0, 0); // starts endDay+1 of M-1
+    const endDate = new Date(yyyy, mm, endDay, 23, 59, 59, 999); // ends endDay of M
     
     const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
     const startStr = startDate.toLocaleDateString("en-US", formatOption);
@@ -735,12 +764,63 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true, action: "update_weekly_orders" };
   }
 
+  if (actionType === "update_system_settings") {
+    const rateVendorShip = formData.get("rateVendorShip")?.toString() || "70";
+    const ratePerOrderWeekly = formData.get("ratePerOrderWeekly")?.toString() || "35";
+    const ratePerOrderMonthlyBase = formData.get("ratePerOrderMonthlyBase")?.toString() || "53000";
+    const ccFuelCycleEndDay = formData.get("ccFuelCycleEndDay")?.toString() || "4";
+
+    const parsedEndDay = parseInt(ccFuelCycleEndDay, 10);
+    if (isNaN(parsedEndDay) || parsedEndDay < 1 || parsedEndDay > 28) {
+      return { error: "Credit Card Billing Day must be between 1 and 28." };
+    }
+
+    try {
+      await prisma.$transaction([
+        prisma.systemSetting.upsert({
+          where: { key: "rate_vendor_ship" },
+          update: { value: rateVendorShip },
+          create: { key: "rate_vendor_ship", value: rateVendorShip },
+        }),
+        prisma.systemSetting.upsert({
+          where: { key: "rate_per_order_weekly" },
+          update: { value: ratePerOrderWeekly },
+          create: { key: "rate_per_order_weekly", value: ratePerOrderWeekly },
+        }),
+        prisma.systemSetting.upsert({
+          where: { key: "rate_per_order_monthly_base" },
+          update: { value: ratePerOrderMonthlyBase },
+          create: { key: "rate_per_order_monthly_base", value: ratePerOrderMonthlyBase },
+        }),
+        prisma.systemSetting.upsert({
+          where: { key: "cc_fuel_cycle_end_day" },
+          update: { value: ccFuelCycleEndDay },
+          create: { key: "cc_fuel_cycle_end_day", value: ccFuelCycleEndDay },
+        }),
+      ]);
+      return { success: true, action: "update_system_settings" };
+    } catch (err: any) {
+      console.error("Failed to update system settings:", err);
+      return { error: err.message || "Failed to update system settings" };
+    }
+  }
+
   return null;
 }
 
 export default function Home() {
-  const { users, expenses, deliveries, adminCredentials, loggedInUser } = useLoaderData<typeof loader>();
+  const { users, expenses, deliveries, adminCredentials, loggedInUser, systemSettings } = useLoaderData<typeof loader>();
   const drivers = users.filter((u: any) => u.role === "DRIVER");
+
+  const getOrdinal = (day: number) => {
+    if (day > 3 && day < 21) return `${day}th`;
+    switch (day % 10) {
+      case 1:  return `${day}st`;
+      case 2:  return `${day}nd`;
+      case 3:  return `${day}rd`;
+      default: return `${day}th`;
+    }
+  };
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
   const submit = useSubmit();
@@ -857,12 +937,13 @@ export default function Home() {
   const [payoutToPay, setPayoutToPay] = useState<any | null>(null);
   const [weeklyOrdersToEdit, setWeeklyOrdersToEdit] = useState<any | null>(null);
   const [ccBillToPay, setCcBillToPay] = useState<any | null>(null);
-  const [payoutSubTab, setPayoutSubTab] = useState<"payouts" | "fuel_cycles">("payouts");
+  const [payoutSubTab, setPayoutSubTab] = useState<"payouts" | "fuel_cycles" | "settings">("payouts");
   const [payAmountInput, setPayAmountInput] = useState<string>("");
   const [payDateInput, setPayDateInput] = useState<string>("");
   const [payNotesInput, setPayNotesInput] = useState<string>("");
   const [payoutSuccessVisible, setPayoutSuccessVisible] = useState(false);
   const [ccSuccessVisible, setCcSuccessVisible] = useState(false);
+  const [settingsSuccessVisible, setSettingsSuccessVisible] = useState(false);
   const [payoutStatusFilter, setPayoutStatusFilter] = useState<"ALL" | "PAID" | "UNPAID" | "ONGOING">("ALL");
   const [payoutSortOrder, setPayoutSortOrder] = useState<"date_desc" | "date_asc" | "amount_desc" | "amount_asc">("date_desc");
 
@@ -1226,10 +1307,10 @@ export default function Home() {
       totalCompleted += d.completedOrders;
       if (d.category === "vendor_ship") {
         vendorShipOrders += d.completedOrders;
-        vendorShipValue += d.completedOrders * 70;
+        vendorShipValue += d.completedOrders * (systemSettings?.rateVendorShip ?? 70);
       } else {
         perOrderRateOrders += d.completedOrders;
-        perOrderRateValue += d.completedOrders * 35;
+        perOrderRateValue += d.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
         const date = new Date(d.createdAt);
         const yyyy = date.getFullYear();
         const mm = String(date.getMonth() + 1).padStart(2, "0");
@@ -1237,7 +1318,7 @@ export default function Home() {
       }
     });
 
-    perOrderRateValue += activeMonths.size * 53000;
+    perOrderRateValue += activeMonths.size * (systemSettings?.ratePerOrderMonthlyBase ?? 53000);
 
     return {
       totalRunsheets,
@@ -1250,7 +1331,7 @@ export default function Home() {
       totalValue: vendorShipValue + perOrderRateValue,
       completionRate: totalAssigned > 0 ? Math.round((totalCompleted / totalAssigned) * 100) : 0
     };
-  }, [filteredDeliveries]);
+  }, [filteredDeliveries, systemSettings]);
 
   // Weekly Payout Tracker memoized calculations
   const weeklyPayouts = useMemo(() => {
@@ -1407,8 +1488,8 @@ export default function Home() {
     // Map weekly groups
     Object.values(weeklyGroups).forEach((group) => {
       const calculatedPayout = group.category === "vendor_ship"
-        ? group.completedOrders * 70
-        : group.completedOrders * 35;
+        ? group.completedOrders * (systemSettings?.rateVendorShip ?? 70)
+        : group.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
       
       const expectedDate = new Date(group.mondayDate);
       expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
@@ -1450,7 +1531,7 @@ export default function Home() {
 
     // Map monthly groups
     Object.values(monthlyGroups).forEach((group) => {
-      const calculatedPayout = 53000;
+      const calculatedPayout = systemSettings?.ratePerOrderMonthlyBase ?? 53000;
 
       // Payout of month M is on the 15th of month M+2 (deferred 45 days)
       const mDate = new Date(group.startDate);
@@ -1487,7 +1568,7 @@ export default function Home() {
     });
 
     return list.sort((a, b) => b.mondayStr.localeCompare(a.mondayStr));
-  }, [deliveries, expenses]);
+  }, [deliveries, expenses, systemSettings]);
 
   const filteredAndSortedPayouts = useMemo(() => {
     let result = [...weeklyPayouts];
@@ -1528,10 +1609,12 @@ export default function Home() {
     let curYear = startYear;
     let curMonth = startMonth;
 
+    const endDay = systemSettings?.ccFuelCycleEndDay ?? 4;
+
     while (curYear < endYear || (curYear === endYear && curMonth <= endMonth)) {
       const billingMonth = `${curYear}-${String(curMonth + 1).padStart(2, "0")}`;
-      const startDate = new Date(curYear, curMonth - 1, 5, 0, 0, 0, 0); // e.g. Dec 5th, 2025
-      const endDate = new Date(curYear, curMonth, 4, 23, 59, 59, 999); // e.g. Jan 4th, 2026
+      const startDate = new Date(curYear, curMonth - 1, endDay + 1, 0, 0, 0, 0); 
+      const endDate = new Date(curYear, curMonth, endDay, 23, 59, 59, 999); 
 
       const totalFuelExpense = expenses
         .filter((e) => e.type === "EXPENSE" && e.category === "fuel" && new Date(e.timestamp) >= startDate && new Date(e.timestamp) <= endDate)
@@ -1573,7 +1656,7 @@ export default function Home() {
     }
 
     return list;
-  }, [expenses]);
+  }, [expenses, systemSettings]);
 
   const filteredAndSortedCcFuelCycles = useMemo(() => {
     let result = [...ccFuelCycles];
@@ -1673,6 +1756,10 @@ export default function Home() {
           setPayoutSuccessVisible(true);
           const timer = setTimeout(() => setPayoutSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
+        } else if (actionData.action === "update_system_settings") {
+          setSettingsSuccessVisible(true);
+          const timer = setTimeout(() => setSettingsSuccessVisible(false), 6000);
+          return () => clearTimeout(timer);
         }
       }
     }
@@ -1770,7 +1857,7 @@ export default function Home() {
             <span>Expenses Tracking</span>
           </button>
 
-          {/* <button
+          <button
             onClick={() => switchTab("orders")}
             className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
               activeTab === "orders"
@@ -1780,10 +1867,10 @@ export default function Home() {
           >
             <svg className={`w-4 h-4 transition-colors ${activeTab === 'orders' ? 'text-[#5D87FF]' : 'text-blue-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10M13 16h6m-6 0H6m13 0a2 2 0 002-2V9a1 1 0 00-1-1h-6" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1-1v10M13 16h6m-6 0H6m13 0a2 2 0 002-2V9a1 1 0 00-1-1h-6" />
             </svg>
-            <span>Order Tracking</span>
-          </button> */}
+            <span>Settlement & Cycle Tracker</span>
+          </button>
 
           {/* {loggedInUser?.role !== "DRIVER" && (
             <button
@@ -2786,7 +2873,7 @@ export default function Home() {
               {/* Category Header with Toggle Dashboard */}
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                 <div>
-                  <h1 className="text-2xl font-bold tracking-tight">Order Tracking</h1>
+                  <h1 className="text-2xl font-bold tracking-tight">Settlement & Cycle Tracker</h1>
                   {/* Small subheader description removed */}
                 </div>
 
@@ -3236,8 +3323,8 @@ export default function Home() {
                             paginatedDeliveries.map((del) => {
                               const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
                               const payout = del.category === "vendor_ship"
-                                ? del.completedOrders * 70
-                                : del.completedOrders * 35;
+                                ? del.completedOrders * (systemSettings?.rateVendorShip ?? 70)
+                                : del.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
                               return (
                                 <tr key={del.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
                                   <td className="p-3.5 text-neutral-500">
@@ -3408,7 +3495,7 @@ export default function Home() {
                             <div className="flex justify-between items-center text-xs pt-1">
                               <span className="text-neutral-500 font-semibold">Payout:</span>
                               <span className="font-bold text-neutral-800 dark:text-neutral-200">
-                                ₹{(del.category === "vendor_ship" ? del.completedOrders * 70 : del.completedOrders * 35).toLocaleString()}
+                                ₹{(del.category === "vendor_ship" ? del.completedOrders * (systemSettings?.rateVendorShip ?? 70) : del.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35)).toLocaleString()}
                               </span>
                             </div>
 
@@ -3617,12 +3704,26 @@ export default function Home() {
                             : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
                         }`}
                       >
-                        ⛽ Credit Card Fuel Cycles (4th - 4th)
+                        ⛽ Credit Card Fuel Cycles ({systemSettings ? `${getOrdinal(systemSettings.ccFuelCycleEndDay)} - ${getOrdinal(systemSettings.ccFuelCycleEndDay)}` : "4th - 4th"})
                       </button>
+                      {loggedInUser?.role !== "DRIVER" && (
+                        <button
+                          type="button"
+                          onClick={() => setPayoutSubTab("settings")}
+                          className={`px-4 py-2.5 text-xs font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-1.5 ${
+                            payoutSubTab === "settings"
+                              ? "border-neutral-800 text-neutral-800 dark:border-neutral-200 dark:text-neutral-200"
+                              : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
+                          }`}
+                        >
+                          ⚙️ Config & Rates
+                        </button>
+                      )}
                     </div>
 
                     {/* Filter and Sort Row */}
-                    <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
+                    {payoutSubTab !== "settings" && (
+                      <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
                       {/* Status Filter Pills */}
                       <div className="flex flex-wrap gap-1.5 items-center">
                         <span className="text-xs font-semibold text-[#5A6A85] dark:text-[#7C8BA1] mr-1.5">Status:</span>
@@ -3662,9 +3763,120 @@ export default function Home() {
                         </select>
                       </div>
                     </div>
+                  )}
 
                     <div className="divide-y divide-[#edece9]/60 dark:divide-neutral-800/60">
-                      {payoutSubTab === "payouts" ? (
+                      {payoutSubTab === "settings" ? (
+                        <div className="p-6 bg-white dark:bg-[#181818] rounded-b-lg">
+                          <div className="max-w-2xl mx-auto space-y-6">
+                            <div>
+                              <h4 className="text-base font-bold text-neutral-800 dark:text-neutral-200">
+                                Operational & Financial Configuration
+                              </h4>
+                              <p className="text-xs text-neutral-400 mt-1">
+                                Adjust payout rates, base monthly packages, and credit card cutoff days. Changes propagate immediately to all metric cards and ledger generators.
+                              </p>
+                            </div>
+
+                            {settingsSuccessVisible && (
+                              <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/30 text-emerald-800 dark:text-emerald-300 rounded-md text-xs font-semibold flex items-center gap-2">
+                                <span>✅</span> Settings updated successfully!
+                              </div>
+                            )}
+
+                            {actionData?.error && actionData?.action === "update_system_settings" && (
+                              <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/30 text-rose-800 dark:text-rose-300 rounded-md text-xs font-semibold flex items-center gap-2">
+                                <span>⚠️</span> {actionData.error}
+                              </div>
+                            )}
+
+                            <Form method="post" className="space-y-4">
+                              <input type="hidden" name="_action" value="update_system_settings" />
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-1.5">
+                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
+                                    70 Per Order Rate (₹)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    name="rateVendorShip"
+                                    step="0.01"
+                                    defaultValue={systemSettings?.rateVendorShip ?? 70}
+                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
+                                    required
+                                  />
+                                  <p className="text-[10px] text-neutral-400">
+                                    Vendor weekly payout per completed order (e.g. Shadowfax runsheets).
+                                  </p>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
+                                    Vendor Per Order Weekly Rate (₹)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    name="ratePerOrderWeekly"
+                                    step="0.01"
+                                    defaultValue={systemSettings?.ratePerOrderWeekly ?? 35}
+                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
+                                    required
+                                  />
+                                  <p className="text-[10px] text-neutral-400">
+                                    Per-order rate for vendor drivers, paid weekly.
+                                  </p>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
+                                    Vendor Monthly Base Salary (₹)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    name="ratePerOrderMonthlyBase"
+                                    step="1"
+                                    defaultValue={systemSettings?.ratePerOrderMonthlyBase ?? 53000}
+                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
+                                    required
+                                  />
+                                  <p className="text-[10px] text-neutral-400">
+                                    Fixed monthly base pay for per-order drivers (default: ₹53,000).
+                                  </p>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
+                                    CC Fuel Cycle Billing Day
+                                  </label>
+                                  <input
+                                    type="number"
+                                    name="ccFuelCycleEndDay"
+                                    min="1"
+                                    max="28"
+                                    defaultValue={systemSettings?.ccFuelCycleEndDay ?? 4}
+                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
+                                    required
+                                  />
+                                  <p className="text-[10px] text-neutral-400">
+                                    Credit Card statement end date (1-28). The next cycle automatically starts on the following day.
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className="pt-2 border-t border-[#edece9] dark:border-[#2f2f2f] flex justify-end">
+                                <button
+                                  type="submit"
+                                  disabled={navigation.state === "submitting"}
+                                  className="px-4 py-2 text-xs font-bold bg-[#5D87FF] hover:bg-[#4570E6] text-white rounded transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
+                                >
+                                  {navigation.state === "submitting" ? "Saving..." : "Save Configuration"}
+                                </button>
+                              </div>
+                            </Form>
+                          </div>
+                        </div>
+                      ) : payoutSubTab === "payouts" ? (
                         filteredAndSortedPayouts.length === 0 ? (
                           <div className="p-8 text-center text-neutral-400 italic text-xs">
                             No payouts match the selected status filter.
@@ -4254,7 +4466,7 @@ export default function Home() {
         </div>
 
         {/* Mobile Sticky Bottom Tab Bar (Exactly 2 Tabs) */}
-        {/* <div className="mobile-bottom-nav md:hidden border-t border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#191919] w-full flex items-center justify-around z-50">
+        <div className="mobile-bottom-nav md:hidden border-t border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#191919] w-full flex items-center justify-around z-50">
           <button
             onClick={() => switchTab("expenses")}
             className={`flex flex-col items-center justify-center w-1/2 py-2 text-xs font-semibold gap-1 transition-all ${
@@ -4281,9 +4493,9 @@ export default function Home() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" />
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10M13 16h6m-6 0H6m13 0a2 2 0 002-2V9a1 1 0 00-1-1h-6" />
             </svg>
-            <span>Orders</span>
+            <span>Settlement & Cycles</span>
           </button>
-        </div> */}
+        </div>
 
         {/* Active Driver Profile Modal Overlay */}
         {selectedDriverProfile && (

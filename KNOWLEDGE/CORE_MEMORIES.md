@@ -63,16 +63,24 @@ When initiating the next coding session (whether at home or on the corporate lap
 5. **Post-Beta Production DB Maintenance:**
    - Coordinate with the founder for a full cloud database reset/purge when ready to exit the beta window, ensuring a pristine schema slate for the official launch.
 
-## Shadowfax Payout Rate Configuration
-- **70 Per Order Income** (internal category key: `vendor_ship`):
-  - Formula: **₹70 per order** completed.
+## Dynamic Payout & Cycle Configuration
+All payout rates and billing cycle limits are dynamic and managed through the database (`SystemSetting` table). Administrators can adjust them live via the **Config & Rates** sub-tab under Settlements:
+- **70 Per Order Income** (internal setting key: `rate_vendor_ship`):
+  - Formula: **₹[rate_vendor_ship] per order** completed.
+  - Default: ₹70.
   - Frequency: Weekly (Monday to Sunday), expected payout on Wednesday of the following week.
-- **Vendor Per Order Income** (internal category key: `per_order_rate_weekly`):
-  - Formula: **₹35 per order** completed.
+- **Vendor Per Order Income** (internal setting key: `rate_per_order_weekly`):
+  - Formula: **₹[rate_per_order_weekly] per order** completed.
+  - Default: ₹35.
   - Frequency: Weekly (Monday to Sunday), expected payout on Wednesday of the following week.
-- **Vendor Income** (internal category key: `per_order_rate_monthly`):
-  - Formula: **₹53,000 fixed monthly base rate** (representing fixed pay & fuel/mgr commissions).
+- **Vendor Income** (internal setting key: `rate_per_order_monthly_base`):
+  - Formula: **₹[rate_per_order_monthly_base] fixed monthly base rate**.
+  - Default: ₹53,000.
   - Frequency: Deferred 45-day monthly payout (expected payout on the 15th of month M+2, e.g., work done in June is paid on August 15th).
+- **Credit Card Fuel Cycle cutoff day** (internal setting key: `cc_fuel_cycle_end_day`):
+  - Cutoff Day: **[cc_fuel_cycle_end_day] of the month**.
+  - Default: 4th.
+  - Frequency: Cycles run from Day+1 of previous month to Day of current month (e.g., 5th May to 4th June). Dynamically formatted using ordinal date suffixes (st, nd, rd, th).
 
 ## 8. UI/UX Patterns & Caching Guidelines
 - **Auto-Hiding Banners**: All notification banner states (e.g. `actionErrorVisible`, `parsedExpenseVisible`, `userControlSuccessVisible`, `errorVisible`) must be controlled by a `useEffect` timer that resets the visibility state to `false` after 6000ms.

@@ -73,3 +73,10 @@ model Payout {
 
   @@unique([weekIdentifier, category])
 }
+
+model SystemSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
