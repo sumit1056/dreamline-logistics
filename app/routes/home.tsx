@@ -630,6 +630,111 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true, action: "mark_payout_paid" };
   }
 
+  if (actionType === "mark_fuel_cc_paid") {
+    const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
+    const billingMonth = formData.get("billingMonth")?.toString() || ""; // YYYY-MM
+    const notes = formData.get("notes")?.toString() || "";
+    const paymentDateStr = formData.get("paymentDate")?.toString() || null;
+    const paymentDate = paymentDateStr ? new Date(paymentDateStr) : new Date();
+
+    // Generate the start and end of the billing cycle
+    const parsedDate = new Date(`${billingMonth}-04`); // ends on 4th
+    const yyyy = parsedDate.getFullYear();
+    const mm = parsedDate.getMonth(); // 0-indexed month
+    const startDate = new Date(yyyy, mm - 1, 5, 0, 0, 0, 0); // starts 5th of M-1
+    const endDate = new Date(yyyy, mm, 4, 23, 59, 59, 999); // ends 4th of M
+    
+    const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
+    const startStr = startDate.toLocaleDateString("en-US", formatOption);
+    const endStr = endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const cycleLabel = `${startStr} - ${endStr}`;
+
+    const refTag = `[Ref: Fuel-CC-Bill-${billingMonth}]`;
+    const finalNotes = notes 
+      ? `Credit Card Payment for Fuel Bill (${cycleLabel}) ${notes} ${refTag}`
+      : `Credit Card Payment for Fuel Bill (${cycleLabel}) ${refTag}`;
+
+    // Create corresponding EXPENSE entry in Expense table with category "credit_card"
+    await prisma.expense.create({
+      data: {
+        amount,
+        category: "credit_card",
+        notes: finalNotes,
+        vehicle: null,
+        senderName: "Founder",
+        approved: true,
+        type: "EXPENSE",
+        timestamp: paymentDate,
+      },
+    });
+
+    return { success: true, action: "mark_fuel_cc_paid" };
+  }
+
+  if (actionType === "update_weekly_orders") {
+    const mondayStr = formData.get("mondayStr")?.toString() || "";
+    const vendorShipOrders = parseInt(formData.get("vendorShipOrders")?.toString() || "0") || 0;
+    const perOrderOrders = parseInt(formData.get("perOrderOrders")?.toString() || "0") || 0;
+
+    const start = new Date(mondayStr);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    end.setHours(23, 59, 59, 999);
+
+    // 1. Update/Write vendor_ship
+    await prisma.delivery.deleteMany({
+      where: {
+        category: "vendor_ship",
+        createdAt: {
+          gte: start,
+          lte: end,
+        }
+      }
+    });
+
+    if (vendorShipOrders > 0) {
+      await prisma.delivery.create({
+        data: {
+          title: "Weekly Payout Runsheet - 70 Per Order",
+          category: "vendor_ship",
+          completedOrders: vendorShipOrders,
+          totalOrders: vendorShipOrders,
+          driverName: "Weekly Summary",
+          notes: "Manually entered weekly orders",
+          createdAt: new Date(end), // Put on Sunday
+        }
+      });
+    }
+
+    // 2. Update/Write per_order_rate
+    await prisma.delivery.deleteMany({
+      where: {
+        category: "per_order_rate",
+        createdAt: {
+          gte: start,
+          lte: end,
+        }
+      }
+    });
+
+    if (perOrderOrders > 0) {
+      await prisma.delivery.create({
+        data: {
+          title: "Weekly Payout Runsheet - Vendor Per Order",
+          category: "per_order_rate",
+          completedOrders: perOrderOrders,
+          totalOrders: perOrderOrders,
+          driverName: "Weekly Summary",
+          notes: "Manually entered weekly orders",
+          createdAt: new Date(end), // Put on Sunday
+        }
+      });
+    }
+
+    return { success: true, action: "update_weekly_orders" };
+  }
+
   return null;
 }
 
@@ -750,10 +855,14 @@ export default function Home() {
   // Weekly Payout Tracker states
   const [ordersViewMode, setOrdersViewMode] = useState<"form" | "dashboard" | "payouts">("form");
   const [payoutToPay, setPayoutToPay] = useState<any | null>(null);
+  const [weeklyOrdersToEdit, setWeeklyOrdersToEdit] = useState<any | null>(null);
+  const [ccBillToPay, setCcBillToPay] = useState<any | null>(null);
+  const [payoutSubTab, setPayoutSubTab] = useState<"payouts" | "fuel_cycles">("payouts");
   const [payAmountInput, setPayAmountInput] = useState<string>("");
   const [payDateInput, setPayDateInput] = useState<string>("");
   const [payNotesInput, setPayNotesInput] = useState<string>("");
   const [payoutSuccessVisible, setPayoutSuccessVisible] = useState(false);
+  const [ccSuccessVisible, setCcSuccessVisible] = useState(false);
   const [payoutStatusFilter, setPayoutStatusFilter] = useState<"ALL" | "PAID" | "UNPAID" | "ONGOING">("ALL");
   const [payoutSortOrder, setPayoutSortOrder] = useState<"date_desc" | "date_asc" | "amount_desc" | "amount_asc">("date_desc");
 
@@ -804,7 +913,7 @@ export default function Home() {
 
   // Redirect away from disabled tabs if they try to access them
   useEffect(() => {
-    if (activeTab === "users" || activeTab === "orders") {
+    if (activeTab === "users") {
       setActiveTab("expenses");
     }
   }, [activeTab]);
@@ -1167,6 +1276,79 @@ export default function Home() {
       };
     } = {};
 
+    // 1. Pre-generate all weekly slots from Monday, Dec 29, 2025 up to next week
+    let currentMonday = new Date(2025, 11, 29, 0, 0, 0, 0);
+    const limitDate = new Date();
+    limitDate.setDate(limitDate.getDate() + 7);
+
+    while (currentMonday <= limitDate) {
+      const yyyy = currentMonday.getFullYear();
+      const mm = String(currentMonday.getMonth() + 1).padStart(2, "0");
+      const dd = String(currentMonday.getDate()).padStart(2, "0");
+      const mondayStr = `${yyyy}-${mm}-${dd}`;
+
+      const sunday = new Date(currentMonday);
+      sunday.setDate(currentMonday.getDate() + 6);
+      sunday.setHours(23, 59, 59, 999);
+
+      // vendor_ship
+      const keyVs = `${mondayStr}_vendor_ship`;
+      weeklyGroups[keyVs] = {
+        mondayStr,
+        mondayDate: new Date(currentMonday),
+        sundayDate: sunday,
+        category: "vendor_ship",
+        completedOrders: 0,
+        deliveriesCount: 0,
+      };
+
+      // per_order_rate_weekly
+      const keyPo = `${mondayStr}_per_order_rate_weekly`;
+      weeklyGroups[keyPo] = {
+        mondayStr,
+        mondayDate: new Date(currentMonday),
+        sundayDate: sunday,
+        category: "per_order_rate_weekly",
+        completedOrders: 0,
+        deliveriesCount: 0,
+      };
+
+      currentMonday.setDate(currentMonday.getDate() + 7);
+    }
+
+    // 2. Pre-generate all monthly slots from Jan 2026 to current month
+    const startYear = 2026;
+    const startMonth = 0;
+    const endYear = new Date().getFullYear();
+    const endMonth = new Date().getMonth();
+
+    let curYear = startYear;
+    let curMonth = startMonth;
+
+    while (curYear < endYear || (curYear === endYear && curMonth <= endMonth)) {
+      const monthStr = `${curYear}-${String(curMonth + 1).padStart(2, "0")}`;
+      const mKey = `${monthStr}_per_order_rate_monthly`;
+
+      const startDate = new Date(curYear, curMonth, 1, 0, 0, 0, 0);
+      const endDate = new Date(curYear, curMonth + 1, 0, 23, 59, 59, 999);
+
+      monthlyGroups[mKey] = {
+        monthStr,
+        startDate,
+        endDate,
+        category: "per_order_rate_monthly",
+        completedOrders: 0,
+        deliveriesCount: 0,
+      };
+
+      curMonth++;
+      if (curMonth > 11) {
+        curMonth = 0;
+        curYear++;
+      }
+    }
+
+    // 3. Aggregate all deliveries into the generated weekly & monthly buckets
     deliveries.forEach((d) => {
       const date = new Date(d.createdAt);
       
@@ -1181,28 +1363,14 @@ export default function Home() {
         const mm = String(monday.getMonth() + 1).padStart(2, "0");
         const dd = String(monday.getDate()).padStart(2, "0");
         const mondayStr = `${yyyy}-${mm}-${dd}`;
-
         const key = `${mondayStr}_vendor_ship`;
 
-        if (!weeklyGroups[key]) {
-          const sunday = new Date(monday);
-          sunday.setDate(monday.getDate() + 6);
-          sunday.setHours(23, 59, 59, 999);
-
-          weeklyGroups[key] = {
-            mondayStr,
-            mondayDate: monday,
-            sundayDate: sunday,
-            category: "vendor_ship",
-            completedOrders: 0,
-            deliveriesCount: 0,
-          };
+        if (weeklyGroups[key]) {
+          weeklyGroups[key].completedOrders += d.completedOrders;
+          weeklyGroups[key].deliveriesCount += 1;
         }
-
-        weeklyGroups[key].completedOrders += d.completedOrders;
-        weeklyGroups[key].deliveriesCount += 1;
       } else if (d.category === "per_order_rate") {
-        // 1. Weekly Portion (₹35 / order)
+        // Weekly Portion
         const day = date.getDay();
         const diff = date.getDate() - day + (day === 0 ? -6 : 1);
         const monday = new Date(date);
@@ -1213,50 +1381,21 @@ export default function Home() {
         const mm = String(monday.getMonth() + 1).padStart(2, "0");
         const dd = String(monday.getDate()).padStart(2, "0");
         const mondayStr = `${yyyy}-${mm}-${dd}`;
-
         const key = `${mondayStr}_per_order_rate_weekly`;
 
-        if (!weeklyGroups[key]) {
-          const sunday = new Date(monday);
-          sunday.setDate(monday.getDate() + 6);
-          sunday.setHours(23, 59, 59, 999);
-
-          weeklyGroups[key] = {
-            mondayStr,
-            mondayDate: monday,
-            sundayDate: sunday,
-            category: "per_order_rate_weekly",
-            completedOrders: 0,
-            deliveriesCount: 0,
-          };
+        if (weeklyGroups[key]) {
+          weeklyGroups[key].completedOrders += d.completedOrders;
+          weeklyGroups[key].deliveriesCount += 1;
         }
 
-        weeklyGroups[key].completedOrders += d.completedOrders;
-        weeklyGroups[key].deliveriesCount += 1;
-
-        // 2. Monthly Fixed Base Portion (₹53,000 base pay, deferred 45 days)
-        const yyyyMonth = date.getFullYear();
-        const mmMonth = String(date.getMonth() + 1).padStart(2, "0");
-        const monthStr = `${yyyyMonth}-${mmMonth}`;
-
+        // Monthly Portion
+        const monthStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
         const mKey = `${monthStr}_per_order_rate_monthly`;
 
-        if (!monthlyGroups[mKey]) {
-          const startDate = new Date(yyyyMonth, date.getMonth(), 1, 0, 0, 0, 0);
-          const endDate = new Date(yyyyMonth, date.getMonth() + 1, 0, 23, 59, 59, 999);
-
-          monthlyGroups[mKey] = {
-            monthStr,
-            startDate,
-            endDate,
-            category: "per_order_rate_monthly",
-            completedOrders: 0,
-            deliveriesCount: 0,
-          };
+        if (monthlyGroups[mKey]) {
+          monthlyGroups[mKey].completedOrders += d.completedOrders;
+          monthlyGroups[mKey].deliveriesCount += 1;
         }
-
-        monthlyGroups[mKey].completedOrders += d.completedOrders;
-        monthlyGroups[mKey].deliveriesCount += 1;
       }
     });
 
@@ -1332,7 +1471,7 @@ export default function Home() {
       const weekLabel = group.startDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
 
       list.push({
-        mondayStr: `${group.monthStr}-01`, // sorting key
+        mondayStr: `${group.monthStr}-01`,
         startDate: group.startDate,
         endDate: group.endDate,
         category: group.category,
@@ -1375,6 +1514,117 @@ export default function Home() {
     return result;
   }, [weeklyPayouts, payoutStatusFilter, payoutSortOrder]);
 
+  // Credit Card Fuel Cycles generator (4th-to-4th inclusive logic)
+  const ccFuelCycles = useMemo(() => {
+    const list: any[] = [];
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    const startYear = 2026;
+    const startMonth = 0; // January
+    const endYear = today.getFullYear();
+    const endMonth = today.getMonth() + 1; // Show current + next cycle
+
+    let curYear = startYear;
+    let curMonth = startMonth;
+
+    while (curYear < endYear || (curYear === endYear && curMonth <= endMonth)) {
+      const billingMonth = `${curYear}-${String(curMonth + 1).padStart(2, "0")}`;
+      const startDate = new Date(curYear, curMonth - 1, 5, 0, 0, 0, 0); // e.g. Dec 5th, 2025
+      const endDate = new Date(curYear, curMonth, 4, 23, 59, 59, 999); // e.g. Jan 4th, 2026
+
+      const totalFuelExpense = expenses
+        .filter((e) => e.type === "EXPENSE" && e.category === "fuel" && new Date(e.timestamp) >= startDate && new Date(e.timestamp) <= endDate)
+        .reduce((sum, e) => sum + e.amount, 0);
+
+      const refTag = `[Ref: Fuel-CC-Bill-${billingMonth}]`;
+      const matchingExpense = expenses.find(
+        (exp) => exp.type === "EXPENSE" && exp.category === "credit_card" && exp.notes && exp.notes.includes(refTag)
+      );
+
+      let status: "PAID" | "UNPAID" | "ONGOING" = "UNPAID";
+      if (matchingExpense) {
+        status = "PAID";
+      } else if (endDate.getTime() > today.getTime()) {
+        status = "ONGOING";
+      }
+
+      const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
+      const startStr = startDate.toLocaleDateString("en-US", formatOption);
+      const endStr = endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+      const cycleLabel = `${startStr} - ${endStr}`;
+
+      list.push({
+        billingMonth,
+        startDate,
+        endDate,
+        totalFuelExpense,
+        status,
+        matchingExpense,
+        refTag,
+        cycleLabel,
+      });
+
+      curMonth++;
+      if (curMonth > 11) {
+        curMonth = 0;
+        curYear++;
+      }
+    }
+
+    return list;
+  }, [expenses]);
+
+  const filteredAndSortedCcFuelCycles = useMemo(() => {
+    let result = [...ccFuelCycles];
+
+    if (payoutStatusFilter !== "ALL") {
+      result = result.filter(c => c.status === payoutStatusFilter);
+    }
+
+    result.sort((a, b) => {
+      if (payoutSortOrder === "date_desc") {
+        return new Date(b.endDate).getTime() - new Date(a.endDate).getTime();
+      } else if (payoutSortOrder === "date_asc") {
+        return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
+      } else if (payoutSortOrder === "amount_desc") {
+        return b.totalFuelExpense - a.totalFuelExpense;
+      } else if (payoutSortOrder === "amount_asc") {
+        return a.totalFuelExpense - b.totalFuelExpense;
+      }
+      return 0;
+    });
+
+    return result;
+  }, [ccFuelCycles, payoutStatusFilter, payoutSortOrder]);
+
+  const ccSummaryMetrics = useMemo(() => {
+    const unpaidCcTotal = ccFuelCycles
+      .filter((c) => c.status === "UNPAID")
+      .reduce((sum, c) => sum + c.totalFuelExpense, 0);
+
+    const ongoingCcTotal = ccFuelCycles
+      .filter((c) => c.status === "ONGOING")
+      .reduce((sum, c) => sum + c.totalFuelExpense, 0);
+
+    const lastPaidCycle = ccFuelCycles
+      .filter((c) => c.status === "PAID")
+      .sort((a, b) => b.endDate.getTime() - a.endDate.getTime())[0];
+
+    const lastPaidAmount = lastPaidCycle ? lastPaidCycle.totalFuelExpense : 0;
+
+    const totalFuelAllTime = expenses
+      .filter((e) => e.type === "EXPENSE" && e.category === "fuel")
+      .reduce((sum, e) => sum + e.amount, 0);
+
+    return {
+      unpaidCcTotal,
+      ongoingCcTotal,
+      lastPaidAmount,
+      totalFuelAllTime,
+    };
+  }, [ccFuelCycles, expenses]);
+
   // Reset raw inputs on action success and set fading success messages
   useEffect(() => {
     if (actionData && "success" in actionData && actionData.success) {
@@ -1410,6 +1660,16 @@ export default function Home() {
           return () => clearTimeout(timer);
         } else if (actionData.action === "mark_payout_paid") {
           setPayoutToPay(null);
+          setPayoutSuccessVisible(true);
+          const timer = setTimeout(() => setPayoutSuccessVisible(false), 6000);
+          return () => clearTimeout(timer);
+        } else if (actionData.action === "mark_fuel_cc_paid") {
+          setCcBillToPay(null);
+          setCcSuccessVisible(true);
+          const timer = setTimeout(() => setCcSuccessVisible(false), 6000);
+          return () => clearTimeout(timer);
+        } else if (actionData.action === "update_weekly_orders") {
+          setWeeklyOrdersToEdit(null);
           setPayoutSuccessVisible(true);
           const timer = setTimeout(() => setPayoutSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
@@ -2583,6 +2843,11 @@ export default function Home() {
                   ✅ Payout recorded and logged in ledger successfully!
                 </div>
               )}
+              {ccSuccessVisible && (
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
+                  ✅ Credit card fuel billing cycle paid and expensed successfully!
+                </div>
+              )}
 
               {/* FORM MODE */}
               {ordersViewMode === "form" && (
@@ -3247,55 +3512,113 @@ export default function Home() {
               {ordersViewMode === "payouts" && (
                 <div className="space-y-6 animate-fade-in">
                   {/* Summary Cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Vendor Ship (Weekly)</div>
-                      <div className="text-2xl font-bold mt-1 text-[#2383e2]">
-                        ₹{weeklyPayouts
-                          .filter(w => w.category === "vendor_ship" && w.status === "UNPAID")
-                          .reduce((sum, w) => sum + w.calculatedPayout, 0)
-                          .toLocaleString()}
+                  {payoutSubTab === "payouts" ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid 70 Per Order (Weekly)</div>
+                        <div className="text-2xl font-bold mt-1 text-[#2383e2]">
+                          ₹{weeklyPayouts
+                            .filter(w => w.category === "vendor_ship" && w.status === "UNPAID")
+                            .reduce((sum, w) => sum + w.calculatedPayout, 0)
+                            .toLocaleString()}
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Split Plan (Weekly)</div>
-                      <div className="text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400">
-                        ₹{weeklyPayouts
-                          .filter(w => w.category === "per_order_rate_weekly" && w.status === "UNPAID")
-                          .reduce((sum, w) => sum + w.calculatedPayout, 0)
-                          .toLocaleString()}
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Vendor Per Order (Weekly)</div>
+                        <div className="text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400">
+                          ₹{weeklyPayouts
+                            .filter(w => w.category === "per_order_rate_weekly" && w.status === "UNPAID")
+                            .reduce((sum, w) => sum + w.calculatedPayout, 0)
+                            .toLocaleString()}
+                        </div>
                       </div>
-                    </div>
-                    
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Split Base (Deferred Monthly)</div>
-                      <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">
-                        ₹{weeklyPayouts
-                          .filter(w => w.category === "per_order_rate_monthly" && w.status === "UNPAID")
-                          .reduce((sum, w) => sum + w.calculatedPayout, 0)
-                          .toLocaleString()}
+                      
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Vendor Income (Monthly)</div>
+                        <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">
+                          ₹{weeklyPayouts
+                            .filter(w => w.category === "per_order_rate_monthly" && w.status === "UNPAID")
+                            .reduce((sum, w) => sum + w.calculatedPayout, 0)
+                            .toLocaleString()}
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Received (This Month)</div>
-                      <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
-                        ₹{expenses
-                          .filter(e => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory" || e.category === "vendor_income") && new Date(e.timestamp).getMonth() === new Date().getMonth())
-                          .reduce((sum, e) => sum + e.amount, 0)
-                          .toLocaleString()}
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Payouts Received (Month)</div>
+                        <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
+                          ₹{expenses
+                            .filter(e => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory" || e.category === "vendor_income") && new Date(e.timestamp).getMonth() === new Date().getMonth())
+                            .reduce((sum, e) => sum + e.amount, 0)
+                            .toLocaleString()}
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Fuel CC Bills (Due)</div>
+                        <div className="text-2xl font-bold mt-1 text-red-600 dark:text-red-400">
+                          ₹{ccSummaryMetrics.unpaidCcTotal.toLocaleString()}
+                        </div>
+                      </div>
 
-                  {/* Main Payouts Board */}
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Current Cycle (Ongoing)</div>
+                        <div className="text-2xl font-bold mt-1 text-amber-600 dark:text-amber-400">
+                          ₹{ccSummaryMetrics.ongoingCcTotal.toLocaleString()}
+                        </div>
+                      </div>
+                      
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Last Paid CC Bill</div>
+                        <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
+                          ₹{ccSummaryMetrics.lastPaidAmount.toLocaleString()}
+                        </div>
+                      </div>
+
+                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Fuel Expensed (All-Time)</div>
+                        <div className="text-2xl font-bold mt-1 text-[#2383e2]">
+                          ₹{ccSummaryMetrics.totalFuelAllTime.toLocaleString()}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Main Board */}
                   <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] shadow-sm overflow-hidden">
                     <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-neutral-900/30 flex justify-between items-center">
                       <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
-                        Settlement Cycles Tracker
+                        Settlements & Cycle Tracker
                       </h3>
-                      <span className="text-xs text-neutral-450">Weekly & Monthly settlement windows</span>
+                      <span className="text-xs text-neutral-450">Manage Credit Card Fuel cycles and weekly/monthly payout streams</span>
+                    </div>
+
+                    {/* Sub-tab Navigation */}
+                    <div className="flex border-b border-[#edece9] dark:border-[#2f2f2f] px-4 bg-[#fbfbfa] dark:bg-neutral-900/10">
+                      <button
+                        type="button"
+                        onClick={() => setPayoutSubTab("payouts")}
+                        className={`px-4 py-2.5 text-xs font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-1.5 ${
+                          payoutSubTab === "payouts"
+                            ? "border-neutral-800 text-neutral-800 dark:border-neutral-200 dark:text-neutral-200"
+                            : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
+                        }`}
+                      >
+                        💰 Payout Streams
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPayoutSubTab("fuel_cycles")}
+                        className={`px-4 py-2.5 text-xs font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-1.5 ${
+                          payoutSubTab === "fuel_cycles"
+                            ? "border-neutral-800 text-neutral-800 dark:border-neutral-200 dark:text-neutral-200"
+                            : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
+                        }`}
+                      >
+                        ⛽ Credit Card Fuel Cycles (4th - 4th)
+                      </button>
                     </div>
 
                     {/* Filter and Sort Row */}
@@ -3341,118 +3664,215 @@ export default function Home() {
                     </div>
 
                     <div className="divide-y divide-[#edece9]/60 dark:divide-neutral-800/60">
-                      {filteredAndSortedPayouts.length === 0 ? (
-                        <div className="p-8 text-center text-neutral-400 italic text-xs">
-                          {weeklyPayouts.length === 0 
-                            ? "No runsheet logs recorded yet to calculate payouts." 
-                            : "No payouts match the selected status filter."}
-                        </div>
-                      ) : (
-                        filteredAndSortedPayouts.map((w) => {
-                          const isOverdue = w.status === "UNPAID" && new Date().getTime() > new Date(w.expectedDate).getTime();
-                          const diffTime = new Date(w.expectedDate).getTime() - new Date().getTime();
-                          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                      {payoutSubTab === "payouts" ? (
+                        filteredAndSortedPayouts.length === 0 ? (
+                          <div className="p-8 text-center text-neutral-400 italic text-xs">
+                            No payouts match the selected status filter.
+                          </div>
+                        ) : (
+                          filteredAndSortedPayouts.map((w) => {
+                            const isOverdue = w.status === "UNPAID" && new Date().getTime() > new Date(w.expectedDate).getTime();
+                            const diffTime = new Date(w.expectedDate).getTime() - new Date().getTime();
+                            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-                          return (
-                            <div 
-                              key={`${w.mondayStr}_${w.category}`} 
-                              className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/10 transition-colors"
-                            >
-                              <div className="space-y-1.5">
-                                <div className="flex items-center gap-2">
-                                  <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
-                                    w.category === "vendor_ship"
-                                      ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
-                                      : w.category === "per_order_rate_weekly"
-                                      ? "bg-indigo-50 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-900/30"
-                                      : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
-                                  }`}>
-                                    {w.category === "vendor_ship"
-                                      ? "Vendor Ship (Weekly)"
-                                      : w.category === "per_order_rate_weekly"
-                                      ? "Split Plan (Weekly)"
-                                      : "Split Plan Base (Monthly)"}
-                                  </span>
+                            return (
+                              <div 
+                                key={`${w.mondayStr}_${w.category}`} 
+                                className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/10 transition-colors"
+                              >
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                                      w.category === "vendor_ship"
+                                        ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
+                                        : w.category === "per_order_rate_weekly"
+                                        ? "bg-indigo-50 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-900/30"
+                                        : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
+                                    }`}>
+                                      {w.category === "vendor_ship"
+                                        ? "70 Per Order Income"
+                                        : w.category === "per_order_rate_weekly"
+                                        ? "Vendor Per Order Income"
+                                        : "Vendor Income"}
+                                    </span>
 
-                                  <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
-                                    w.status === "PAID"
-                                      ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-200/30 dark:border-emerald-900/30"
-                                      : w.status === "ONGOING"
-                                      ? "bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/30 dark:border-amber-900/30"
-                                      : "bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-200/30 dark:border-rose-900/30"
-                                  }`}>
-                                    {w.status === "PAID" ? "PAID" : w.status === "ONGOING" ? "IN PROGRESS" : "UNPAID"}
-                                  </span>
-                                </div>
-
-                                <div className="text-sm font-bold text-neutral-800 dark:text-neutral-100">
-                                  {w.weekLabel}
-                                </div>
-
-                                <div className="text-xs text-neutral-450 dark:text-neutral-400 flex flex-wrap items-center gap-x-3 gap-y-1 font-medium">
-                                  <span>📊 {w.deliveriesCount} runsheets</span>
-                                  <span>•</span>
-                                  <span>📦 {w.completedOrders} completed orders</span>
-                                </div>
-                              </div>
-
-                              <div className="flex flex-col md:items-end justify-center gap-2">
-                                <div className="text-left md:text-right">
-                                  <div className="text-xs text-neutral-400 font-semibold uppercase">Calculated Payout</div>
-                                  <div className="text-lg font-extrabold text-neutral-900 dark:text-neutral-50">
-                                    ₹{w.calculatedPayout.toLocaleString()}
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                                      w.status === "PAID"
+                                        ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-200/30 dark:border-emerald-900/30"
+                                        : w.status === "ONGOING"
+                                        ? "bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/30 dark:border-amber-900/30"
+                                        : "bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-200/30 dark:border-rose-900/30"
+                                    }`}>
+                                      {w.status === "PAID" ? "PAID" : w.status === "ONGOING" ? "IN PROGRESS" : "UNPAID"}
+                                    </span>
                                   </div>
-                                  {w.status === "PAID" && w.matchingExpense && (
-                                    <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                                      Received: ₹{w.matchingExpense.amount.toLocaleString()}
-                                      {w.matchingExpense.amount !== w.calculatedPayout && (
-                                        <span className="text-amber-600 dark:text-amber-400 ml-1">
-                                          (Diff: ₹{(w.matchingExpense.amount - w.calculatedPayout).toLocaleString()})
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
+
+                                  <div className="text-sm font-bold text-neutral-800 dark:text-neutral-100">
+                                    {w.weekLabel}
+                                  </div>
+
+                                  <div className="text-xs text-neutral-450 dark:text-neutral-400 flex flex-wrap items-center gap-x-3 gap-y-1 font-medium">
+                                    <span>📊 {w.deliveriesCount} runsheets</span>
+                                    <span>•</span>
+                                    <span>📦 {w.completedOrders} completed orders</span>
+                                  </div>
                                 </div>
 
-                                <div className="text-[11px] text-neutral-500 dark:text-neutral-400 font-medium">
-                                  {w.status === "PAID" && w.matchingExpense ? (
-                                    <div className="flex flex-col md:items-end gap-0.5">
-                                      <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
-                                        ✨ Recorded in Ledger on {new Date(w.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                <div className="flex flex-col md:items-end justify-center gap-2">
+                                  <div className="text-left md:text-right">
+                                    <div className="text-xs text-neutral-400 font-semibold uppercase">Calculated Payout</div>
+                                    <div className="text-lg font-extrabold text-neutral-900 dark:text-neutral-50">
+                                      ₹{w.calculatedPayout.toLocaleString()}
+                                    </div>
+                                    {w.status === "PAID" && w.matchingExpense && (
+                                      <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                        Received: ₹{w.matchingExpense.amount.toLocaleString()}
+                                        {w.matchingExpense.amount !== w.calculatedPayout && (
+                                          <span className="text-amber-600 dark:text-amber-400 ml-1">
+                                            (Diff: ₹{(w.matchingExpense.amount - w.calculatedPayout).toLocaleString()})
+                                          </span>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="text-[11px] text-neutral-500 dark:text-neutral-400 font-medium">
+                                    {w.status === "PAID" && w.matchingExpense ? (
+                                      <div className="flex flex-col md:items-end gap-0.5">
+                                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
+                                          ✨ Recorded in Ledger on {new Date(w.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                        </span>
+                                        {w.matchingExpense.notes && w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim() && (
+                                          <span className="text-[10px] text-neutral-400 italic max-w-[200px] text-right truncate" title={w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}>
+                                            Note: "{w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}"
+                                          </span>
+                                        )}
+                                      </div>
+                                    ) : w.status === "ONGOING" ? (
+                                      <span className="text-amber-600 dark:text-amber-450 font-bold">
+                                        Settlement expected on {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
                                       </span>
-                                      {w.matchingExpense.notes && w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim() && (
-                                        <span className="text-[10px] text-neutral-400 italic max-w-[200px] text-right truncate" title={w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}>
-                                          Note: "{w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}"
-                                        </span>
-                                      )}
-                                    </div>
-                                  ) : w.status === "ONGOING" ? (
-                                    <span className="text-amber-600 dark:text-amber-450 font-bold">
-                                      Settlement expected on {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                    ) : (
+                                      <span className={isOverdue ? "text-rose-600 dark:text-rose-450 font-extrabold" : "text-neutral-550 dark:text-neutral-350"}>
+                                        📅 Due date: {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} 
+                                        {isOverdue ? " (Overdue!)" : ` (in ${diffDays} days)`}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex gap-2 mt-1">
+                                    {w.status !== "PAID" && w.category !== "per_order_rate_monthly" && (
+                                      <button
+                                        type="button"
+                                        onClick={() => setWeeklyOrdersToEdit(w)}
+                                        className="px-2.5 py-1.5 text-xs font-bold bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 rounded-md border border-neutral-200 dark:border-neutral-700 transition-all cursor-pointer flex items-center gap-1"
+                                      >
+                                        ✏️ Set Orders
+                                      </button>
+                                    )}
+                                    {w.status === "UNPAID" && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setPayoutToPay(w);
+                                        }}
+                                        className="px-3 py-1.5 text-xs font-bold bg-neutral-900 hover:bg-neutral-855 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 rounded-md shadow-sm transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                                      >
+                                        Record Payout
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )
+                      ) : (
+                        filteredAndSortedCcFuelCycles.length === 0 ? (
+                          <div className="p-8 text-center text-neutral-400 italic text-xs">
+                            No credit card fuel billing cycles match the selected status filter.
+                          </div>
+                        ) : (
+                          filteredAndSortedCcFuelCycles.map((c) => {
+                            const isOverdue = c.status === "UNPAID" && new Date().getTime() > new Date(c.endDate).getTime();
+                            return (
+                              <div 
+                                key={c.billingMonth} 
+                                className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/10 transition-colors"
+                              >
+                                <div className="space-y-1.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/50 dark:border-amber-900/30">
+                                      ⛽ Fuel CC Cycle
                                     </span>
-                                  ) : (
-                                    <span className={isOverdue ? "text-rose-600 dark:text-rose-450 font-extrabold" : "text-neutral-550 dark:text-neutral-350"}>
-                                      📅 Due date: {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} 
-                                      {isOverdue ? " (Overdue!)" : ` (in ${diffDays} days)`}
+
+                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                                      c.status === "PAID"
+                                        ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-200/30 dark:border-emerald-900/30"
+                                        : c.status === "ONGOING"
+                                        ? "bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/30 dark:border-amber-900/30"
+                                        : "bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-200/30 dark:border-rose-900/30"
+                                    }`}>
+                                      {c.status === "PAID" ? "PAID" : c.status === "ONGOING" ? "IN PROGRESS" : "UNPAID"}
                                     </span>
-                                  )}
+                                  </div>
+
+                                  <div className="text-sm font-bold text-neutral-800 dark:text-neutral-100">
+                                    {c.cycleLabel}
+                                  </div>
+
+                                  <div className="text-xs text-neutral-450 dark:text-neutral-400 font-medium">
+                                    Statement Month: {c.billingMonth}
+                                  </div>
                                 </div>
 
-                                {w.status === "UNPAID" && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setPayoutToPay(w);
-                                    }}
-                                    className="mt-1 px-3 py-1.5 text-xs font-bold bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 rounded-md shadow-sm transition-all active:scale-95 cursor-pointer flex items-center gap-1"
-                                  >
-                                    Check & Record Payout
-                                  </button>
-                                )}
+                                <div className="flex flex-col md:items-end justify-center gap-2">
+                                  <div className="text-left md:text-right">
+                                    <div className="text-xs text-neutral-400 font-semibold uppercase">Total Fuel Expensed</div>
+                                    <div className="text-lg font-extrabold text-neutral-900 dark:text-neutral-50">
+                                      ₹{c.totalFuelExpense.toLocaleString()}
+                                    </div>
+                                    {c.status === "PAID" && c.matchingExpense && (
+                                      <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                        Paid CC Bill: ₹{c.matchingExpense.amount.toLocaleString()}
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="text-[11px] text-neutral-500 dark:text-neutral-400 font-medium">
+                                    {c.status === "PAID" && c.matchingExpense ? (
+                                      <div className="flex flex-col md:items-end gap-0.5">
+                                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
+                                          💳 Paid on {new Date(c.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                        </span>
+                                      </div>
+                                    ) : c.status === "ONGOING" ? (
+                                      <span className="text-amber-600 dark:text-amber-450 font-bold">
+                                        Statement ends on {new Date(c.endDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                                      </span>
+                                    ) : (
+                                      <span className={isOverdue ? "text-rose-600 dark:text-rose-450 font-extrabold" : "text-neutral-550 dark:text-neutral-350"}>
+                                        📅 Bill due for reconciliation (Cycle ended)
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  {c.status === "UNPAID" && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setCcBillToPay(c);
+                                      }}
+                                      className="mt-1 px-3 py-1.5 text-xs font-bold bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 rounded-md shadow-sm transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                                    >
+                                      Reconcile & Pay Bill
+                                    </button>
+                                  )}
+                                </div>
                               </div>
-                            </div>
-                          );
-                        })
+                            );
+                          })
+                        )
                       )}
                     </div>
                   </div>
@@ -4596,10 +5016,10 @@ export default function Home() {
                   <span className="text-neutral-500 font-semibold">Category Type:</span>
                   <span className="text-neutral-800 dark:text-neutral-200 font-bold capitalize text-right">
                     {payoutToPay.category === "vendor_ship" 
-                      ? "Vendor Ship (Weekly)" 
+                      ? "70 Per Order Income" 
                       : payoutToPay.category === "per_order_rate_weekly"
-                      ? "Split Plan (Weekly)"
-                      : "Split Plan Base (Monthly)"}
+                      ? "Vendor Per Order Income"
+                      : "Vendor Income"}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-xs">
@@ -4671,6 +5091,198 @@ export default function Home() {
                     className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
                   >
                     Confirm & Record
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* Weekly Orders Edit Modal */}
+        {weeklyOrdersToEdit && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
+            <div className="notion-card w-full max-w-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] p-6 shadow-2xl space-y-5 rounded-2xl animate-scale-up">
+              
+              <div className="pb-3 border-b border-[#edece9] dark:border-[#2f2f2f] flex justify-between items-start">
+                <div>
+                  <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
+                    Update Weekly Order Counts
+                  </h3>
+                  <p className="text-[11px] text-neutral-450 mt-1 font-semibold">
+                    Enter completed orders for this week to calculate payouts.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setWeeklyOrdersToEdit(null)}
+                  className="p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-all cursor-pointer"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <Form method="post" className="space-y-4">
+                <input type="hidden" name="_action" value="update_weekly_orders" />
+                <input type="hidden" name="mondayStr" value={weeklyOrdersToEdit.mondayStr} />
+
+                <div className="p-3 rounded-lg bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400">
+                  Week: <span className="font-bold text-neutral-800 dark:text-neutral-250">{weeklyOrdersToEdit.weekLabel}</span>
+                </div>
+
+                {/* 70 Per Order Orders Input */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">70 Per Order Income Completed Orders</label>
+                  <input
+                    type="number"
+                    name="vendorShipOrders"
+                    required
+                    min="0"
+                    step="1"
+                    defaultValue={
+                      deliveries
+                        .filter(d => d.category === "vendor_ship" && new Date(d.createdAt) >= new Date(weeklyOrdersToEdit.startDate) && new Date(d.createdAt) <= new Date(weeklyOrdersToEdit.endDate))
+                        .reduce((sum, d) => sum + d.completedOrders, 0)
+                    }
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
+                  />
+                </div>
+
+                {/* Vendor Per Order Orders Input */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Vendor Per Order Income Completed Orders</label>
+                  <input
+                    type="number"
+                    name="perOrderOrders"
+                    required
+                    min="0"
+                    step="1"
+                    defaultValue={
+                      deliveries
+                        .filter(d => d.category === "per_order_rate" && new Date(d.createdAt) >= new Date(weeklyOrdersToEdit.startDate) && new Date(d.createdAt) <= new Date(weeklyOrdersToEdit.endDate))
+                        .reduce((sum, d) => sum + d.completedOrders, 0)
+                    }
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => setWeeklyOrdersToEdit(null)}
+                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* Fuel CC Bill Payment Modal */}
+        {ccBillToPay && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
+            <div className="notion-card w-full max-w-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] p-6 shadow-2xl space-y-5 rounded-2xl animate-scale-up">
+              
+              <div className="pb-3 border-b border-[#edece9] dark:border-[#2f2f2f] flex justify-between items-start">
+                <div>
+                  <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
+                    Confirm CC Fuel Bill Payment
+                  </h3>
+                  <p className="text-[11px] text-neutral-450 mt-1 font-semibold">
+                    Record the card bill payment in the main expense ledger.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCcBillToPay(null)}
+                  className="p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-all cursor-pointer"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 space-y-3">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-neutral-500 font-semibold">Billing Cycle:</span>
+                  <span className="text-neutral-800 dark:text-neutral-200 font-bold">{ccBillToPay.cycleLabel}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-neutral-500 font-semibold">Statement Month:</span>
+                  <span className="text-neutral-800 dark:text-neutral-200 font-bold">{ccBillToPay.billingMonth}</span>
+                </div>
+                <div className="pt-2 border-t border-neutral-200/50 dark:border-neutral-800/50 flex justify-between items-center text-sm">
+                  <span className="text-neutral-500 font-bold">Accumulated Fuel Cost:</span>
+                  <span className="text-neutral-900 dark:text-neutral-100 font-extrabold text-base">
+                    ₹{ccBillToPay.totalFuelExpense.toLocaleString()}
+                  </span>
+                </div>
+              </div>
+
+              <Form method="post" className="space-y-4">
+                <input type="hidden" name="_action" value="mark_fuel_cc_paid" />
+                <input type="hidden" name="billingMonth" value={ccBillToPay.billingMonth} />
+
+                {/* Amount Input */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Payment Amount (₹)</label>
+                  <input
+                    type="number"
+                    name="amount"
+                    required
+                    step="any"
+                    min="0"
+                    defaultValue={ccBillToPay.totalFuelExpense}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
+                  />
+                </div>
+
+                {/* Payment Date Selection */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Date Paid</label>
+                  <input
+                    type="date"
+                    name="paymentDate"
+                    required
+                    defaultValue={new Date().toISOString().split("T")[0]}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
+                  />
+                </div>
+
+                {/* Optional reference notes */}
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-neutral-500">Transaction Notes (Optional)</label>
+                  <textarea
+                    name="notes"
+                    rows={2}
+                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
+                    placeholder="e.g. Card statement reference, cash back offset..."
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => setCcBillToPay(null)}
+                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
+                  >
+                    Confirm CC Payment
                   </button>
                 </div>
               </Form>
