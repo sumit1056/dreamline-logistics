@@ -64,11 +64,14 @@ When initiating the next coding session (whether at home or on the corporate lap
    - Coordinate with the founder for a full cloud database reset/purge when ready to exit the beta window, ensuring a pristine schema slate for the official launch.
 
 ## Shadowfax Payout Rate Configuration
-- **Shadowfax (Weekly Plan)** (internal category key: `vendor_ship`):
-  - Formula: **₹75 per order** completed.
-  - Frequency: Weekly (Monday to Sunday), expected payout on Wednesday of the following week (Net-9).
-- **Shadowfax (45-Day Plan)** (internal category key: `per_order_rate`):
-  - Formula: **₹40,000 fixed base rate + ₹35 per order** completed.
+- **Vendor Ship** (internal category key: `vendor_ship`):
+  - Formula: **₹70 per order** completed.
+  - Frequency: Weekly (Monday to Sunday), expected payout on Wednesday of the following week.
+- **Split Plan (Weekly)** (internal category key: `per_order_rate_weekly`):
+  - Formula: **₹35 per order** completed.
+  - Frequency: Weekly (Monday to Sunday), expected payout on Wednesday of the following week.
+- **Split Plan (Base)** (internal category key: `per_order_rate_monthly`):
+  - Formula: **₹53,000 fixed monthly base rate** (representing fixed pay & fuel/mgr commissions).
   - Frequency: Deferred 45-day monthly payout (expected payout on the 15th of month M+2, e.g., work done in June is paid on August 15th).
 
 ## 8. UI/UX Patterns & Caching Guidelines
@@ -87,8 +90,9 @@ This acts as the fallback gateway to initialize other accounts if the DB is rese
 
 ## 10. Settlement Payout Reconciliation Reference Tags
 To mark payouts as "PAID" in the Settlement Cycles Tracker, an INCOME transaction note must contain a matching reference tag:
-- **Weekly Plan (`vendor_ship`)**: `[Ref: Weekly-Payout-VS-YYYY-MM-DD]` (where `YYYY-MM-DD` is the Monday of the week).
-- **45-Day Plan (`per_order_rate`)**: `[Ref: Monthly-Payout-PO-YYYY-MM]` (where `YYYY-MM` is the year and month of the cycle).
+- **Vendor Ship (`vendor_ship`)**: `[Ref: Weekly-Payout-VS-YYYY-MM-DD]` (where `YYYY-MM-DD` is the Monday of the week).
+- **Split Plan Weekly (`per_order_rate_weekly`)**: `[Ref: Weekly-Payout-PO-orders-YYYY-MM-DD]` (where `YYYY-MM-DD` is the Monday of the week).
+- **Split Plan Monthly Base (`per_order_rate_monthly`)**: `[Ref: Monthly-Payout-PO-YYYY-MM]` (where `YYYY-MM` is the year and month of the cycle).
 Status transitions to `PAID` automatically when an `Expense` of type `INCOME` matches the tag in the `notes` field.
 
 

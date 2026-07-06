@@ -547,7 +547,7 @@ export async function action({ request }: ActionFunctionArgs) {
     let expenseCategory = "other_income";
     if (category === "vendor_ship") {
       expenseCategory = "shadowfax";
-    } else if (category === "per_order_rate") {
+    } else if (category === "per_order_rate_weekly" || category === "per_order_rate_monthly" || category === "per_order_rate") {
       expenseCategory = "factory";
     }
 
@@ -556,14 +556,16 @@ export async function action({ request }: ActionFunctionArgs) {
     let startDate = new Date();
     let endDate = new Date();
 
-    if (category === "vendor_ship") {
-      refTag = `[Ref: Weekly-Payout-VS-${mondayStr}]`;
+    if (category === "vendor_ship" || category === "per_order_rate_weekly") {
+      const typeStr = category === "vendor_ship" ? "VS" : "PO-orders";
+      refTag = `[Ref: Weekly-Payout-${typeStr}-${mondayStr}]`;
       weekIdentifier = `${mondayStr}_${category}`;
       startDate = new Date(mondayStr);
       endDate = new Date(startDate);
       endDate.setDate(startDate.getDate() + 6);
       endDate.setHours(23, 59, 59, 999);
     } else {
+      // category === "per_order_rate_monthly"
       const monthStr = mondayStr.substring(0, 7); // "YYYY-MM"
       refTag = `[Ref: Monthly-Payout-PO-${monthStr}]`;
       weekIdentifier = `${monthStr}_${category}`;
@@ -673,6 +675,8 @@ export default function Home() {
   // Tab state & Dashboard workflow controls
   const [activeTab, setActiveTab] = useState<"expenses" | "orders" | "users">("expenses");
   const [userSubTab, setUserSubTab] = useState<"drivers" | "admins">("drivers");
+  const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger" | "payouts">("entry");
+  const [ledgerViewMode, setLedgerViewMode] = useState<"transactions" | "runsheets">("transactions");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
   const [showDeliveryDashboard, setShowDeliveryDashboard] = useState(false);
   const [driverPassword, setDriverPassword] = useState("");
@@ -722,7 +726,7 @@ export default function Home() {
 
   // AI manual feedback state
   const [aiRawInput, setAiRawInput] = useState("");
-  const [expenseFormMode, setExpenseFormMode] = useState<"ai" | "manual">("ai");
+  const [expenseFormMode, setExpenseFormMode] = useState<"ai" | "manual" | "runsheet">("ai");
 
   // Controlled runsheet form inputs for live payout preview
   const [formCategory, setFormCategory] = useState<"vendor_ship" | "per_order_rate">("vendor_ship");
@@ -1105,17 +1109,24 @@ export default function Home() {
     let vendorShipValue = 0;
     let perOrderRateValue = 0;
 
+    const activeMonths = new Set<string>();
     filteredDeliveries.forEach((d) => {
       totalAssigned += d.totalOrders;
       totalCompleted += d.completedOrders;
       if (d.category === "vendor_ship") {
         vendorShipOrders += d.completedOrders;
-        vendorShipValue += d.completedOrders * 75;
+        vendorShipValue += d.completedOrders * 70;
       } else {
         perOrderRateOrders += d.completedOrders;
-        perOrderRateValue += 40000 + (d.completedOrders * 35);
+        perOrderRateValue += d.completedOrders * 35;
+        const date = new Date(d.createdAt);
+        const yyyy = date.getFullYear();
+        const mm = String(date.getMonth() + 1).padStart(2, "0");
+        activeMonths.add(`${yyyy}-${mm}`);
       }
     });
+
+    perOrderRateValue += activeMonths.size * 53000;
 
     return {
       totalRunsheets,
@@ -1137,7 +1148,7 @@ export default function Home() {
         mondayStr: string;
         mondayDate: Date;
         sundayDate: Date;
-        category: "vendor_ship";
+        category: "vendor_ship" | "per_order_rate_weekly";
         completedOrders: number;
         deliveriesCount: number;
       };
@@ -1148,7 +1159,7 @@ export default function Home() {
         monthStr: string;
         startDate: Date;
         endDate: Date;
-        category: "per_order_rate";
+        category: "per_order_rate_monthly";
         completedOrders: number;
         deliveriesCount: number;
       };
@@ -1189,28 +1200,61 @@ export default function Home() {
         weeklyGroups[key].completedOrders += d.completedOrders;
         weeklyGroups[key].deliveriesCount += 1;
       } else if (d.category === "per_order_rate") {
-        const yyyy = date.getFullYear();
-        const mm = String(date.getMonth() + 1).padStart(2, "0");
-        const monthStr = `${yyyy}-${mm}`;
+        // 1. Weekly Portion (₹35 / order)
+        const day = date.getDay();
+        const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+        const monday = new Date(date);
+        monday.setDate(diff);
+        monday.setHours(0, 0, 0, 0);
 
-        const key = `${monthStr}_per_order_rate`;
+        const yyyy = monday.getFullYear();
+        const mm = String(monday.getMonth() + 1).padStart(2, "0");
+        const dd = String(monday.getDate()).padStart(2, "0");
+        const mondayStr = `${yyyy}-${mm}-${dd}`;
 
-        if (!monthlyGroups[key]) {
-          const startDate = new Date(yyyy, date.getMonth(), 1, 0, 0, 0, 0);
-          const endDate = new Date(yyyy, date.getMonth() + 1, 0, 23, 59, 59, 999);
+        const key = `${mondayStr}_per_order_rate_weekly`;
 
-          monthlyGroups[key] = {
-            monthStr,
-            startDate,
-            endDate,
-            category: "per_order_rate",
+        if (!weeklyGroups[key]) {
+          const sunday = new Date(monday);
+          sunday.setDate(monday.getDate() + 6);
+          sunday.setHours(23, 59, 59, 999);
+
+          weeklyGroups[key] = {
+            mondayStr,
+            mondayDate: monday,
+            sundayDate: sunday,
+            category: "per_order_rate_weekly",
             completedOrders: 0,
             deliveriesCount: 0,
           };
         }
 
-        monthlyGroups[key].completedOrders += d.completedOrders;
-        monthlyGroups[key].deliveriesCount += 1;
+        weeklyGroups[key].completedOrders += d.completedOrders;
+        weeklyGroups[key].deliveriesCount += 1;
+
+        // 2. Monthly Fixed Base Portion (₹53,000 base pay, deferred 45 days)
+        const yyyyMonth = date.getFullYear();
+        const mmMonth = String(date.getMonth() + 1).padStart(2, "0");
+        const monthStr = `${yyyyMonth}-${mmMonth}`;
+
+        const mKey = `${monthStr}_per_order_rate_monthly`;
+
+        if (!monthlyGroups[mKey]) {
+          const startDate = new Date(yyyyMonth, date.getMonth(), 1, 0, 0, 0, 0);
+          const endDate = new Date(yyyyMonth, date.getMonth() + 1, 0, 23, 59, 59, 999);
+
+          monthlyGroups[mKey] = {
+            monthStr,
+            startDate,
+            endDate,
+            category: "per_order_rate_monthly",
+            completedOrders: 0,
+            deliveriesCount: 0,
+          };
+        }
+
+        monthlyGroups[mKey].completedOrders += d.completedOrders;
+        monthlyGroups[mKey].deliveriesCount += 1;
       }
     });
 
@@ -1219,15 +1263,18 @@ export default function Home() {
 
     const list: any[] = [];
 
-    // Map weekly vendor_ship groups
+    // Map weekly groups
     Object.values(weeklyGroups).forEach((group) => {
-      const calculatedPayout = group.completedOrders * 75;
+      const calculatedPayout = group.category === "vendor_ship"
+        ? group.completedOrders * 70
+        : group.completedOrders * 35;
       
       const expectedDate = new Date(group.mondayDate);
       expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
       expectedDate.setHours(0, 0, 0, 0);
 
-      const refTag = `[Ref: Weekly-Payout-VS-${group.mondayStr}]`;
+      const typeStr = group.category === "vendor_ship" ? "VS" : "PO-orders";
+      const refTag = `[Ref: Weekly-Payout-${typeStr}-${group.mondayStr}]`;
       const matchingExpense = expenses.find(
         (exp) => exp.type === "INCOME" && exp.notes && exp.notes.includes(refTag)
       );
@@ -1260,11 +1307,11 @@ export default function Home() {
       });
     });
 
-    // Map monthly per_order_rate groups
+    // Map monthly groups
     Object.values(monthlyGroups).forEach((group) => {
-      const calculatedPayout = 40000 + (group.completedOrders * 35);
+      const calculatedPayout = 53000;
 
-      // Payout of month M is on the 15th of month M+2 (e.g. work in June -> paid on August 15th)
+      // Payout of month M is on the 15th of month M+2 (deferred 45 days)
       const mDate = new Date(group.startDate);
       const expectedDate = new Date(mDate.getFullYear(), mDate.getMonth() + 2, 15, 0, 0, 0, 0);
 
@@ -1410,8 +1457,8 @@ export default function Home() {
   // Live Payout Preview for Runsheet Console
   const parsedCompleted = parseInt(formCompletedOrders) || 0;
   const previewPayout = formCategory === "vendor_ship"
-    ? parsedCompleted * 75
-    : 40000 + (parsedCompleted * 35);
+    ? parsedCompleted * 70
+    : parsedCompleted * 35;
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -2579,8 +2626,8 @@ export default function Home() {
                               onChange={(e) => setFormCategory(e.target.value as "vendor_ship" | "per_order_rate")}
                               className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
                             >
-                              <option value="vendor_ship">🚚 Shadowfax (Weekly Plan)</option>
-                              <option value="per_order_rate">🚚 Shadowfax (45-Day Plan)</option>
+                              <option value="vendor_ship">🚚 Vendor Ship (₹70/order Weekly)</option>
+                              <option value="per_order_rate">🚚 Split Plan (₹35/order Weekly + ₹53k Base)</option>
                             </select>
                           </div>
 
@@ -2620,11 +2667,18 @@ export default function Home() {
 
                         {/* Interactive live payout calculation preview */}
                         {parsedCompleted > 0 && (
-                          <div className="p-3.5 rounded-lg border border-[#2383e2]/20 bg-[#2383e2]/5 dark:bg-[#2383e2]/10 space-y-1 animate-fadeIn">
+                          <div className="p-3.5 rounded-lg border border-[#2383e2]/20 bg-[#2383e2]/5 dark:bg-[#2383e2]/10 space-y-1.5 animate-fadeIn">
                             <div className="flex justify-between items-center text-xs">
-                              <span className="text-neutral-500 font-bold uppercase tracking-wider text-[10px]">Runsheet Payout:</span>
+                              <span className="text-neutral-500 font-bold uppercase tracking-wider text-[10px]">
+                                {formCategory === "vendor_ship" ? "Weekly Runsheet Payout:" : "Weekly Portion Payout:"}
+                              </span>
                               <span className="text-sm font-bold text-[#2383e2]">₹{previewPayout.toLocaleString()}</span>
                             </div>
+                            {formCategory === "per_order_rate" && (
+                              <p className="text-[10px] text-neutral-450 dark:text-neutral-400 italic font-semibold leading-normal">
+                                Note: The monthly fixed base pay of ₹53,000 (deferred by 45 days) is tracked separately on the Payouts board.
+                              </p>
+                            )}
                           </div>
                         )}
 
@@ -2662,8 +2716,8 @@ export default function Home() {
                     <div className="space-y-1">
                       {deliveries.slice(0, 5).map((del) => {
                         const payout = del.category === "vendor_ship"
-                          ? del.completedOrders * 75
-                          : 40000 + (del.completedOrders * 35);
+                          ? del.completedOrders * 70
+                          : del.completedOrders * 35;
                         return (
                           <div
                             key={del.id}
@@ -2676,7 +2730,7 @@ export default function Home() {
                           >
                             <div className="flex justify-between items-center">
                               <span className="capitalize text-xs font-bold text-neutral-700 dark:text-neutral-300 flex items-center gap-1.5">
-                                🚚 {del.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
+                                🚚 {del.category === "vendor_ship" ? "Vendor Ship (Weekly)" : "Split Plan (Weekly)"}
                               </span>
                               <span className="text-xs font-bold text-neutral-900 dark:text-neutral-100">
                                 ₹{payout.toLocaleString()}
@@ -2911,8 +2965,8 @@ export default function Home() {
                             paginatedDeliveries.map((del) => {
                               const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
                               const payout = del.category === "vendor_ship"
-                                ? del.completedOrders * 75
-                                : 40000 + (del.completedOrders * 35);
+                                ? del.completedOrders * 70
+                                : del.completedOrders * 35;
                               return (
                                 <tr key={del.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
                                   <td className="p-3.5 text-neutral-500">
@@ -2931,7 +2985,7 @@ export default function Home() {
                                         ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                         : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                                     }`}>
-                                      {del.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
+                                      {del.category === "vendor_ship" ? "Vendor Ship (Weekly)" : "Split Plan (Weekly)"}
                                     </span>
                                   </td>
                                   <td className="p-3.5 text-center font-semibold text-emerald-600 dark:text-emerald-400">
@@ -3071,7 +3125,7 @@ export default function Home() {
                                   ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
                                   : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                               }`}>
-                                {del.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
+                                {del.category === "vendor_ship" ? "Vendor Ship (Weekly)" : "Split Plan (Weekly)"}
                               </span>
                               
                               <div className="text-xs text-neutral-600 dark:text-neutral-300">
@@ -3083,7 +3137,7 @@ export default function Home() {
                             <div className="flex justify-between items-center text-xs pt-1">
                               <span className="text-neutral-500 font-semibold">Payout:</span>
                               <span className="font-bold text-neutral-800 dark:text-neutral-200">
-                                ₹{(del.category === "vendor_ship" ? del.completedOrders * 75 : 40000 + (del.completedOrders * 35)).toLocaleString()}
+                                ₹{(del.category === "vendor_ship" ? del.completedOrders * 70 : del.completedOrders * 35).toLocaleString()}
                               </span>
                             </div>
 
@@ -3187,9 +3241,9 @@ export default function Home() {
               {ordersViewMode === "payouts" && (
                 <div className="space-y-6 animate-fade-in">
                   {/* Summary Cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Shadowfax - Weekly)</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Vendor Ship (Weekly)</div>
                       <div className="text-2xl font-bold mt-1 text-[#2383e2]">
                         ₹{weeklyPayouts
                           .filter(w => w.category === "vendor_ship" && w.status === "UNPAID")
@@ -3197,12 +3251,22 @@ export default function Home() {
                           .toLocaleString()}
                       </div>
                     </div>
+
+                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Split Plan (Weekly)</div>
+                      <div className="text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400">
+                        ₹{weeklyPayouts
+                          .filter(w => w.category === "per_order_rate_weekly" && w.status === "UNPAID")
+                          .reduce((sum, w) => sum + w.calculatedPayout, 0)
+                          .toLocaleString()}
+                      </div>
+                    </div>
                     
                     <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Balance (Shadowfax - 45-Day)</div>
+                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Split Base (Deferred Monthly)</div>
                       <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">
                         ₹{weeklyPayouts
-                          .filter(w => w.category === "per_order_rate" && w.status === "UNPAID")
+                          .filter(w => w.category === "per_order_rate_monthly" && w.status === "UNPAID")
                           .reduce((sum, w) => sum + w.calculatedPayout, 0)
                           .toLocaleString()}
                       </div>
@@ -3293,9 +3357,15 @@ export default function Home() {
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
                                     w.category === "vendor_ship"
                                       ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
+                                      : w.category === "per_order_rate_weekly"
+                                      ? "bg-indigo-50 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-900/30"
                                       : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
                                   }`}>
-                                    {w.category === "vendor_ship" ? "Shadowfax (Weekly)" : "Shadowfax (45-Day)"}
+                                    {w.category === "vendor_ship"
+                                      ? "Vendor Ship (Weekly)"
+                                      : w.category === "per_order_rate_weekly"
+                                      ? "Split Plan (Weekly)"
+                                      : "Split Plan Base (Monthly)"}
                                   </span>
 
                                   <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
@@ -4415,8 +4485,8 @@ export default function Home() {
                       onChange={(e) => setEditingDelivery({ ...editingDelivery, category: e.target.value })}
                       className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
                     >
-                      <option value="vendor_ship">🚚 Shadowfax (Weekly Plan)</option>
-                      <option value="per_order_rate">🚚 Shadowfax (45-Day Plan)</option>
+                      <option value="vendor_ship">🚚 Vendor Ship (₹70/order Weekly)</option>
+                      <option value="per_order_rate">🚚 Split Plan (₹35/order Weekly + ₹53k Base)</option>
                     </select>
                   </div>
 
@@ -4426,8 +4496,8 @@ export default function Home() {
                     <div className="w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-neutral-50 dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-100 font-bold">
                       ₹{
                         editingDelivery.category === "vendor_ship"
-                          ? (Number(editingDelivery.completedOrders || 0) * 75).toLocaleString()
-                          : (40000 + (Number(editingDelivery.completedOrders || 0) * 35)).toLocaleString()
+                          ? (Number(editingDelivery.completedOrders || 0) * 70).toLocaleString()
+                          : (Number(editingDelivery.completedOrders || 0) * 35).toLocaleString()
                       }
                     </div>
                   </div>
@@ -4517,8 +4587,12 @@ export default function Home() {
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-neutral-500 font-semibold">Category Type:</span>
-                  <span className="text-neutral-800 dark:text-neutral-200 font-bold capitalize">
-                    {payoutToPay.category === "vendor_ship" ? "Shadowfax (Weekly Plan)" : "Shadowfax (45-Day Plan)"}
+                  <span className="text-neutral-800 dark:text-neutral-200 font-bold capitalize text-right">
+                    {payoutToPay.category === "vendor_ship" 
+                      ? "Vendor Ship (Weekly)" 
+                      : payoutToPay.category === "per_order_rate_weekly"
+                      ? "Split Plan (Weekly)"
+                      : "Split Plan Base (Monthly)"}
                   </span>
                 </div>
                 <div className="flex justify-between items-center text-xs">
