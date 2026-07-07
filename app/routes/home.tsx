@@ -919,6 +919,32 @@ export default function Home() {
   const [formCategory, setFormCategory] = useState<"vendor_ship" | "per_order_rate">("vendor_ship");
   const [formCompletedOrders, setFormCompletedOrders] = useState<string>("");
 
+  const getMonday = (d: Date | string) => {
+    const date = new Date(d);
+    const day = date.getDay();
+    const diff = date.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(date.setDate(diff));
+    monday.setHours(0, 0, 0, 0);
+    return monday;
+  };
+
+  const getSunday = (d: Date | string) => {
+    const monday = getMonday(d);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    sunday.setHours(23, 59, 59, 999);
+    return sunday;
+  };
+
+  const [runsheetDate, setRunsheetDate] = useState(() => {
+    const today = new Date();
+    const day = today.getDay();
+    const diff = today.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(today.setDate(diff));
+    return monday.toISOString().split("T")[0];
+  });
+
+
   // Pagination page states and constants
   const EXPENSE_PAGE_SIZE = 10;
   const DELIVERY_PAGE_SIZE = 10;
@@ -2953,28 +2979,26 @@ export default function Home() {
                         <input type="hidden" name="_action" value="create_delivery" />
 
                         <input type="hidden" name="title" value="Daily Runsheet Summary" />
-                        {drivers.length <= 1 && (
-                          <input type="hidden" name="driverName" value={drivers[0]?.name || "John Driver"} />
-                        )}
                         <input type="hidden" name="totalOrders" value={formCompletedOrders} />
 
-
-                        <div className={`grid grid-cols-1 gap-5 ${drivers.length > 1 ? "md:grid-cols-2" : "md:grid-cols-3"}`}>
-                          {drivers.length > 1 && (
-                            <div className="space-y-1 flex flex-col">
-                              <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Field Operator</label>
-                              <select
-                                name="driverName"
-                                className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
-                              >
-                                {drivers.map((d: any) => (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                          <div className="space-y-1 flex flex-col">
+                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Field Operator</label>
+                            <select
+                              name="driverName"
+                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
+                            >
+                              {drivers.length > 0 ? (
+                                drivers.map((d: any) => (
                                   <option key={d.id} value={d.name}>
                                     👤 {d.name}
                                   </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
+                                ))
+                              ) : (
+                                <option value="John Driver">👤 John Driver</option>
+                              )}
+                            </select>
+                          </div>
 
                           <div className="space-y-1 flex flex-col">
                             <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Order Category</label>
@@ -3012,14 +3036,57 @@ export default function Home() {
                           </div>
 
                           <div className="space-y-1 flex flex-col">
-                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Runsheet Date</label>
-                            <input
-                              type="date"
-                              name="createdAt"
-                              required
-                              defaultValue={new Date().toISOString().split("T")[0]}
-                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
-                            />
+                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Runsheet Week Cycle</label>
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const current = new Date(runsheetDate);
+                                  current.setDate(current.getDate() - 7);
+                                  setRunsheetDate(getMonday(current).toISOString().split("T")[0]);
+                                }}
+                                className="px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded-md bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
+                                title="Previous Week"
+                              >
+                                ◀
+                              </button>
+                              <div className="relative flex-1">
+                                <input
+                                  type="date"
+                                  name="createdAt"
+                                  value={runsheetDate}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    if (val) {
+                                      const mon = getMonday(val);
+                                      setRunsheetDate(mon.toISOString().split("T")[0]);
+                                    }
+                                  }}
+                                  required
+                                  className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const current = new Date(runsheetDate);
+                                  current.setDate(current.getDate() + 7);
+                                  setRunsheetDate(getMonday(current).toISOString().split("T")[0]);
+                                }}
+                                className="px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded-md bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
+                                title="Next Week"
+                              >
+                                ▶
+                              </button>
+                            </div>
+                            {runsheetDate && (
+                              <div className="text-[10px] font-bold text-[#2383e2] dark:text-[#3894f2] mt-1.5 bg-[#2383e2]/5 dark:bg-[#2383e2]/15 px-2.5 py-1.5 rounded-lg border border-[#2383e2]/10 flex items-center justify-between">
+                                <span>📅 Week Cycle:</span>
+                                <span>
+                                  {getMonday(runsheetDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – {getSunday(runsheetDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                </span>
+                              </div>
+                            )}
                           </div>
                         </div>
 
@@ -5103,15 +5170,57 @@ export default function Home() {
 
                 {/* Runsheet Date Selection */}
                 <div className="space-y-1">
-                  <label className="text-xs font-semibold text-neutral-500">Runsheet Date</label>
-                  <input
-                    type="date"
-                    name="createdAt"
-                    required
-                    value={editingDelivery.createdAt ? new Date(editingDelivery.createdAt).toISOString().split("T")[0] : ""}
-                    onChange={(e) => setEditingDelivery({ ...editingDelivery, createdAt: e.target.value })}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
-                  />
+                  <label className="text-xs font-semibold text-neutral-500">Runsheet Week Cycle</label>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const current = new Date(editingDelivery.createdAt || new Date());
+                        current.setDate(current.getDate() - 7);
+                        const mon = getMonday(current);
+                        setEditingDelivery({ ...editingDelivery, createdAt: mon.toISOString() });
+                      }}
+                      className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-800 rounded-md bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
+                      title="Previous Week"
+                    >
+                      ◀
+                    </button>
+                    <input
+                      type="date"
+                      name="createdAt"
+                      required
+                      value={editingDelivery.createdAt ? getMonday(editingDelivery.createdAt).toISOString().split("T")[0] : ""}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        if (val) {
+                          const mon = getMonday(val);
+                          setEditingDelivery({ ...editingDelivery, createdAt: mon.toISOString() });
+                        }
+                      }}
+                      className="notion-input flex-1 text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-1.5 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const current = new Date(editingDelivery.createdAt || new Date());
+                        current.setDate(current.getDate() + 7);
+                        const mon = getMonday(current);
+                        setEditingDelivery({ ...editingDelivery, createdAt: mon.toISOString() });
+                      }}
+                      className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-800 rounded-md bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
+                      title="Next Week"
+                    >
+                      ▶
+                    </button>
+                  </div>
+                  {editingDelivery.createdAt && (
+                    <div className="text-[10px] font-bold text-[#2383e2] dark:text-[#3894f2] mt-1.5 bg-[#2383e2]/5 dark:bg-[#2383e2]/15 px-2.5 py-1.5 rounded-lg border border-[#2383e2]/10 flex items-center justify-between">
+                      <span>📅 Cycle Range:</span>
+                      <span>
+                        {getMonday(editingDelivery.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – {getSunday(editingDelivery.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">

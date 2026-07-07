@@ -37,7 +37,7 @@ This document stores coding patterns, preferences, environment details, and crit
 
 ## Home Development & Privacy Setup
 - **Privacy Enforcement**: This project is developed on a corporate workstation but linked exclusively to the personal GitHub account (`sumit1056`).
-- **Git Identity Guidelines**: Global git user settings are intentionally unset to protect privacy. Local repository-level settings are hard-configured inside this folder to stamp all commits with `sumit1056` and `sumit1056@users.noreply.github.com`. Keep this standard local config active!
+- **Git Identity Guidelines**: Global git user settings are intentionally unset to protect privacy. Local repository-level settings are hard-configured inside this folder to stamp all commits with `sumit1056` and `sumit1056@users.noreply.github.com`. Keep this standard local config active! **Always commit and push changes to the remote Git repository immediately after completing any change or session.**
 - **Project Portability**: `.env` configurations are pre-packaged to connect directly to the high-availability Neon cloud PostgreSQL database, allowing seamless data synchronization and zero local database setup on your home development setup.
 - **Home Execution Steps**:
   1. Clone/pull the repository.
@@ -85,7 +85,7 @@ All payout rates and billing cycle limits are dynamic and managed through the da
 ## 8. UI/UX Patterns & Caching Guidelines
 - **Auto-Hiding Banners**: All notification banner states (e.g. `actionErrorVisible`, `parsedExpenseVisible`, `userControlSuccessVisible`, `errorVisible`) must be controlled by a `useEffect` timer that resets the visibility state to `false` after 6000ms.
 - **Custom Notion-Styled Modals**: Do not use browser-native `alert()` or `confirm()`. Use the custom popup modal implementation in `home.tsx` for confirming critical actions (e.g. delete, mark paid, notifications).
-- **Runsheet Console Layout**: Maintain the responsive grid adjustments. If multiple drivers exist, use a 2-column layout on large screens to prevent input field squeezing. If a single driver exists, use a 3-column layout. Form inputs should use solid backgrounds (`bg-white` in light mode, `dark:bg-[#1e1e1e]` in dark mode) to prevent OS rendering overrides.
+- **Runsheet Console Layout**: Maintain the responsive grid adjustments. Field Operator select box is persistently shown even in single-driver fleets for clear visibility. The form uses a 2-column layout (`md:grid-cols-2`) on large screens. Runsheet dates use a custom Monday-Sunday snapping week selector with Next/Prev navigation buttons to enforce financial weekly periods. Form inputs should use solid backgrounds (`bg-white` in light mode, `dark:bg-[#1e1e1e]` in dark mode) to prevent OS rendering overrides.
 - **Operator Passwords**: Plain-text passwords must be stored as `passwordText` on creation and shown on the Operator details cards in the User Control Center.
 - **PWA Service Worker Registration**: The service worker in `app/root.tsx` must only be registered in production (`import.meta.env.PROD`) to avoid aggressive developer-mode caching.
 
