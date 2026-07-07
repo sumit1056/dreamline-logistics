@@ -919,8 +919,42 @@ export default function Home() {
   const [formCategory, setFormCategory] = useState<"vendor_ship" | "per_order_rate">("vendor_ship");
   const [formCompletedOrders, setFormCompletedOrders] = useState<string>("");
 
-  const getMonday = (d: Date | string) => {
+  const parseLocalDate = (d: Date | string): Date => {
+    if (d instanceof Date) {
+      const copy = new Date(d.getTime());
+      copy.setHours(0, 0, 0, 0);
+      return copy;
+    }
+    if (typeof d === "string") {
+      const match = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (match) {
+        const year = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const day = parseInt(match[3], 10);
+        return new Date(year, month, day, 0, 0, 0, 0);
+      }
+    }
     const date = new Date(d);
+    date.setHours(0, 0, 0, 0);
+    return date;
+  };
+
+  const formatLocalDate = (date: Date): string => {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const toUTCISOString = (d: Date): string => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}T00:00:00.000Z`;
+  };
+
+  const getMonday = (d: Date | string) => {
+    const date = parseLocalDate(d);
     const day = date.getDay();
     const diff = date.getDate() - day + (day === 0 ? -6 : 1);
     const monday = new Date(date.setDate(diff));
@@ -936,12 +970,16 @@ export default function Home() {
     return sunday;
   };
 
+  const formatRange = (d: Date | string) => {
+    const mon = getMonday(d);
+    const sun = getSunday(d);
+    const startStr = mon.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const endStr = sun.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    return `${startStr} – ${endStr}`;
+  };
+
   const [runsheetDate, setRunsheetDate] = useState(() => {
-    const today = new Date();
-    const day = today.getDay();
-    const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-    const monday = new Date(today.setDate(diff));
-    return monday.toISOString().split("T")[0];
+    return formatLocalDate(getMonday(new Date()));
   });
 
 
@@ -3041,9 +3079,9 @@ export default function Home() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const current = new Date(runsheetDate);
+                                  const current = parseLocalDate(runsheetDate);
                                   current.setDate(current.getDate() - 7);
-                                  setRunsheetDate(getMonday(current).toISOString().split("T")[0]);
+                                  setRunsheetDate(formatLocalDate(getMonday(current)));
                                 }}
                                 className="px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded-md bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
                                 title="Previous Week"
@@ -3059,7 +3097,7 @@ export default function Home() {
                                     const val = e.target.value;
                                     if (val) {
                                       const mon = getMonday(val);
-                                      setRunsheetDate(mon.toISOString().split("T")[0]);
+                                      setRunsheetDate(formatLocalDate(mon));
                                     }
                                   }}
                                   required
@@ -3069,9 +3107,9 @@ export default function Home() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const current = new Date(runsheetDate);
+                                  const current = parseLocalDate(runsheetDate);
                                   current.setDate(current.getDate() + 7);
-                                  setRunsheetDate(getMonday(current).toISOString().split("T")[0]);
+                                  setRunsheetDate(formatLocalDate(getMonday(current)));
                                 }}
                                 className="px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded-md bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
                                 title="Next Week"
@@ -3083,7 +3121,7 @@ export default function Home() {
                               <div className="text-[10px] font-bold text-[#2383e2] dark:text-[#3894f2] mt-1.5 bg-[#2383e2]/5 dark:bg-[#2383e2]/15 px-2.5 py-1.5 rounded-lg border border-[#2383e2]/10 flex items-center justify-between">
                                 <span>📅 Week Cycle:</span>
                                 <span>
-                                  {getMonday(runsheetDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – {getSunday(runsheetDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                                  {formatRange(runsheetDate)}
                                 </span>
                               </div>
                             )}
@@ -3166,11 +3204,8 @@ export default function Home() {
                               <span className="truncate max-w-[140px] text-left">
                                 {del.completedOrders} completed
                               </span>
-                              <span className="text-[10px] text-neutral-400 shrink-0 font-medium">
-                                {new Date(del.createdAt).toLocaleDateString("en-US", {
-                                  month: "short",
-                                  day: "numeric",
-                                })}
+                              <span className="text-[10px] text-neutral-450 shrink-0 font-bold">
+                                {formatRange(del.createdAt)}
                               </span>
                             </div>
                           </div>
@@ -3394,12 +3429,8 @@ export default function Home() {
                                 : del.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
                               return (
                                 <tr key={del.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
-                                  <td className="p-3.5 text-neutral-500">
-                                    {new Date(del.createdAt).toLocaleDateString("en-US", {
-                                      year: 'numeric',
-                                      month: 'short',
-                                      day: 'numeric'
-                                    })}
+                                  <td className="p-3.5 text-neutral-500 font-semibold">
+                                    {formatRange(del.createdAt)}
                                   </td>
                                   <td className="p-3.5 font-bold text-neutral-800 dark:text-neutral-200">
                                     👤 {del.driverName}
@@ -3532,11 +3563,7 @@ export default function Home() {
                             {/* Card Top Row: Date & Operator */}
                             <div className="flex justify-between items-center">
                               <span className="text-[11px] font-bold text-neutral-400">
-                                📅 {new Date(del.createdAt).toLocaleDateString("en-US", {
-                                  month: 'short',
-                                  day: 'numeric',
-                                  year: 'numeric'
-                                })}
+                                📅 {formatRange(del.createdAt)}
                               </span>
                               <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200">
                                 👤 {del.driverName}
@@ -5175,10 +5202,10 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => {
-                        const current = new Date(editingDelivery.createdAt || new Date());
+                        const current = parseLocalDate(editingDelivery.createdAt || new Date());
                         current.setDate(current.getDate() - 7);
                         const mon = getMonday(current);
-                        setEditingDelivery({ ...editingDelivery, createdAt: mon.toISOString() });
+                        setEditingDelivery({ ...editingDelivery, createdAt: toUTCISOString(mon) });
                       }}
                       className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-800 rounded-md bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
                       title="Previous Week"
@@ -5189,12 +5216,12 @@ export default function Home() {
                       type="date"
                       name="createdAt"
                       required
-                      value={editingDelivery.createdAt ? getMonday(editingDelivery.createdAt).toISOString().split("T")[0] : ""}
+                      value={editingDelivery.createdAt ? formatLocalDate(getMonday(editingDelivery.createdAt)) : ""}
                       onChange={(e) => {
                         const val = e.target.value;
                         if (val) {
                           const mon = getMonday(val);
-                          setEditingDelivery({ ...editingDelivery, createdAt: mon.toISOString() });
+                          setEditingDelivery({ ...editingDelivery, createdAt: toUTCISOString(mon) });
                         }
                       }}
                       className="notion-input flex-1 text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-1.5 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
@@ -5202,10 +5229,10 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => {
-                        const current = new Date(editingDelivery.createdAt || new Date());
+                        const current = parseLocalDate(editingDelivery.createdAt || new Date());
                         current.setDate(current.getDate() + 7);
                         const mon = getMonday(current);
-                        setEditingDelivery({ ...editingDelivery, createdAt: mon.toISOString() });
+                        setEditingDelivery({ ...editingDelivery, createdAt: toUTCISOString(mon) });
                       }}
                       className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-800 rounded-md bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
                       title="Next Week"
@@ -5217,7 +5244,7 @@ export default function Home() {
                     <div className="text-[10px] font-bold text-[#2383e2] dark:text-[#3894f2] mt-1.5 bg-[#2383e2]/5 dark:bg-[#2383e2]/15 px-2.5 py-1.5 rounded-lg border border-[#2383e2]/10 flex items-center justify-between">
                       <span>📅 Cycle Range:</span>
                       <span>
-                        {getMonday(editingDelivery.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })} – {getSunday(editingDelivery.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+                        {formatRange(editingDelivery.createdAt)}
                       </span>
                     </div>
                   )}
@@ -5383,7 +5410,7 @@ export default function Home() {
                     type="date"
                     name="paymentDate"
                     required
-                    defaultValue={new Date().toISOString().split("T")[0]}
+                    defaultValue={formatLocalDate(new Date())}
                     className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
                   />
                 </div>
@@ -5575,7 +5602,7 @@ export default function Home() {
                     type="date"
                     name="paymentDate"
                     required
-                    defaultValue={new Date().toISOString().split("T")[0]}
+                    defaultValue={formatLocalDate(new Date())}
                     className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
                   />
                 </div>
