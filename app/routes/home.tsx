@@ -646,7 +646,7 @@ export default function Home() {
 
   // Redirect away from disabled tabs if they try to access them
   useEffect(() => {
-    if (activeTab === "users" || activeTab === "orders") {
+    if (activeTab === "orders") {
       setActiveTab("expenses");
     }
   }, [activeTab]);
@@ -994,7 +994,7 @@ export default function Home() {
           </button>
 
 
-          {/* {loggedInUser?.role !== "DRIVER" && (
+          {loggedInUser?.role !== "DRIVER" && (
             <button
               onClick={() => switchTab("users")}
               className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
@@ -1006,9 +1006,9 @@ export default function Home() {
               <svg className={`w-4 h-4 transition-colors ${activeTab === 'users' ? 'text-[#5D87FF]' : 'text-purple-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
-              <span>User Control Center</span>
+              <span>Delivery Boys & Autos</span>
             </button>
-          )} */}
+          )}
         </nav>
 
         {/* Persistent Install App Button (Hidden when already standalone) */}
@@ -3270,7 +3270,7 @@ export default function Home() {
                   {/* Category Header */}
                   <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                     <div>
-                      <h1 className="text-2xl font-bold tracking-tight">User Control Center</h1>
+                      <h1 className="text-2xl font-bold tracking-tight">Delivery Boys & Autos</h1>
                     </div>
                   </div>
 
