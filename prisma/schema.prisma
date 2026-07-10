@@ -18,6 +18,7 @@ model User {
   passwordHash  String?
   passwordText  String?
   vehicleNumber String?
+  salary        Int?
   loginEnabled  Boolean  @default(true)
   createdAt     DateTime @default(now())
 }

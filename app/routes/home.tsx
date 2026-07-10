@@ -318,6 +318,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const phone = formData.get("phone")?.toString()?.trim() || "";
     const password = formData.get("password")?.toString() || "";
     const vehicleNumber = formData.get("vehicleNumber")?.toString()?.trim() || null;
+    const salary = parseInt(formData.get("salary")?.toString() || "0") || null;
     const loginEnabled = formData.get("loginEnabled") === "true" || formData.get("loginEnabled") === "on";
     
     if (!name || !phone) {
@@ -337,6 +338,7 @@ export async function action({ request }: ActionFunctionArgs) {
         passwordHash: password ? hashPassword(password) : null,
         passwordText: password || null,
         vehicleNumber,
+        salary,
         loginEnabled,
       },
     });
@@ -440,42 +442,6 @@ export async function action({ request }: ActionFunctionArgs) {
       await prisma.auto.delete({ where: { id } });
     }
     return { success: true, action: "delete_auto" };
-  }
-
-  if (actionType === "create_admin") {
-    const username = formData.get("username")?.toString()?.trim()?.toLowerCase() || "";
-    const password = formData.get("password")?.toString() || "";
-    
-    if (!username || !password) {
-      return { error: "Username and Password are required." };
-    }
-    
-    const existing = await prisma.adminCredential.findUnique({ where: { username } });
-    if (existing) {
-      return { error: `Admin username "${username}" is already taken.` };
-    }
-    
-    await prisma.adminCredential.create({
-      data: {
-        username,
-        passwordHash: hashPassword(password),
-      },
-    });
-    return { success: true, action: "create_admin" };
-  }
-
-  if (actionType === "delete_admin") {
-    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
-    
-    const count = await prisma.adminCredential.count();
-    if (count <= 1) {
-      return { error: "Cannot delete the last remaining administrator account." };
-    }
-    
-    await prisma.adminCredential.delete({
-      where: { id },
-    });
-    return { success: true, action: "delete_admin" };
   }
 
   return null;
@@ -3366,7 +3332,7 @@ export default function Home() {
                   )}
 
                   {/* Sub-tab Selection */}
-                  <div className="flex gap-2 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg max-w-sm font-sans">
+                  <div className="flex gap-2 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg max-w-[280px] font-sans">
                     <button
                       type="button"
                       onClick={() => setUserSubTab("drivers")}
@@ -3388,17 +3354,6 @@ export default function Home() {
                       }`}
                     >
                       🛺 Autos / Fleet
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setUserSubTab("admins")}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                        userSubTab === "admins"
-                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
-                          : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
-                      }`}
-                    >
-                      🔑 Admins
                     </button>
                   </div>
                          {/* Grid Content */}
@@ -3435,9 +3390,9 @@ export default function Home() {
                                           {u.loginEnabled ? "Login Allowed" : "Login Blocked"}
                                         </span>
                                       </h4>
-                                      <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5">
+                                      <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5 font-sans">
                                         <div>
-                                          📞 {u.phone} • 🛺 Assigned Auto: {u.vehicleNumber || "None"}
+                                          📞 {u.phone} • 💰 Salary: {u.salary ? `₹${u.salary.toLocaleString()}/mo` : "Not Set"} • 🛺 Auto: {u.vehicleNumber || "None"}
                                           {u.passwordText && (
                                             <>
                                               {" • 🔑 Pwd: "}
@@ -3504,7 +3459,7 @@ export default function Home() {
                             </div>
                           )}
                         </div>
-                      ) : userSubTab === "autos" ? (
+                      ) : (
                         <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl overflow-hidden shadow-sm">
                           <div className="p-4 border-b border-[#edece9] dark:border-neutral-800 flex justify-between items-center">
                             <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-205">
@@ -3574,65 +3529,6 @@ export default function Home() {
                             </div>
                           )}
                         </div>
-                      ) : (
-                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl overflow-hidden shadow-sm">
-                          <div className="p-4 border-b border-[#edece9] dark:border-neutral-800">
-                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-205">
-                              Console Administrators ({adminCredentials.length})
-                            </h3>
-                          </div>
-                          {adminCredentials.length === 0 ? (
-                            <div className="p-8 text-center text-xs text-neutral-400">
-                              No administrators found.
-                            </div>
-                          ) : (
-                            <div className="divide-y divide-[#edece9] dark:divide-neutral-800">
-                              {adminCredentials.map((admin: any) => (
-                                <div key={admin.id} className="p-4 flex items-center justify-between hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
-                                  <div className="flex items-center gap-3">
-                                    <div className="w-9 h-9 rounded-full bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 flex items-center justify-center font-bold text-sm shrink-0">
-                                      🔑
-                                    </div>
-                                    <div>
-                                      <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100">
-                                        {admin.username}
-                                      </h4>
-                                      <p className="text-[10px] text-neutral-400 mt-0.5">
-                                        Registered: {new Date(admin.createdAt).toLocaleDateString()}
-                                      </p>
-                                    </div>
-                                  </div>
-                                  <button
-                                    type="button"
-                                    disabled={isSubmitting || adminCredentials.length <= 1}
-                                    onClick={() => {
-                                      if (adminCredentials.length <= 1) {
-                                        triggerAlert("Action Blocked", "Cannot delete the last remaining administrator account.");
-                                        return;
-                                      }
-                                      triggerConfirm(
-                                        "Remove Admin?",
-                                        `Are you sure you want to remove administrator ${admin.username}?`,
-                                        () => {
-                                          const fd = new FormData();
-                                          fd.append("_action", "delete_admin");
-                                          fd.append("id", admin.id.toString());
-                                          submit(fd, { method: "post" });
-                                        }
-                                      );
-                                    }}
-                                    className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 disabled:hover:bg-transparent shrink-0"
-                                    title={adminCredentials.length <= 1 ? "Cannot delete the last admin" : "Remove Admin"}
-                                  >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                    </svg>
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
                       )}
                     </div>
 
@@ -3671,12 +3567,22 @@ export default function Home() {
                             </div>
 
                             <div className="space-y-1">
+                              <label className="text-xs font-semibold text-neutral-500">Monthly Salary (₹)</label>
+                              <input
+                                type="number"
+                                name="salary"
+                                placeholder="15000"
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                              />
+                            </div>
+
+                            <div className="space-y-1">
                               <label className="text-xs font-semibold text-neutral-500">Auto Assignment</label>
                               <select
                                 name="vehicleNumber"
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none text-neutral-800 dark:text-neutral-100"
                               >
-                                <option value="" className="text-neutral-800 dark:text-neutral-900">-- Select Registered Auto (Optional) --</option>
+                                <option value="" className="text-neutral-800 dark:text-neutral-900">Select Auto (Optional)</option>
                                 {autos?.map((a: any) => (
                                   <option key={a.id} value={a.plateNumber} className="text-neutral-800 dark:text-neutral-900">
                                     {a.plateNumber} ({a.modelName || "N/A"})
@@ -3728,7 +3634,7 @@ export default function Home() {
                             </button>
                           </Form>
                         </div>
-                      ) : userSubTab === "autos" ? (
+                      ) : (
                         <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
                           <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
                             <h3 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-1.5">
@@ -3790,65 +3696,6 @@ export default function Home() {
                               className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
                             >
                               {isSubmitting ? "Adding..." : "Add Auto"}
-                            </button>
-                          </Form>
-                        </div>
-                      ) : (
-                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
-                          <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
-                            <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-100 flex items-center gap-1.5">
-                              <span>➕</span> Create Admin Account
-                            </h3>
-                          </div>
-                          <Form method="post" className="space-y-4">
-                            <input type="hidden" name="_action" value="create_admin" />
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Username</label>
-                              <input
-                                type="text"
-                                name="username"
-                                required
-                                placeholder="admin_name"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Password / Access Code</label>
-                              <div className="relative">
-                                <input
-                                  type={showAdminPassword ? "text" : "password"}
-                                  name="password"
-                                  required
-                                  placeholder="••••••••"
-                                  className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md pl-3 pr-10 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => setShowAdminPassword(!showAdminPassword)}
-                                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 cursor-pointer"
-                                >
-                                  {showAdminPassword ? (
-                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112  19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
-                                    </svg>
-                                  ) : (
-                                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                                    </svg>
-                                  )}
-                                </button>
-                              </div>
-                            </div>
-
-                            <button
-                              type="submit"
-                              disabled={isSubmitting}
-                              className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
-                            >
-                              {isSubmitting ? "Creating..." : "Create Administrator"}
                             </button>
                           </Form>
                         </div>
@@ -3916,11 +3763,19 @@ export default function Home() {
                       {selectedDriverProfile.loginEnabled ? "Allowed" : "Blocked"}
                     </span>
                   </div>
-                  {selectedDriverProfile.passwordText && (
+                   {selectedDriverProfile.passwordText && (
                     <div className="flex justify-between">
                       <span>Console Password:</span>
                       <span className="font-mono font-bold text-neutral-750 dark:text-neutral-250 select-all bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
                         {selectedDriverProfile.passwordText}
+                      </span>
+                    </div>
+                  )}
+                  {selectedDriverProfile.salary && (
+                    <div className="flex justify-between">
+                      <span>Monthly Salary:</span>
+                      <span className="font-bold text-neutral-700 dark:text-neutral-300">
+                        ₹{selectedDriverProfile.salary.toLocaleString()}/mo
                       </span>
                     </div>
                   )}
