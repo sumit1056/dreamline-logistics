@@ -442,22 +442,38 @@ export default function Home() {
   const payAmountInput = "";
   const payDateInput = "";
   const payNotesInput = "";
-  const setPayAmountInput = () => {};
-  const setPayDateInput = () => {};
-  const setPayNotesInput = () => {};
-  const setPayoutToPay = () => {};
-  const setCcBillToPay = () => {};
-  const setWeeklyOrdersToEdit = () => {};
-  const setOrdersViewMode = () => {};
-  const setPayoutSubTab = () => {};
-  const setPayoutStatusFilter = () => {};
-  const setPayoutSortOrder = () => {};
-  const setFormCategory = () => {};
-  const setFormCompletedOrders = () => {};
-  const setRunsheetDate = () => {};
-  const setDeliveryPage = () => {};
-  const setEditingDelivery = () => {};
-  const setRunsheetSuccessVisible = () => {};
+  const selectedDeliveryYear = "ALL";
+  const selectedDeliveryMonth = "ALL";
+  const availableDeliveryYears: string[] = [];
+  const customDeliveryStartDate = "";
+  const customDeliveryEndDate = "";
+  const totalDeliveryPages = 1;
+  const getOrdinal = (day: number) => "";
+
+  const setPayAmountInput = (val: any) => {};
+  const setPayDateInput = (val: any) => {};
+  const setPayNotesInput = (val: any) => {};
+  const setPayoutToPay = (val: any) => {};
+  const setCcBillToPay = (val: any) => {};
+  const setWeeklyOrdersToEdit = (val: any) => {};
+  const setOrdersViewMode = (val: any) => {};
+  const setPayoutSubTab = (val: any) => {};
+  const setPayoutStatusFilter = (val: any) => {};
+  const setPayoutSortOrder = (val: any) => {};
+  const setFormCategory = (val: any) => {};
+  const setFormCompletedOrders = (val: any) => {};
+  const setRunsheetDate = (val: any) => {};
+  const setDeliveryPage = (val: any) => {};
+  const setEditingDelivery = (val: any) => {};
+  const setRunsheetSuccessVisible = (val: any) => {};
+  const setShowDeliveryDashboard = (val: any) => {};
+  const setDeliveryFilter = (val: any) => {};
+  const setSelectedDeliveryYear = (val: any) => {};
+  const setSelectedDeliveryMonth = (val: any) => {};
+  const setCustomDeliveryStartDate = (val: any) => {};
+  const setCustomDeliveryEndDate = (val: any) => {};
+  const setDeliveryCategoryFilter = (val: any) => {};
+  const setDeliveryDriverFilter = (val: any) => {};
 
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
@@ -497,7 +513,7 @@ export default function Home() {
   };
 
   // Tab state & Dashboard workflow controls
-  const [activeTab, setActiveTab] = useState<"expenses" | "users">("expenses");
+  const [activeTab, setActiveTab] = useState<"expenses" | "users" | "orders">("expenses");
   const [userSubTab, setUserSubTab] = useState<"drivers" | "admins">("drivers");
   const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger">("entry");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
