@@ -600,6 +600,7 @@ export default function Home() {
 
   const [manualType, setManualType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [selectedCategory, setSelectedCategory] = useState("fuel");
+  const [skipReceiptRequired, setSkipReceiptRequired] = useState(false);
   const [fuelSlipBase64, setFuelSlipBase64] = useState<string | null>(null);
   const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
   const [showPendingModal, setShowPendingModal] = useState(false);
@@ -1418,83 +1419,105 @@ export default function Home() {
 
                             {/* Petrol Pump Slip Camera Capture */}
                             {manualType === "EXPENSE" && selectedCategory === "fuel" && (
-                              <div className="sm:col-span-2 p-4 bg-orange-50/50 dark:bg-orange-950/10 border border-orange-200/50 dark:border-orange-900/30 rounded-lg space-y-3">
-                                <div className="flex justify-between items-center">
-                                  <div>
-                                    <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
-                                      <span>⛽ Petrol Pump Slip Required</span>
-                                    </h4>
-                                    <p className="text-[10px] text-neutral-400 mt-0.5">Attach a photo of the receipt to log fuel expense.</p>
-                                  </div>
-                                  <div className="flex gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => document.getElementById("fuel-slip-input-camera")?.click()}
-                                      title="Take Photo using Camera"
-                                      className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                    >
-                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                                      </svg>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => document.getElementById("fuel-slip-input-gallery")?.click()}
-                                      title="Select from Gallery"
-                                      className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                    >
-                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                      </svg>
-                                    </button>
-                                  </div>
+                              <div className="sm:col-span-2 space-y-3">
+                                <div className="flex items-center gap-2 p-1">
+                                  <input
+                                    type="checkbox"
+                                    id="skip-receipt-toggle"
+                                    checked={skipReceiptRequired}
+                                    onChange={(e) => {
+                                      setSkipReceiptRequired(e.target.checked);
+                                      if (e.target.checked) {
+                                        setFuelSlipBase64(null); // Clear image if skipping
+                                      }
+                                    }}
+                                    className="w-4 h-4 rounded text-[#5D87FF] border-neutral-305 focus:ring-[#5D87FF] cursor-pointer"
+                                  />
+                                  <label htmlFor="skip-receipt-toggle" className="text-xs text-neutral-600 dark:text-neutral-400 font-bold cursor-pointer select-none">
+                                    Skip Petrol Slip Receipt (e.g. for past month entries)
+                                  </label>
                                 </div>
 
-                                <input
-                                  type="file"
-                                  id="fuel-slip-input-camera"
-                                  accept="image/*"
-                                  capture="environment"
-                                  className="hidden"
-                                  onChange={async (e) => {
-                                    const file = e.target.files?.[0];
-                                    if (file) {
-                                      const compressed = await compressImage(file);
-                                      setFuelSlipBase64(compressed);
-                                    }
-                                  }}
-                                />
-                                <input
-                                  type="file"
-                                  id="fuel-slip-input-gallery"
-                                  accept="image/*"
-                                  className="hidden"
-                                  onChange={async (e) => {
-                                    const file = e.target.files?.[0];
-                                    if (file) {
-                                      const compressed = await compressImage(file);
-                                      setFuelSlipBase64(compressed);
-                                    }
-                                  }}
-                                />
-                                <input type="hidden" name="imageUrl" value={fuelSlipBase64 || ""} />
+                                {!skipReceiptRequired && (
+                                  <div className="p-4 bg-orange-50/50 dark:bg-orange-950/10 border border-orange-200/50 dark:border-orange-900/30 rounded-lg space-y-3">
+                                    <div className="flex justify-between items-center">
+                                      <div>
+                                        <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
+                                          <span>⛽ Petrol Pump Slip Required</span>
+                                        </h4>
+                                        <p className="text-[10px] text-neutral-400 mt-0.5">Attach a photo of the receipt to log fuel expense.</p>
+                                      </div>
+                                      <div className="flex gap-2">
+                                        <button
+                                          type="button"
+                                          onClick={() => document.getElementById("fuel-slip-input-camera")?.click()}
+                                          title="Take Photo using Camera"
+                                          className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                                          </svg>
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => document.getElementById("fuel-slip-input-gallery")?.click()}
+                                          title="Select from Gallery"
+                                          className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
+                                        >
+                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                          </svg>
+                                        </button>
+                                      </div>
+                                    </div>
 
-                                {fuelSlipBase64 ? (
-                                  <div className="relative w-full max-w-[120px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                    <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="Fuel Slip Preview" />
-                                    <button
-                                      type="button"
-                                      onClick={() => setFuelSlipBase64(null)}
-                                      className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
-                                    >
-                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                      </svg>
-                                    </button>
+                                    <input
+                                      type="file"
+                                      id="fuel-slip-input-camera"
+                                      accept="image/*"
+                                      capture="environment"
+                                      className="hidden"
+                                      onChange={async (e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) {
+                                          const compressed = await compressImage(file);
+                                          setFuelSlipBase64(compressed);
+                                        }
+                                      }}
+                                    />
+                                    <input
+                                      type="file"
+                                      id="fuel-slip-input-gallery"
+                                      accept="image/*"
+                                      className="hidden"
+                                      onChange={async (e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) {
+                                          const compressed = await compressImage(file);
+                                          setFuelSlipBase64(compressed);
+                                        }
+                                      }}
+                                    />
+                                    <input type="hidden" name="imageUrl" value={fuelSlipBase64 || ""} />
+
+                                    {fuelSlipBase64 ? (
+                                      <div className="relative w-full max-w-[120px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
+                                        <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="Fuel Slip Preview" />
+                                        <button
+                                          type="button"
+                                          onClick={() => setFuelSlipBase64(null)}
+                                          className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
+                                        >
+                                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                          </svg>
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <p className="text-[10px] text-orange-600/80 dark:text-orange-400/80 italic font-semibold">⚠️ No slip image captured. Snap physical receipt using the camera button to proceed.</p>
+                                    )}
                                   </div>
-                                ) : (
-                                  <p className="text-[10px] text-orange-600/80 dark:text-orange-400/80 italic font-semibold">⚠️ No slip image captured. Snap physical receipt using the camera button to proceed.</p>
                                 )}
                               </div>
                             )}
@@ -1502,12 +1525,12 @@ export default function Home() {
                             <div className="sm:col-span-2 pt-2">
                               <button
                                 type="submit"
-                                disabled={isSubmitting || (manualType === "EXPENSE" && selectedCategory === "fuel" && !fuelSlipBase64)}
+                                disabled={isSubmitting || (manualType === "EXPENSE" && selectedCategory === "fuel" && !fuelSlipBase64 && !skipReceiptRequired)}
                                 className="notion-btn w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-md cursor-pointer transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 {isSubmitting
                                   ? "Saving log..."
-                                  : manualType === "EXPENSE" && selectedCategory === "fuel" && !fuelSlipBase64
+                                  : manualType === "EXPENSE" && selectedCategory === "fuel" && !fuelSlipBase64 && !skipReceiptRequired
                                   ? "⚠️ Snap Receipt Slip Image First"
                                   : "Save Log Entry"}
                               </button>
@@ -4019,13 +4042,26 @@ export default function Home() {
                     </button>
                   </Form>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => document.getElementById("modal-pending-slip-input")?.click()}
-                    className="flex-1 py-2.5 text-xs bg-[#5D87FF]/10 hover:bg-[#5D87FF]/20 text-[#5D87FF] dark:bg-[#5D87FF]/20 dark:hover:bg-[#5D87FF]/35 font-bold rounded-xl transition-all cursor-pointer text-center"
-                  >
-                    Snap Slip First
-                  </button>
+                  <Form method="post" className="flex-1">
+                    <input type="hidden" name="_action" value="create_expense" />
+                    <input type="hidden" name="isAi" value="false" />
+                    <input type="hidden" name="amount" value={actionData.pendingFuelExpense.amount} />
+                    <input type="hidden" name="type" value={actionData.pendingFuelExpense.type} />
+                    <input type="hidden" name="category" value={actionData.pendingFuelExpense.category} />
+                    <input type="hidden" name="notes" value={actionData.pendingFuelExpense.notes} />
+                    <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
+                    <input type="hidden" name="senderName" value="AI Assistant" />
+                    <input type="hidden" name="imageUrl" value="" />
+                    <input type="hidden" name="date" value={actionData.pendingFuelExpense.date || ""} />
+                    
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full py-2.5 text-xs bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-xl shadow-md transition-all cursor-pointer text-center disabled:opacity-50"
+                    >
+                      {isSubmitting ? "Saving..." : "Save Without Slip"}
+                    </button>
+                  </Form>
                 )}
               </div>
             </div>
