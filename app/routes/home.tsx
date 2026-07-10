@@ -638,19 +638,14 @@ export default function Home() {
           setShowExpenseDashboard(true);  // Show Ledger
         }
       } else if (tabParam === "orders") {
-        setActiveTab("orders");
-        if (showAddParam === "true") {
-          setShowDeliveryDashboard(false); // Show Entry Form
-        } else {
-          setShowDeliveryDashboard(true);  // Show Dashboard
-        }
+        setActiveTab("expenses");
       }
     }
   }, []);
 
   // Redirect away from disabled tabs if they try to access them
   useEffect(() => {
-    if (activeTab === "users") {
+    if (activeTab === "users" || activeTab === "orders") {
       setActiveTab("expenses");
     }
   }, [activeTab]);
@@ -997,20 +992,6 @@ export default function Home() {
             <span>Expenses Tracking</span>
           </button>
 
-          <button
-            onClick={() => switchTab("orders")}
-            className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
-              activeTab === "orders"
-                ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
-                : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
-            }`}
-          >
-            <svg className={`w-4 h-4 transition-colors ${activeTab === 'orders' ? 'text-[#5D87FF]' : 'text-blue-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1-1v10M13 16h6m-6 0H6m13 0a2 2 0 002-2V9a1 1 0 00-1-1h-6" />
-            </svg>
-            <span>Settlement & Cycle Tracker</span>
-          </button>
 
           {/* {loggedInUser?.role !== "DRIVER" && (
             <button
@@ -3632,37 +3613,6 @@ export default function Home() {
               )}
         </div>
 
-        {/* Mobile Sticky Bottom Tab Bar (Exactly 2 Tabs) */}
-        <div className="mobile-bottom-nav md:hidden border-t border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#191919] w-full flex items-center justify-around z-50">
-          <button
-            onClick={() => switchTab("expenses")}
-            className={`flex flex-col items-center justify-center w-1/2 py-2 text-xs font-semibold gap-1 transition-all ${
-              activeTab === "expenses"
-                ? "text-[#2383e2] border-t-2 border-[#2383e2]"
-                : "text-neutral-400 hover:text-neutral-500"
-            }`}
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>Expenses</span>
-          </button>
-
-          <button
-            onClick={() => switchTab("orders")}
-            className={`flex flex-col items-center justify-center w-1/2 py-2 text-xs font-semibold gap-1 transition-all ${
-              activeTab === "orders"
-                ? "text-[#2383e2] border-t-2 border-[#2383e2]"
-                : "text-neutral-400 hover:text-neutral-500"
-            }`}
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10M13 16h6m-6 0H6m13 0a2 2 0 002-2V9a1 1 0 00-1-1h-6" />
-            </svg>
-            <span>Settlement & Cycles</span>
-          </button>
-        </div>
 
         {/* Active Driver Profile Modal Overlay */}
         {selectedDriverProfile && (
