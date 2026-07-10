@@ -44,3 +44,12 @@ model AdminCredential {
   updatedAt    DateTime @updatedAt
 }
 
+model Auto {
+  id          Int      @id @default(autoincrement())
+  plateNumber String   @unique
+  modelName   String?
+  ownerName   String?
+  driverPhone String?
+  createdAt   DateTime @default(now())
+}
+
