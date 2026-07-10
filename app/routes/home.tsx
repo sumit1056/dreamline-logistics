@@ -74,91 +74,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
     phone: session.get("userPhone") || null,
   };
 
-  let [users, expenses, deliveries, adminCredentials, settings] = await Promise.all([
+  const [users, expenses, adminCredentials] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
-    prisma.delivery.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.adminCredential.findMany({
       select: { id: true, username: true, createdAt: true },
       orderBy: { createdAt: "desc" }
     }),
-    prisma.systemSetting.findMany(),
   ]);
 
-  let didSeed = false;
-
-  // Auto-seed mock data if empty
-  if (users.length === 0) {
-    await prisma.user.createMany({
-      data: [
-        { name: "Founder User", phone: "+919999999999", role: "FOUNDER" },
-        { name: "John Driver", phone: "+918888888888", role: "DRIVER" },
-        { name: "Sam Driver", phone: "+917777777777", role: "DRIVER" },
-      ],
-    });
-    didSeed = true;
-  }
-
-  if (expenses.length === 0) {
-    await prisma.expense.createMany({
-      data: [
-        { amount: 2500, category: "fuel", notes: "diesel for truck MH-12-AB-1234", vehicle: "MH-12-AB-1234", senderName: "John Driver", approved: false, type: "EXPENSE", timestamp: new Date() },
-        { amount: 18500, category: "shadowfax", notes: "weekly vendor payment under Shadowfax hub", vehicle: null, senderName: "Founder", approved: true, type: "INCOME", timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        { amount: 1500, category: "bittu", notes: "loading labor payment to Bittu", vehicle: "MH-12-AB-1234", senderName: "John Driver", approved: true, type: "EXPENSE", timestamp: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) },
-        { amount: 8200, category: "service", notes: "truck wheel alignment and air brake service", vehicle: "MH-14-XY-9876", senderName: "Sam Driver", approved: false, type: "EXPENSE", timestamp: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000) },
-      ],
-    });
-    didSeed = true;
-  }
-
-  if (deliveries.length === 0) {
-    await prisma.delivery.createMany({
-      data: [
-        { title: "Daily Runsheet - Shadowfax (Weekly)", category: "vendor_ship", totalOrders: 40, completedOrders: 40, driverName: "John Driver", notes: "Completed all regular shipments. 2 pending due to customer unavailability.", createdAt: new Date() },
-        { title: "Daily Runsheet - Shadowfax (45-Day)", category: "per_order_rate", totalOrders: 25, completedOrders: 25, driverName: "Sam Driver", notes: "All orders completed successfully.", createdAt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
-        { title: "Daily Runsheet - Shadowfax (Weekly)", category: "vendor_ship", totalOrders: 48, completedOrders: 48, driverName: "John Driver", notes: "Slight delay at Shadowfax hub.", createdAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) },
-      ],
-    });
-    didSeed = true;
-  }
-
-  if (settings.length === 0) {
-    await prisma.systemSetting.createMany({
-      data: [
-        { key: "rate_vendor_ship", value: "70" },
-        { key: "rate_per_order_weekly", value: "35" },
-        { key: "rate_per_order_monthly_base", value: "53000" },
-        { key: "cc_fuel_cycle_end_day", value: "4" },
-      ],
-    });
-    didSeed = true;
-  }
-
-  if (didSeed) {
-    [users, expenses, deliveries, settings] = await Promise.all([
-      prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
-      prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
-      prisma.delivery.findMany({ orderBy: { createdAt: "desc" } }),
-      prisma.systemSetting.findMany(),
-    ]);
-    adminCredentials = await prisma.adminCredential.findMany({
-      select: { id: true, username: true, createdAt: true },
-      orderBy: { createdAt: "desc" }
-    });
-  }
-
-  const getSetting = (key: string, defaultValue: string) => {
-    return settings.find((s) => s.key === key)?.value || defaultValue;
-  };
-
-  const systemSettings = {
-    rateVendorShip: parseFloat(getSetting("rate_vendor_ship", "70")),
-    ratePerOrderWeekly: parseFloat(getSetting("rate_per_order_weekly", "35")),
-    ratePerOrderMonthlyBase: parseFloat(getSetting("rate_per_order_monthly_base", "53000")),
-    ccFuelCycleEndDay: parseInt(getSetting("cc_fuel_cycle_end_day", "4"), 10),
-  };
-
-  return { users, expenses, deliveries, adminCredentials, loggedInUser, systemSettings };
+  return { users, expenses, adminCredentials, loggedInUser };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -183,16 +108,16 @@ export async function action({ request }: ActionFunctionArgs) {
 
         const prompt = `
           You are an AI logistics assistant parsing operational logs and financial entries into a structured JSON array.
-          Analyze the user's input. It may contain one or multiple separate entries: expenses, incomes, or delivery/runsheet tracking updates.
+          Analyze the user's input. It may contain one or multiple separate entries of expenses or incomes.
 
           Parse the input into a strict JSON array where each item represents an entry to be saved to our database.
-          For each item in the array, specify the target table using "targetTable": "expense" or "delivery".
+          Each item in the array must be an expense or income entry.
 
           Reference current time is: ${new Date().toISOString()} (Local current date: ${new Date().toString()}).
 
           For each item, if the user mentions a past date, relative date (e.g., 'yesterday', '2 days ago', 'last Friday', 'on 25th May'), parse it into a strict UTC ISO 8601 string and set the field "date". Otherwise, if no date is mentioned, omit or set "date" to null.
 
-          If targetTable is "expense":
+          Fields for each item:
           - amount: (number) The cost or income in rupees/INR.
           - type: (string) Must be either "EXPENSE" or "INCOME".
           - category: (string) Must be one of the following exactly:
@@ -200,15 +125,6 @@ export async function action({ request }: ActionFunctionArgs) {
             For "INCOME": 'shadowfax', 'factory', 'vendor_income', 'other_income'
           - notes: (string) Clean and concise description of the transaction.
           - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234), otherwise null.
-          - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
-
-          If targetTable is "delivery":
-          - title: (string) A clean title, e.g., "Daily Runsheet - Shadowfax (Weekly)" or "Shadowfax (45-Day) Runsheet".
-          - category: (string) Must be either "vendor_ship" or "per_order_rate" based on context.
-          - totalOrders: (number) Total orders completed (always default/set equal to completedOrders).
-          - completedOrders: (number) Number of successfully completed orders.
-          - driverName: (string) The driver's name if mentioned (e.g. "John Driver" or "Sam Driver"), otherwise "Unassigned".
-          - notes: (string) Clean operational notes or remarks.
           - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
 
           User Input: "${rawText}"
@@ -274,68 +190,45 @@ export async function action({ request }: ActionFunctionArgs) {
         }
 
         let expensesCreated = 0;
-        let deliveriesCreated = 0;
         const imageUrl = formData.get("imageUrl")?.toString() || null;
         let pendingFuelExpense: any = null;
 
         for (const item of parsed) {
           const entryDate = item.date ? new Date(item.date) : new Date();
 
-          if (item.targetTable === "expense") {
-            const amount = Math.round(parseFloat(item.amount) || 0);
-            const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
-            const category = item.category || "other";
-            const notes = item.notes || rawText;
-            const vehicle = item.vehicle || null;
+          const amount = Math.round(parseFloat(item.amount) || 0);
+          const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
+          const category = item.category || "other";
+          const notes = item.notes || rawText;
+          const vehicle = item.vehicle || null;
 
-            // If it is a CNG/Fuel expense, we absolutely need a receipt slip!
-            if (category === "fuel" && !imageUrl) {
-              pendingFuelExpense = {
-                amount,
-                category,
-                notes,
-                vehicle,
-                type,
-                date: item.date || null,
-              };
-              continue; // Skip saving this one for now!
-            }
-
-            await prisma.expense.create({
-              data: {
-                amount,
-                category,
-                notes,
-                vehicle,
-                senderName: "AI Assistant",
-                approved: false,
-                imageUrl: category === "fuel" ? imageUrl : null,
-                type,
-                timestamp: entryDate,
-              },
-            });
-            expensesCreated++;
-          } else if (item.targetTable === "delivery") {
-            const title = item.title || "Daily Runsheet";
-            const category = item.category === "per_order_rate" ? "per_order_rate" : "vendor_ship";
-            const completedOrders = parseInt(item.completedOrders) || 0;
-            const totalOrders = parseInt(item.totalOrders) || completedOrders;
-            const driverName = item.driverName || "Unassigned";
-            const notes = item.notes || "";
-
-            await prisma.delivery.create({
-              data: {
-                title,
-                category,
-                totalOrders,
-                completedOrders,
-                driverName,
-                notes,
-                createdAt: entryDate,
-              },
-            });
-            deliveriesCreated++;
+          // If it is a CNG/Fuel expense, we absolutely need a receipt slip!
+          if (category === "fuel" && !imageUrl) {
+            pendingFuelExpense = {
+              amount,
+              category,
+              notes,
+              vehicle,
+              type,
+              date: item.date || null,
+            };
+            continue; // Skip saving this one for now!
           }
+
+          await prisma.expense.create({
+            data: {
+              amount,
+              category,
+              notes,
+              vehicle,
+              senderName: "AI Assistant",
+              approved: false,
+              imageUrl: category === "fuel" ? imageUrl : null,
+              type,
+              timestamp: entryDate,
+            },
+          });
+          expensesCreated++;
         }
 
         return {
@@ -343,7 +236,6 @@ export async function action({ request }: ActionFunctionArgs) {
           action: "create_expense",
           isAi: true,
           expensesCreated,
-          deliveriesCreated,
           needsFuelSlip: pendingFuelExpense !== null,
           pendingFuelExpense,
         };
@@ -418,61 +310,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true };
   }
 
-  if (actionType === "create_delivery") {
-    const title = formData.get("title")?.toString() || "Daily Runsheet";
-    const category = formData.get("category")?.toString() || "vendor_ship";
-    const completedOrders = parseInt(formData.get("completedOrders")?.toString() || "0") || 0;
-    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || completedOrders;
-    const driverName = formData.get("driverName")?.toString() || "Unassigned";
-    const notes = formData.get("notes")?.toString() || "";
-    const dateStr = formData.get("createdAt")?.toString() || null;
-    const createdAt = dateStr ? new Date(dateStr) : new Date();
 
-    await prisma.delivery.create({
-      data: {
-        title,
-        category,
-        totalOrders,
-        completedOrders,
-        driverName,
-        notes,
-        createdAt,
-      },
-    });
-    return { success: true, action: "create_delivery" };
-  }
-
-  if (actionType === "update_delivery") {
-    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
-    const category = formData.get("category")?.toString() || "vendor_ship";
-    const completedOrders = parseInt(formData.get("completedOrders")?.toString() || "0") || 0;
-    const totalOrders = parseInt(formData.get("totalOrders")?.toString() || "0") || completedOrders;
-    const driverName = formData.get("driverName")?.toString() || "Unassigned";
-    const notes = formData.get("notes")?.toString() || "";
-    const dateStr = formData.get("createdAt")?.toString() || null;
-    const createdAt = dateStr ? new Date(dateStr) : undefined;
-
-    await prisma.delivery.update({
-      where: { id },
-      data: {
-        category,
-        totalOrders,
-        completedOrders,
-        driverName,
-        notes,
-        createdAt,
-      },
-    });
-    return { success: true };
-  }
-
-  if (actionType === "delete_delivery") {
-    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
-    await prisma.delivery.delete({
-      where: { id },
-    });
-    return { success: true };
-  }
 
   if (actionType === "create_driver") {
     const name = formData.get("name")?.toString()?.trim() || "";
@@ -561,271 +399,70 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true, action: "delete_admin" };
   }
 
-  if (actionType === "mark_payout_paid") {
-    const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
-    const category = formData.get("category")?.toString() || "";
-    const notes = formData.get("notes")?.toString() || "";
-    const mondayStr = formData.get("mondayStr")?.toString() || "";
-    const paymentDateStr = formData.get("paymentDate")?.toString() || null;
-    const paymentDate = paymentDateStr ? new Date(paymentDateStr) : new Date();
-
-    let expenseCategory = "other_income";
-    if (category === "vendor_ship") {
-      expenseCategory = "shadowfax";
-    } else if (category === "per_order_rate_weekly" || category === "per_order_rate") {
-      expenseCategory = "factory";
-    } else if (category === "per_order_rate_monthly") {
-      expenseCategory = "vendor_income";
-    }
-
-    let refTag = "";
-    let weekIdentifier = "";
-    let startDate = new Date();
-    let endDate = new Date();
-
-    if (category === "vendor_ship" || category === "per_order_rate_weekly") {
-      const typeStr = category === "vendor_ship" ? "VS" : "PO-orders";
-      refTag = `[Ref: Weekly-Payout-${typeStr}-${mondayStr}]`;
-      weekIdentifier = `${mondayStr}_${category}`;
-      startDate = new Date(mondayStr);
-      endDate = new Date(startDate);
-      endDate.setDate(startDate.getDate() + 6);
-      endDate.setHours(23, 59, 59, 999);
-    } else {
-      // category === "per_order_rate_monthly"
-      const monthStr = mondayStr.substring(0, 7); // "YYYY-MM"
-      refTag = `[Ref: Monthly-Payout-PO-${monthStr}]`;
-      weekIdentifier = `${monthStr}_${category}`;
-      
-      const parsedDate = new Date(mondayStr);
-      const yyyy = parsedDate.getFullYear();
-      const mm = parsedDate.getMonth();
-      startDate = new Date(yyyy, mm, 1, 0, 0, 0, 0);
-      endDate = new Date(yyyy, mm + 1, 0, 23, 59, 59, 999);
-    }
-
-    const finalNotes = notes ? `${notes} ${refTag}` : refTag;
-
-    // Create corresponding INCOME entry in Expense table for unified cashflow ledger
-    await prisma.expense.create({
-      data: {
-        amount,
-        category: expenseCategory,
-        notes: finalNotes,
-        vehicle: null,
-        senderName: "Founder",
-        approved: true,
-        type: "INCOME",
-        timestamp: paymentDate,
-      },
-    });
-
-    // Also persist in the Payout table for database-backed tracking
-    try {
-      await prisma.payout.upsert({
-        where: {
-          weekIdentifier_category: {
-            weekIdentifier,
-            category,
-          },
-        },
-        update: {
-          actualAmount: amount,
-          status: "PAID",
-          paidAt: paymentDate,
-          notes,
-        },
-        create: {
-          weekIdentifier,
-          startDate,
-          endDate,
-          category,
-          completedOrders: 0, // calculated on the fly, default to 0 here
-          calculatedAmount: amount,
-          actualAmount: amount,
-          status: "PAID",
-          paidAt: paymentDate,
-          notes,
-        },
-      });
-    } catch (err) {
-      console.error("Failed to upsert Payout tracker record:", err);
-    }
-
-    return { success: true, action: "mark_payout_paid" };
-  }
-
-  if (actionType === "mark_fuel_cc_paid") {
-    const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
-    const billingMonth = formData.get("billingMonth")?.toString() || ""; // YYYY-MM
-    const notes = formData.get("notes")?.toString() || "";
-    const paymentDateStr = formData.get("paymentDate")?.toString() || null;
-    const paymentDate = paymentDateStr ? new Date(paymentDateStr) : new Date();
-
-    const endDaySetting = await prisma.systemSetting.findUnique({ where: { key: "cc_fuel_cycle_end_day" } });
-    const endDay = endDaySetting ? parseInt(endDaySetting.value, 10) : 4;
-
-    // Generate the start and end of the billing cycle
-    const endDayStr = String(endDay).padStart(2, "0");
-    const parsedDate = new Date(`${billingMonth}-${endDayStr}`);
-    const yyyy = parsedDate.getFullYear();
-    const mm = parsedDate.getMonth(); // 0-indexed month
-    const startDate = new Date(yyyy, mm - 1, endDay + 1, 0, 0, 0, 0); // starts endDay+1 of M-1
-    const endDate = new Date(yyyy, mm, endDay, 23, 59, 59, 999); // ends endDay of M
-    
-    const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
-    const startStr = startDate.toLocaleDateString("en-US", formatOption);
-    const endStr = endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-    const cycleLabel = `${startStr} - ${endStr}`;
-
-    const refTag = `[Ref: Fuel-CC-Bill-${billingMonth}]`;
-    const finalNotes = notes 
-      ? `Credit Card Payment for Fuel Bill (${cycleLabel}) ${notes} ${refTag}`
-      : `Credit Card Payment for Fuel Bill (${cycleLabel}) ${refTag}`;
-
-    // Create corresponding EXPENSE entry in Expense table with category "credit_card"
-    await prisma.expense.create({
-      data: {
-        amount,
-        category: "credit_card",
-        notes: finalNotes,
-        vehicle: null,
-        senderName: "Founder",
-        approved: true,
-        type: "EXPENSE",
-        timestamp: paymentDate,
-      },
-    });
-
-    return { success: true, action: "mark_fuel_cc_paid" };
-  }
-
-  if (actionType === "update_weekly_orders") {
-    const mondayStr = formData.get("mondayStr")?.toString() || "";
-    const vendorShipOrders = parseInt(formData.get("vendorShipOrders")?.toString() || "0") || 0;
-    const perOrderOrders = parseInt(formData.get("perOrderOrders")?.toString() || "0") || 0;
-
-    const start = new Date(mondayStr);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(start);
-    end.setDate(start.getDate() + 6);
-    end.setHours(23, 59, 59, 999);
-
-    // 1. Update/Write vendor_ship
-    await prisma.delivery.deleteMany({
-      where: {
-        category: "vendor_ship",
-        createdAt: {
-          gte: start,
-          lte: end,
-        }
-      }
-    });
-
-    if (vendorShipOrders > 0) {
-      await prisma.delivery.create({
-        data: {
-          title: "Weekly Payout Runsheet - 70 Per Order",
-          category: "vendor_ship",
-          completedOrders: vendorShipOrders,
-          totalOrders: vendorShipOrders,
-          driverName: "Weekly Summary",
-          notes: "Manually entered weekly orders",
-          createdAt: new Date(end), // Put on Sunday
-        }
-      });
-    }
-
-    // 2. Update/Write per_order_rate
-    await prisma.delivery.deleteMany({
-      where: {
-        category: "per_order_rate",
-        createdAt: {
-          gte: start,
-          lte: end,
-        }
-      }
-    });
-
-    if (perOrderOrders > 0) {
-      await prisma.delivery.create({
-        data: {
-          title: "Weekly Payout Runsheet - Vendor Per Order",
-          category: "per_order_rate",
-          completedOrders: perOrderOrders,
-          totalOrders: perOrderOrders,
-          driverName: "Weekly Summary",
-          notes: "Manually entered weekly orders",
-          createdAt: new Date(end), // Put on Sunday
-        }
-      });
-    }
-
-    return { success: true, action: "update_weekly_orders" };
-  }
-
-  if (actionType === "update_system_settings") {
-    const rateVendorShip = formData.get("rateVendorShip")?.toString() || "70";
-    const ratePerOrderWeekly = formData.get("ratePerOrderWeekly")?.toString() || "35";
-    const ratePerOrderMonthlyBase = formData.get("ratePerOrderMonthlyBase")?.toString() || "53000";
-    const ccFuelCycleEndDay = formData.get("ccFuelCycleEndDay")?.toString() || "4";
-
-    const parsedEndDay = parseInt(ccFuelCycleEndDay, 10);
-    if (isNaN(parsedEndDay) || parsedEndDay < 1 || parsedEndDay > 28) {
-      return { error: "Credit Card Billing Day must be between 1 and 28." };
-    }
-
-    try {
-      await prisma.$transaction([
-        prisma.systemSetting.upsert({
-          where: { key: "rate_vendor_ship" },
-          update: { value: rateVendorShip },
-          create: { key: "rate_vendor_ship", value: rateVendorShip },
-        }),
-        prisma.systemSetting.upsert({
-          where: { key: "rate_per_order_weekly" },
-          update: { value: ratePerOrderWeekly },
-          create: { key: "rate_per_order_weekly", value: ratePerOrderWeekly },
-        }),
-        prisma.systemSetting.upsert({
-          where: { key: "rate_per_order_monthly_base" },
-          update: { value: ratePerOrderMonthlyBase },
-          create: { key: "rate_per_order_monthly_base", value: ratePerOrderMonthlyBase },
-        }),
-        prisma.systemSetting.upsert({
-          where: { key: "cc_fuel_cycle_end_day" },
-          update: { value: ccFuelCycleEndDay },
-          create: { key: "cc_fuel_cycle_end_day", value: ccFuelCycleEndDay },
-        }),
-      ]);
-      return { success: true, action: "update_system_settings" };
-    } catch (err: any) {
-      console.error("Failed to update system settings:", err);
-      return { error: err.message || "Failed to update system settings" };
-    }
-  }
-
   return null;
 }
 
 export default function Home() {
-  const { users, expenses, deliveries, adminCredentials, loggedInUser, systemSettings } = useLoaderData<typeof loader>();
+  const { users, expenses, adminCredentials, loggedInUser } = useLoaderData<typeof loader>();
   const drivers = users.filter((u: any) => u.role === "DRIVER");
 
-  const getOrdinal = (day: number) => {
-    if (day > 3 && day < 21) return `${day}th`;
-    switch (day % 10) {
-      case 1:  return `${day}st`;
-      case 2:  return `${day}nd`;
-      case 3:  return `${day}rd`;
-      default: return `${day}th`;
-    }
-  };
+  // Mock variables for deleted features to prevent TypeScript compilation errors
+  const deliveries: any[] = [];
+  const filteredDeliveries: any[] = [];
+  const paginatedDeliveries: any[] = [];
+  const activeDeliveryPage = 1;
+  const DELIVERY_PAGE_SIZE = 10;
+  const deliveryDriverFilter = "ALL";
+  const deliveryCategoryFilter = "ALL";
+  const deliveryFilter = "ALL";
+  const ordersViewMode = "form";
+  const orderCounts = { totalRunsheets: 0, totalAssigned: 0, totalCompleted: 0, vendorShipOrders: 0, perOrderRateOrders: 0, vendorShipValue: 0, perOrderRateValue: 0, totalValue: 0, completionRate: 0 };
+  const weeklyPayouts: any[] = [];
+  const filteredAndSortedPayouts: any[] = [];
+  const ccFuelCycles: any[] = [];
+  const filteredAndSortedCcFuelCycles: any[] = [];
+  const ccSummaryMetrics = { unpaidCcTotal: 0, ongoingCcTotal: 0, lastPaidAmount: 0, totalFuelAllTime: 0 };
+  const systemSettings = { rateVendorShip: 70, ratePerOrderWeekly: 35, ratePerOrderMonthlyBase: 53000, ccFuelCycleEndDay: 4 };
+  const payoutStatusFilter = "ALL";
+  const payoutSortOrder = "date_desc";
+  const payoutSubTab = "payouts";
+  const runsheetDate = "";
+  const runsheetSuccessVisible = false;
+  const formCategory = "vendor_ship";
+  const formCompletedOrders = "";
+  const deliveryPage = 1;
+  const payoutSuccessVisible = false;
+  const ccSuccessVisible = false;
+  const settingsSuccessVisible = false;
+  const payoutToPay: any = null;
+  const weeklyOrdersToEdit: any = null;
+  const ccBillToPay: any = null;
+  const editingDelivery: any = null;
+  const runsheetFormRef = { current: null };
+  const payAmountInput = "";
+  const payDateInput = "";
+  const payNotesInput = "";
+  const setPayAmountInput = () => {};
+  const setPayDateInput = () => {};
+  const setPayNotesInput = () => {};
+  const setPayoutToPay = () => {};
+  const setCcBillToPay = () => {};
+  const setWeeklyOrdersToEdit = () => {};
+  const setOrdersViewMode = () => {};
+  const setPayoutSubTab = () => {};
+  const setPayoutStatusFilter = () => {};
+  const setPayoutSortOrder = () => {};
+  const setFormCategory = () => {};
+  const setFormCompletedOrders = () => {};
+  const setRunsheetDate = () => {};
+  const setDeliveryPage = () => {};
+  const setEditingDelivery = () => {};
+  const setRunsheetSuccessVisible = () => {};
+
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
   const submit = useSubmit();
 
-  const [deliveryDriverFilter, setDeliveryDriverFilter] = useState<string>("ALL");
   const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [customDialog, setCustomDialog] = useState<{
     isOpen: boolean;
@@ -860,12 +497,10 @@ export default function Home() {
   };
 
   // Tab state & Dashboard workflow controls
-  const [activeTab, setActiveTab] = useState<"expenses" | "orders" | "users">("expenses");
+  const [activeTab, setActiveTab] = useState<"expenses" | "users">("expenses");
   const [userSubTab, setUserSubTab] = useState<"drivers" | "admins">("drivers");
-  const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger" | "payouts">("entry");
-  const [ledgerViewMode, setLedgerViewMode] = useState<"transactions" | "runsheets">("transactions");
+  const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger">("entry");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
-  const [showDeliveryDashboard, setShowDeliveryDashboard] = useState(false);
   const [driverPassword, setDriverPassword] = useState("");
 
   const generateRandomPassword = () => {
@@ -880,11 +515,8 @@ export default function Home() {
   // Timeframe filter state
   const [expenseFilter, setExpenseFilter] = useState<"ALL" | "YEAR" | "MONTH" | "TODAY" | "CUSTOM">("ALL");
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<"ALL" | "EXPENSE" | "INCOME">("ALL");
-  const [deliveryFilter, setDeliveryFilter] = useState<"ALL" | "YEAR" | "MONTH" | "TODAY" | "CUSTOM">("ALL");
-  const [deliveryCategoryFilter, setDeliveryCategoryFilter] = useState<"ALL" | "VENDOR_SHIP" | "PER_ORDER">("ALL");
 
   // Auto-hiding notification and driver profile states
-  const [runsheetSuccessVisible, setRunsheetSuccessVisible] = useState(false);
   const [expenseSuccessVisible, setExpenseSuccessVisible] = useState(false);
   const [actionErrorVisible, setActionErrorVisible] = useState(false);
   const [parsedExpenseVisible, setParsedExpenseVisible] = useState(false);
@@ -894,11 +526,6 @@ export default function Home() {
   const [selectedMonth, setSelectedMonth] = useState<string>("ALL");
   const [customStartDate, setCustomStartDate] = useState<string>("");
   const [customEndDate, setCustomEndDate] = useState<string>("");
-
-  const [selectedDeliveryYear, setSelectedDeliveryYear] = useState<string>("ALL");
-  const [selectedDeliveryMonth, setSelectedDeliveryMonth] = useState<string>("ALL");
-  const [customDeliveryStartDate, setCustomDeliveryStartDate] = useState<string>("");
-  const [customDeliveryEndDate, setCustomDeliveryEndDate] = useState<string>("");
 
   // Mobile drawer states
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -913,11 +540,7 @@ export default function Home() {
 
   // AI manual feedback state
   const [aiRawInput, setAiRawInput] = useState("");
-  const [expenseFormMode, setExpenseFormMode] = useState<"ai" | "manual" | "runsheet">("ai");
-
-  // Controlled runsheet form inputs for live payout preview
-  const [formCategory, setFormCategory] = useState<"vendor_ship" | "per_order_rate">("vendor_ship");
-  const [formCompletedOrders, setFormCompletedOrders] = useState<string>("");
+  const [expenseFormMode, setExpenseFormMode] = useState<"ai" | "manual">("ai");
 
   const parseLocalDate = (d: Date | string): Date => {
     if (d instanceof Date) {
@@ -978,16 +601,9 @@ export default function Home() {
     return `${startStr} – ${endStr}`;
   };
 
-  const [runsheetDate, setRunsheetDate] = useState(() => {
-    return formatLocalDate(getMonday(new Date()));
-  });
-
-
   // Pagination page states and constants
   const EXPENSE_PAGE_SIZE = 10;
-  const DELIVERY_PAGE_SIZE = 10;
   const [expensePage, setExpensePage] = useState(1);
-  const [deliveryPage, setDeliveryPage] = useState(1);
 
   const [manualType, setManualType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
   const [selectedCategory, setSelectedCategory] = useState("fuel");
@@ -996,28 +612,11 @@ export default function Home() {
   const [showPendingModal, setShowPendingModal] = useState(false);
   const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
 
-  // Weekly Payout Tracker states
-  const [ordersViewMode, setOrdersViewMode] = useState<"form" | "dashboard" | "payouts">("form");
-  const [payoutToPay, setPayoutToPay] = useState<any | null>(null);
-  const [weeklyOrdersToEdit, setWeeklyOrdersToEdit] = useState<any | null>(null);
-  const [ccBillToPay, setCcBillToPay] = useState<any | null>(null);
-  const [payoutSubTab, setPayoutSubTab] = useState<"payouts" | "fuel_cycles" | "settings">("payouts");
-  const [payAmountInput, setPayAmountInput] = useState<string>("");
-  const [payDateInput, setPayDateInput] = useState<string>("");
-  const [payNotesInput, setPayNotesInput] = useState<string>("");
-  const [payoutSuccessVisible, setPayoutSuccessVisible] = useState(false);
-  const [ccSuccessVisible, setCcSuccessVisible] = useState(false);
-  const [settingsSuccessVisible, setSettingsSuccessVisible] = useState(false);
-  const [payoutStatusFilter, setPayoutStatusFilter] = useState<"ALL" | "PAID" | "UNPAID" | "ONGOING">("ALL");
-  const [payoutSortOrder, setPayoutSortOrder] = useState<"date_desc" | "date_asc" | "amount_desc" | "amount_asc">("date_desc");
-
   // Local edit states
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
-  const [editingDelivery, setEditingDelivery] = useState<any | null>(null);
 
   // Form references for automated clearing on success
   const manualExpenseFormRef = useRef<HTMLFormElement>(null);
-  const runsheetFormRef = useRef<HTMLFormElement>(null);
   const aiFormRef = useRef<HTMLFormElement>(null);
 
   // Initialize theme from localStorage or system preferences
@@ -1175,16 +774,7 @@ export default function Home() {
     return Array.from(years).sort((a, b) => b.localeCompare(a));
   }, [expenses]);
 
-  // Dynamically extract all available years from deliveries to populate the year filter dropdown
-  const availableDeliveryYears = useMemo(() => {
-    const years = new Set<string>();
-    deliveries.forEach((d) => {
-      const yr = new Date(d.createdAt).getFullYear();
-      if (!isNaN(yr)) years.add(yr.toString());
-    });
-    years.add(new Date().getFullYear().toString());
-    return Array.from(years).sort((a, b) => b.localeCompare(a));
-  }, [deliveries]);
+
 
   // Filtered Expenses
   const filteredExpenses = useMemo(() => {
@@ -1256,80 +846,14 @@ export default function Home() {
     return true;
   };
 
-  // Filtered Deliveries
-  const filteredDeliveries = useMemo(() => {
-    return deliveries.filter((del) => {
-      // 0. Filter by Driver
-      if (deliveryDriverFilter !== "ALL" && del.driverName !== deliveryDriverFilter) {
-        return false;
-      }
-
-      // 1. First apply Category filter
-      if (deliveryCategoryFilter === "VENDOR_SHIP" && del.category !== "vendor_ship") {
-        return false;
-      }
-      if (deliveryCategoryFilter === "PER_ORDER" && del.category !== "per_order_rate") {
-        return false;
-      }
-
-      // 2. Next apply Timeframe filter
-      const d = new Date(del.createdAt);
-      const now = new Date();
-
-      if (deliveryFilter === "ALL") {
-        return true;
-      }
-
-      if (deliveryFilter === "TODAY") {
-        return (
-          d.getFullYear() === now.getFullYear() &&
-          d.getMonth() === now.getMonth() &&
-          d.getDate() === now.getDate()
-        );
-      }
-
-      if (deliveryFilter === "YEAR") {
-        if (selectedDeliveryYear === "ALL") return true;
-        return d.getFullYear() === Number(selectedDeliveryYear);
-      }
-
-      if (deliveryFilter === "MONTH") {
-        const yearMatch = selectedDeliveryYear === "ALL" || d.getFullYear() === Number(selectedDeliveryYear);
-        const monthMatch = selectedDeliveryMonth === "ALL" || d.getMonth() === Number(selectedDeliveryMonth);
-        return yearMatch && monthMatch;
-      }
-
-      if (deliveryFilter === "CUSTOM") {
-        if (!customDeliveryStartDate) return true;
-        const start = new Date(customDeliveryStartDate);
-        start.setHours(0, 0, 0, 0);
-
-        const end = customDeliveryEndDate ? new Date(customDeliveryEndDate) : new Date(customDeliveryStartDate);
-        end.setHours(23, 59, 59, 999);
-
-        return d >= start && d <= end;
-      }
-
-      return true;
-    });
-  }, [deliveries, deliveryFilter, deliveryCategoryFilter, selectedDeliveryYear, selectedDeliveryMonth, customDeliveryStartDate, customDeliveryEndDate, deliveryDriverFilter]);
-
   // Paginated sublists
   const totalExpensePages = Math.max(1, Math.ceil(filteredExpenses.length / EXPENSE_PAGE_SIZE));
   const activeExpensePage = Math.min(expensePage, totalExpensePages);
-
-  const totalDeliveryPages = Math.max(1, Math.ceil(filteredDeliveries.length / DELIVERY_PAGE_SIZE));
-  const activeDeliveryPage = Math.min(deliveryPage, totalDeliveryPages);
 
   const paginatedExpenses = useMemo(() => {
     const startIndex = (activeExpensePage - 1) * EXPENSE_PAGE_SIZE;
     return filteredExpenses.slice(startIndex, startIndex + EXPENSE_PAGE_SIZE);
   }, [filteredExpenses, activeExpensePage]);
-
-  const paginatedDeliveries = useMemo(() => {
-    const startIndex = (activeDeliveryPage - 1) * DELIVERY_PAGE_SIZE;
-    return filteredDeliveries.slice(startIndex, startIndex + DELIVERY_PAGE_SIZE);
-  }, [filteredDeliveries, activeDeliveryPage]);
 
   // Financial calculations based on filtered ledger
   const totals = useMemo(() => {
@@ -1355,429 +879,13 @@ export default function Home() {
     return { income, expense, pendingExpense, fuel, net: income - expense };
   }, [filteredExpenses]);
 
-  // Runsheet and daily order counts based on filtered ledger
-  const orderCounts = useMemo(() => {
-    let totalRunsheets = filteredDeliveries.length;
-    let totalAssigned = 0;
-    let totalCompleted = 0;
-    let vendorShipOrders = 0;
-    let perOrderRateOrders = 0;
-    let vendorShipValue = 0;
-    let perOrderRateValue = 0;
 
-    const activeMonths = new Set<string>();
-    filteredDeliveries.forEach((d) => {
-      totalAssigned += d.totalOrders;
-      totalCompleted += d.completedOrders;
-      if (d.category === "vendor_ship") {
-        vendorShipOrders += d.completedOrders;
-        vendorShipValue += d.completedOrders * (systemSettings?.rateVendorShip ?? 70);
-      } else {
-        perOrderRateOrders += d.completedOrders;
-        perOrderRateValue += d.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
-        const date = new Date(d.createdAt);
-        const yyyy = date.getFullYear();
-        const mm = String(date.getMonth() + 1).padStart(2, "0");
-        activeMonths.add(`${yyyy}-${mm}`);
-      }
-    });
-
-    perOrderRateValue += activeMonths.size * (systemSettings?.ratePerOrderMonthlyBase ?? 53000);
-
-    return {
-      totalRunsheets,
-      totalAssigned,
-      totalCompleted,
-      vendorShipOrders,
-      perOrderRateOrders,
-      vendorShipValue,
-      perOrderRateValue,
-      totalValue: vendorShipValue + perOrderRateValue,
-      completionRate: totalAssigned > 0 ? Math.round((totalCompleted / totalAssigned) * 100) : 0
-    };
-  }, [filteredDeliveries, systemSettings]);
-
-  // Weekly Payout Tracker memoized calculations
-  const weeklyPayouts = useMemo(() => {
-    const weeklyGroups: {
-      [key: string]: {
-        mondayStr: string;
-        mondayDate: Date;
-        sundayDate: Date;
-        category: "vendor_ship" | "per_order_rate_weekly";
-        completedOrders: number;
-        deliveriesCount: number;
-      };
-    } = {};
-
-    const monthlyGroups: {
-      [key: string]: {
-        monthStr: string;
-        startDate: Date;
-        endDate: Date;
-        category: "per_order_rate_monthly";
-        completedOrders: number;
-        deliveriesCount: number;
-      };
-    } = {};
-
-    // 1. Pre-generate all weekly slots from Monday, Dec 29, 2025 up to next week
-    let currentMonday = new Date(2025, 11, 29, 0, 0, 0, 0);
-    const limitDate = new Date();
-    limitDate.setDate(limitDate.getDate() + 7);
-
-    while (currentMonday <= limitDate) {
-      const yyyy = currentMonday.getFullYear();
-      const mm = String(currentMonday.getMonth() + 1).padStart(2, "0");
-      const dd = String(currentMonday.getDate()).padStart(2, "0");
-      const mondayStr = `${yyyy}-${mm}-${dd}`;
-
-      const sunday = new Date(currentMonday);
-      sunday.setDate(currentMonday.getDate() + 6);
-      sunday.setHours(23, 59, 59, 999);
-
-      // vendor_ship
-      const keyVs = `${mondayStr}_vendor_ship`;
-      weeklyGroups[keyVs] = {
-        mondayStr,
-        mondayDate: new Date(currentMonday),
-        sundayDate: sunday,
-        category: "vendor_ship",
-        completedOrders: 0,
-        deliveriesCount: 0,
-      };
-
-      // per_order_rate_weekly
-      const keyPo = `${mondayStr}_per_order_rate_weekly`;
-      weeklyGroups[keyPo] = {
-        mondayStr,
-        mondayDate: new Date(currentMonday),
-        sundayDate: sunday,
-        category: "per_order_rate_weekly",
-        completedOrders: 0,
-        deliveriesCount: 0,
-      };
-
-      currentMonday.setDate(currentMonday.getDate() + 7);
-    }
-
-    // 2. Pre-generate all monthly slots from Jan 2026 to current month
-    const startYear = 2026;
-    const startMonth = 0;
-    const endYear = new Date().getFullYear();
-    const endMonth = new Date().getMonth();
-
-    let curYear = startYear;
-    let curMonth = startMonth;
-
-    while (curYear < endYear || (curYear === endYear && curMonth <= endMonth)) {
-      const monthStr = `${curYear}-${String(curMonth + 1).padStart(2, "0")}`;
-      const mKey = `${monthStr}_per_order_rate_monthly`;
-
-      const startDate = new Date(curYear, curMonth, 1, 0, 0, 0, 0);
-      const endDate = new Date(curYear, curMonth + 1, 0, 23, 59, 59, 999);
-
-      monthlyGroups[mKey] = {
-        monthStr,
-        startDate,
-        endDate,
-        category: "per_order_rate_monthly",
-        completedOrders: 0,
-        deliveriesCount: 0,
-      };
-
-      curMonth++;
-      if (curMonth > 11) {
-        curMonth = 0;
-        curYear++;
-      }
-    }
-
-    // 3. Aggregate all deliveries into the generated weekly & monthly buckets
-    deliveries.forEach((d) => {
-      const date = new Date(d.createdAt);
-      
-      if (d.category === "vendor_ship") {
-        const day = date.getDay();
-        const diff = date.getDate() - day + (day === 0 ? -6 : 1);
-        const monday = new Date(date);
-        monday.setDate(diff);
-        monday.setHours(0, 0, 0, 0);
-
-        const yyyy = monday.getFullYear();
-        const mm = String(monday.getMonth() + 1).padStart(2, "0");
-        const dd = String(monday.getDate()).padStart(2, "0");
-        const mondayStr = `${yyyy}-${mm}-${dd}`;
-        const key = `${mondayStr}_vendor_ship`;
-
-        if (weeklyGroups[key]) {
-          weeklyGroups[key].completedOrders += d.completedOrders;
-          weeklyGroups[key].deliveriesCount += 1;
-        }
-      } else if (d.category === "per_order_rate") {
-        // Weekly Portion
-        const day = date.getDay();
-        const diff = date.getDate() - day + (day === 0 ? -6 : 1);
-        const monday = new Date(date);
-        monday.setDate(diff);
-        monday.setHours(0, 0, 0, 0);
-
-        const yyyy = monday.getFullYear();
-        const mm = String(monday.getMonth() + 1).padStart(2, "0");
-        const dd = String(monday.getDate()).padStart(2, "0");
-        const mondayStr = `${yyyy}-${mm}-${dd}`;
-        const key = `${mondayStr}_per_order_rate_weekly`;
-
-        if (weeklyGroups[key]) {
-          weeklyGroups[key].completedOrders += d.completedOrders;
-          weeklyGroups[key].deliveriesCount += 1;
-        }
-
-        // Monthly Portion
-        const monthStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-        const mKey = `${monthStr}_per_order_rate_monthly`;
-
-        if (monthlyGroups[mKey]) {
-          monthlyGroups[mKey].completedOrders += d.completedOrders;
-          monthlyGroups[mKey].deliveriesCount += 1;
-        }
-      }
-    });
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const list: any[] = [];
-
-    // Map weekly groups
-    Object.values(weeklyGroups).forEach((group) => {
-      const calculatedPayout = group.category === "vendor_ship"
-        ? group.completedOrders * (systemSettings?.rateVendorShip ?? 70)
-        : group.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
-      
-      const expectedDate = new Date(group.mondayDate);
-      expectedDate.setDate(group.mondayDate.getDate() + 9); // Wednesday next week
-      expectedDate.setHours(0, 0, 0, 0);
-
-      const typeStr = group.category === "vendor_ship" ? "VS" : "PO-orders";
-      const refTag = `[Ref: Weekly-Payout-${typeStr}-${group.mondayStr}]`;
-      const matchingExpense = expenses.find(
-        (exp) => exp.type === "INCOME" && exp.notes && exp.notes.includes(refTag)
-      );
-
-      let status: "PAID" | "UNPAID" | "ONGOING" = "UNPAID";
-      if (matchingExpense) {
-        status = "PAID";
-      } else if (group.sundayDate.getTime() > today.getTime()) {
-        status = "ONGOING";
-      }
-
-      const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
-      const startStr = group.mondayDate.toLocaleDateString("en-US", formatOption);
-      const endStr = group.sundayDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-      const weekLabel = `${startStr} - ${endStr}`;
-
-      list.push({
-        mondayStr: group.mondayStr,
-        startDate: group.mondayDate,
-        endDate: group.sundayDate,
-        category: group.category,
-        completedOrders: group.completedOrders,
-        deliveriesCount: group.deliveriesCount,
-        calculatedPayout,
-        expectedDate,
-        status,
-        matchingExpense,
-        refTag,
-        weekLabel,
-      });
-    });
-
-    // Map monthly groups
-    Object.values(monthlyGroups).forEach((group) => {
-      const calculatedPayout = systemSettings?.ratePerOrderMonthlyBase ?? 53000;
-
-      // Payout of month M is on the 15th of month M+2 (deferred 45 days)
-      const mDate = new Date(group.startDate);
-      const expectedDate = new Date(mDate.getFullYear(), mDate.getMonth() + 2, 15, 0, 0, 0, 0);
-
-      const refTag = `[Ref: Monthly-Payout-PO-${group.monthStr}]`;
-      const matchingExpense = expenses.find(
-        (exp) => exp.type === "INCOME" && exp.notes && exp.notes.includes(refTag)
-      );
-
-      let status: "PAID" | "UNPAID" | "ONGOING" = "UNPAID";
-      if (matchingExpense) {
-        status = "PAID";
-      } else if (group.endDate.getTime() > today.getTime()) {
-        status = "ONGOING";
-      }
-
-      const weekLabel = group.startDate.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-
-      list.push({
-        mondayStr: `${group.monthStr}-01`,
-        startDate: group.startDate,
-        endDate: group.endDate,
-        category: group.category,
-        completedOrders: group.completedOrders,
-        deliveriesCount: group.deliveriesCount,
-        calculatedPayout,
-        expectedDate,
-        status,
-        matchingExpense,
-        refTag,
-        weekLabel,
-      });
-    });
-
-    return list.sort((a, b) => b.mondayStr.localeCompare(a.mondayStr));
-  }, [deliveries, expenses, systemSettings]);
-
-  const filteredAndSortedPayouts = useMemo(() => {
-    let result = [...weeklyPayouts];
-    
-    // Filter
-    if (payoutStatusFilter !== "ALL") {
-      result = result.filter(w => w.status === payoutStatusFilter);
-    }
-    
-    // Sort
-    result.sort((a, b) => {
-      if (payoutSortOrder === "date_desc") {
-        return new Date(b.expectedDate).getTime() - new Date(a.expectedDate).getTime();
-      } else if (payoutSortOrder === "date_asc") {
-        return new Date(a.expectedDate).getTime() - new Date(b.expectedDate).getTime();
-      } else if (payoutSortOrder === "amount_desc") {
-        return b.calculatedPayout - a.calculatedPayout;
-      } else if (payoutSortOrder === "amount_asc") {
-        return a.calculatedPayout - b.calculatedPayout;
-      }
-      return 0;
-    });
-    
-    return result;
-  }, [weeklyPayouts, payoutStatusFilter, payoutSortOrder]);
-
-  // Credit Card Fuel Cycles generator (4th-to-4th inclusive logic)
-  const ccFuelCycles = useMemo(() => {
-    const list: any[] = [];
-    const today = new Date();
-    today.setHours(0,0,0,0);
-
-    const startYear = 2026;
-    const startMonth = 0; // January
-    const endYear = today.getFullYear();
-    const endMonth = today.getMonth() + 1; // Show current + next cycle
-
-    let curYear = startYear;
-    let curMonth = startMonth;
-
-    const endDay = systemSettings?.ccFuelCycleEndDay ?? 4;
-
-    while (curYear < endYear || (curYear === endYear && curMonth <= endMonth)) {
-      const billingMonth = `${curYear}-${String(curMonth + 1).padStart(2, "0")}`;
-      const startDate = new Date(curYear, curMonth - 1, endDay + 1, 0, 0, 0, 0); 
-      const endDate = new Date(curYear, curMonth, endDay, 23, 59, 59, 999); 
-
-      const totalFuelExpense = expenses
-        .filter((e) => e.type === "EXPENSE" && e.category === "fuel" && new Date(e.timestamp) >= startDate && new Date(e.timestamp) <= endDate)
-        .reduce((sum, e) => sum + e.amount, 0);
-
-      const refTag = `[Ref: Fuel-CC-Bill-${billingMonth}]`;
-      const matchingExpense = expenses.find(
-        (exp) => exp.type === "EXPENSE" && exp.category === "credit_card" && exp.notes && exp.notes.includes(refTag)
-      );
-
-      let status: "PAID" | "UNPAID" | "ONGOING" = "UNPAID";
-      if (matchingExpense) {
-        status = "PAID";
-      } else if (endDate.getTime() > today.getTime()) {
-        status = "ONGOING";
-      }
-
-      const formatOption: Intl.DateTimeFormatOptions = { month: "short", day: "numeric" };
-      const startStr = startDate.toLocaleDateString("en-US", formatOption);
-      const endStr = endDate.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-      const cycleLabel = `${startStr} - ${endStr}`;
-
-      list.push({
-        billingMonth,
-        startDate,
-        endDate,
-        totalFuelExpense,
-        status,
-        matchingExpense,
-        refTag,
-        cycleLabel,
-      });
-
-      curMonth++;
-      if (curMonth > 11) {
-        curMonth = 0;
-        curYear++;
-      }
-    }
-
-    return list;
-  }, [expenses, systemSettings]);
-
-  const filteredAndSortedCcFuelCycles = useMemo(() => {
-    let result = [...ccFuelCycles];
-
-    if (payoutStatusFilter !== "ALL") {
-      result = result.filter(c => c.status === payoutStatusFilter);
-    }
-
-    result.sort((a, b) => {
-      if (payoutSortOrder === "date_desc") {
-        return new Date(b.endDate).getTime() - new Date(a.endDate).getTime();
-      } else if (payoutSortOrder === "date_asc") {
-        return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
-      } else if (payoutSortOrder === "amount_desc") {
-        return b.totalFuelExpense - a.totalFuelExpense;
-      } else if (payoutSortOrder === "amount_asc") {
-        return a.totalFuelExpense - b.totalFuelExpense;
-      }
-      return 0;
-    });
-
-    return result;
-  }, [ccFuelCycles, payoutStatusFilter, payoutSortOrder]);
-
-  const ccSummaryMetrics = useMemo(() => {
-    const unpaidCcTotal = ccFuelCycles
-      .filter((c) => c.status === "UNPAID")
-      .reduce((sum, c) => sum + c.totalFuelExpense, 0);
-
-    const ongoingCcTotal = ccFuelCycles
-      .filter((c) => c.status === "ONGOING")
-      .reduce((sum, c) => sum + c.totalFuelExpense, 0);
-
-    const lastPaidCycle = ccFuelCycles
-      .filter((c) => c.status === "PAID")
-      .sort((a, b) => b.endDate.getTime() - a.endDate.getTime())[0];
-
-    const lastPaidAmount = lastPaidCycle ? lastPaidCycle.totalFuelExpense : 0;
-
-    const totalFuelAllTime = expenses
-      .filter((e) => e.type === "EXPENSE" && e.category === "fuel")
-      .reduce((sum, e) => sum + e.amount, 0);
-
-    return {
-      unpaidCcTotal,
-      ongoingCcTotal,
-      lastPaidAmount,
-      totalFuelAllTime,
-    };
-  }, [ccFuelCycles, expenses]);
 
   // Reset raw inputs on action success and set fading success messages
   useEffect(() => {
     if (actionData && "success" in actionData && actionData.success) {
       // Clear edit states on successful update
       setEditingExpense(null);
-      setEditingDelivery(null);
 
       // If a fuel slip is still pending, do NOT show the success toast yet —
       // the popup modal will handle the remaining workflow.
@@ -1785,44 +893,19 @@ export default function Home() {
 
       // Always clear the text inputs and primary fuel slip (non-pending)
       setAiRawInput("");
-      setFormCompletedOrders("");
       setFuelSlipBase64(null);
       
       // Native browser form reset for all input text fields
       aiFormRef.current?.reset();
       manualExpenseFormRef.current?.reset();
-      runsheetFormRef.current?.reset();
 
       // Only clear pending slip and show success if there is NO pending fuel entry
       if (!hasPendingSlip) {
         setPendingSlipBase64(null);
 
-        if (actionData.action === "create_delivery") {
-          setRunsheetSuccessVisible(true);
-          const timer = setTimeout(() => setRunsheetSuccessVisible(false), 6000);
-          return () => clearTimeout(timer);
-        } else if (actionData.action === "create_expense") {
+        if (actionData.action === "create_expense") {
           setExpenseSuccessVisible(true);
           const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
-          return () => clearTimeout(timer);
-        } else if (actionData.action === "mark_payout_paid") {
-          setPayoutToPay(null);
-          setPayoutSuccessVisible(true);
-          const timer = setTimeout(() => setPayoutSuccessVisible(false), 6000);
-          return () => clearTimeout(timer);
-        } else if (actionData.action === "mark_fuel_cc_paid") {
-          setCcBillToPay(null);
-          setCcSuccessVisible(true);
-          const timer = setTimeout(() => setCcSuccessVisible(false), 6000);
-          return () => clearTimeout(timer);
-        } else if (actionData.action === "update_weekly_orders") {
-          setWeeklyOrdersToEdit(null);
-          setPayoutSuccessVisible(true);
-          const timer = setTimeout(() => setPayoutSuccessVisible(false), 6000);
-          return () => clearTimeout(timer);
-        } else if (actionData.action === "update_system_settings") {
-          setSettingsSuccessVisible(true);
-          const timer = setTimeout(() => setSettingsSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
         }
       }
@@ -2088,10 +1171,7 @@ export default function Home() {
                   {actionData && "isAi" in actionData && actionData.isAi ? (
                     <span>
                       🤖 AI Parsed and Saved: 
-                      {actionData.expensesCreated > 0 && ` 💸 ${actionData.expensesCreated} Expense/Income item(s)`}
-                      {actionData.expensesCreated > 0 && actionData.deliveriesCreated > 0 && " and"}
-                      {actionData.deliveriesCreated > 0 && ` 📦 ${actionData.deliveriesCreated} Order Runsheet(s)`}
-                      !
+                      {actionData.expensesCreated > 0 && ` 💸 ${actionData.expensesCreated} Expense/Income item(s)`}!
                     </span>
                   ) : (
                     <span>✅ Operation saved successfully!</span>

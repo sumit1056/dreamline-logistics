@@ -36,47 +36,11 @@ model Expense {
   type       String   @default("EXPENSE") // "EXPENSE", "INCOME"
 }
 
-model Delivery {
-  id              Int      @id @default(autoincrement())
-  title           String   // e.g. "Runsheet Summary"
-  category        String   @default("vendor_ship") // "vendor_ship", "per_order_rate"
-  totalOrders     Int      @default(0)
-  completedOrders Int      @default(0)
-  driverName      String   @default("Unassigned")
-  notes           String   @default("")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-}
-
 model AdminCredential {
   id           Int      @id @default(autoincrement())
   username     String   @unique
   passwordHash String
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
-}
-
-model Payout {
-  id               Int      @id @default(autoincrement())
-  weekIdentifier   String   // e.g. "2026-05-25_2026-05-31"
-  startDate        DateTime
-  endDate          DateTime
-  category         String   // "vendor_ship", "per_order_rate"
-  completedOrders  Int      @default(0)
-  calculatedAmount Float    @default(0)
-  actualAmount     Float?
-  status           String   @default("UNPAID") // "UNPAID", "PAID"
-  notes            String   @default("")
-  paidAt           DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-
-  @@unique([weekIdentifier, category])
-}
-
-model SystemSetting {
-  key       String   @id
-  value     String
-  updatedAt DateTime @updatedAt
 }
 
