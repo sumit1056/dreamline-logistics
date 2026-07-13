@@ -319,7 +319,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const password = formData.get("password")?.toString() || "";
     const vehicleNumber = formData.get("vehicleNumber")?.toString()?.trim() || null;
     const salary = parseInt(formData.get("salary")?.toString() || "0") || null;
-    const loginEnabled = formData.get("loginEnabled") === "true" || formData.get("loginEnabled") === "on";
+    const loginEnabled = false; // Disable login portal access for drivers as requested
     
     if (!name || !phone) {
       return { error: "Driver Name and Phone Number are required." };
@@ -344,6 +344,17 @@ export async function action({ request }: ActionFunctionArgs) {
     });
 
     if (vehicleNumber) {
+      // Clean up previous driver assignment for this auto
+      const previousDriver = await prisma.user.findFirst({
+        where: { vehicleNumber }
+      });
+      if (previousDriver) {
+        await prisma.user.update({
+          where: { id: previousDriver.id },
+          data: { vehicleNumber: null }
+        });
+      }
+
       const auto = await prisma.auto.findUnique({ where: { plateNumber: vehicleNumber } });
       if (auto) {
         await prisma.auto.update({
@@ -354,19 +365,6 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     return { success: true, action: "create_driver" };
-  }
-
-  if (actionType === "toggle_driver_login") {
-    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
-    const user = await prisma.user.findUnique({ where: { id } });
-    if (!user) {
-      return { error: "User not found." };
-    }
-    await prisma.user.update({
-      where: { id },
-      data: { loginEnabled: !user.loginEnabled },
-    });
-    return { success: true, action: "toggle_driver_login" };
   }
 
   if (actionType === "delete_driver") {
@@ -387,6 +385,91 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     }
     return { success: true, action: "delete_driver" };
+  }
+
+  if (actionType === "update_driver") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const name = formData.get("name")?.toString()?.trim() || "";
+    const phone = formData.get("phone")?.toString()?.trim() || "";
+    const salary = parseInt(formData.get("salary")?.toString() || "0") || null;
+    const vehicleNumber = formData.get("vehicleNumber")?.toString()?.trim() || null;
+
+    if (!id || !name || !phone) {
+      return { error: "Driver ID, Name, and Phone are required." };
+    }
+
+    const driver = await prisma.user.findUnique({ where: { id } });
+    if (!driver) {
+      return { error: "Driver not found." };
+    }
+
+    if (phone !== driver.phone) {
+      const existing = await prisma.user.findUnique({ where: { phone } });
+      if (existing) {
+        return { error: `A driver with phone number "${phone}" already exists.` };
+      }
+    }
+
+    let transferredFromName: string | null = null;
+    
+    // Auto assignment logic
+    if (vehicleNumber) {
+      // Find if anyone else is assigned to this auto
+      const previousDriver = await prisma.user.findFirst({
+        where: {
+          vehicleNumber,
+          id: { not: id }
+        }
+      });
+
+      if (previousDriver) {
+        transferredFromName = previousDriver.name;
+        // Unassign them
+        await prisma.user.update({
+          where: { id: previousDriver.id },
+          data: { vehicleNumber: null }
+        });
+      }
+
+      // Assign to this driver in Auto model
+      const auto = await prisma.auto.findUnique({ where: { plateNumber: vehicleNumber } });
+      if (auto) {
+        await prisma.auto.update({
+          where: { id: auto.id },
+          data: { driverPhone: phone }
+        });
+      }
+    }
+
+    // Clean up old auto if assignment changed
+    if (driver.vehicleNumber && driver.vehicleNumber !== vehicleNumber) {
+      const oldAuto = await prisma.auto.findUnique({ where: { plateNumber: driver.vehicleNumber } });
+      if (oldAuto && oldAuto.driverPhone === driver.phone) {
+        await prisma.auto.update({
+          where: { id: oldAuto.id },
+          data: { driverPhone: null }
+        });
+      }
+    }
+
+    // Update driver
+    await prisma.user.update({
+      where: { id },
+      data: {
+        name,
+        phone,
+        salary,
+        vehicleNumber
+      }
+    });
+
+    return { 
+      success: true, 
+      action: "update_driver", 
+      transferredFrom: transferredFromName, 
+      newDriverName: name, 
+      vehicleNumber 
+    };
   }
 
   if (actionType === "create_auto") {
@@ -560,6 +643,22 @@ export default function Home() {
   const [parsedExpenseVisible, setParsedExpenseVisible] = useState(false);
   const [userControlSuccessVisible, setUserControlSuccessVisible] = useState(false);
   const [selectedDriverProfile, setSelectedDriverProfile] = useState<any | null>(null);
+  const [isEditingDriver, setIsEditingDriver] = useState(false);
+  const [editDriverName, setEditDriverName] = useState("");
+  const [editDriverPhone, setEditDriverPhone] = useState("");
+  const [editDriverSalary, setEditDriverSalary] = useState("");
+  const [editDriverVehicle, setEditDriverVehicle] = useState("");
+
+  const handleOpenDriverProfile = (driver: any) => {
+    setSelectedDriverProfile(driver);
+    setIsEditingDriver(false);
+    if (driver) {
+      setEditDriverName(driver.name || "");
+      setEditDriverPhone(driver.phone || "");
+      setEditDriverSalary(driver.salary ? driver.salary.toString() : "");
+      setEditDriverVehicle(driver.vehicleNumber || "");
+    }
+  };
   const [selectedYear, setSelectedYear] = useState<string>("ALL");
   const [selectedMonth, setSelectedMonth] = useState<string>("ALL");
   const [customStartDate, setCustomStartDate] = useState<string>("");
@@ -985,8 +1084,10 @@ export default function Home() {
 
   // Manage visibility timers for User Control Center success operations
   useEffect(() => {
-    if (actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin" || actionData.action === "toggle_driver_login")) {
+    if (actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "update_driver")) {
       setUserControlSuccessVisible(true);
+      setIsEditingDriver(false);
+      setSelectedDriverProfile(null);
       const timer = setTimeout(() => setUserControlSuccessVisible(false), 6000);
       return () => clearTimeout(timer);
     }
@@ -2341,7 +2442,7 @@ export default function Home() {
                         type="button"
                         onClick={() => {
                           const driverInfo = users.find(u => u.role === "DRIVER") || { name: "John Driver", phone: "+91 88888 88888" };
-                          setSelectedDriverProfile(driverInfo);
+                          handleOpenDriverProfile(driverInfo);
                         }}
                         className="text-[10px] text-[#2383e2] hover:text-[#1a6ab8] font-bold transition-all cursor-pointer flex items-center gap-0.5"
                       >
@@ -2359,7 +2460,7 @@ export default function Home() {
                             key={del.id}
                             onClick={() => {
                               const driverInfo = users.find(u => u.name === del.driverName && u.role === "DRIVER") || { name: del.driverName, phone: "N/A" };
-                              setSelectedDriverProfile(driverInfo);
+                              handleOpenDriverProfile(driverInfo);
                             }}
                             className="flex flex-col gap-1.5 p-3 hover:bg-[#fbfbfa] dark:hover:bg-[#202020]/40 rounded-lg transition-all border border-transparent hover:border-[#edece9] dark:hover:border-[#2f2f2f] cursor-pointer"
                             title="Click to view driver details"
@@ -3376,9 +3477,14 @@ export default function Home() {
                       ⚠️ {actionData.error}
                     </div>
                   )}
-                  {actionData && actionData.success && userControlSuccessVisible && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "create_admin" || actionData.action === "delete_admin" || actionData.action === "toggle_driver_login") && (
-                    <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                      ✨ Operation completed successfully!
+                  {actionData && actionData.success && userControlSuccessVisible && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "update_driver") && (
+                    <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-[#edece9] dark:border-neutral-800 rounded-md text-xs font-semibold animate-fade-in space-y-1">
+                      <div>✨ Operation completed successfully!</div>
+                      {actionData.action === "update_driver" && actionData.transferredFrom && (
+                        <div className="text-[11px] text-amber-700 dark:text-amber-400 font-bold">
+                          ⚠️ Auto {actionData.vehicleNumber} was reassigned to {actionData.newDriverName}. Previous assignment for {actionData.transferredFrom} was set to blank.
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -3433,13 +3539,6 @@ export default function Home() {
                                     <div>
                                       <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-2 flex-wrap">
                                         {u.name}
-                                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
-                                          u.loginEnabled 
-                                            ? "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/20 dark:text-emerald-400" 
-                                            : "bg-rose-50 text-rose-600 dark:bg-rose-950/20 dark:text-rose-400"
-                                        }`}>
-                                          {u.loginEnabled ? "Login Allowed" : "Login Blocked"}
-                                        </span>
                                       </h4>
                                       <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5 font-sans">
                                         <div>
@@ -3462,26 +3561,12 @@ export default function Home() {
                                   <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
                                     <button
                                       type="button"
-                                      onClick={() => setSelectedDriverProfile(u)}
+                                      onClick={() => handleOpenDriverProfile(u)}
                                       className="px-2.5 py-1.5 rounded-md text-[10px] font-bold bg-[#5D87FF]/10 text-[#5D87FF] hover:bg-[#5D87FF]/15 transition-all cursor-pointer shrink-0"
                                     >
                                       View Card
                                     </button>
-                                    <Form method="post" className="shrink-0">
-                                      <input type="hidden" name="_action" value="toggle_driver_login" />
-                                      <input type="hidden" name="id" value={u.id} />
-                                      <button
-                                        type="submit"
-                                        disabled={isSubmitting}
-                                        className={`px-2.5 py-1.5 rounded-md text-[10px] font-bold transition-all cursor-pointer ${
-                                          u.loginEnabled
-                                            ? "bg-amber-50 hover:bg-amber-100 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400 dark:hover:bg-amber-950/40"
-                                            : "bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/20 dark:text-emerald-400 dark:hover:bg-emerald-950/40"
-                                        }`}
-                                      >
-                                        {u.loginEnabled ? "Block Login" : "Allow Login"}
-                                      </button>
-                                    </Form>
+
                                     <button
                                       type="button"
                                       disabled={isSubmitting}
@@ -3663,18 +3748,7 @@ export default function Home() {
                               />
                             </div>
 
-                            <div className="flex items-center gap-2 py-1">
-                              <input
-                                type="checkbox"
-                                name="loginEnabled"
-                                id="loginEnabled"
-                                defaultChecked
-                                className="w-4 h-4 text-[#5D87FF] border-neutral-300 rounded focus:ring-[#5D87FF]"
-                              />
-                              <label htmlFor="loginEnabled" className="text-xs font-semibold text-neutral-600 dark:text-neutral-300 select-none">
-                                Enable dashboard login
-                              </label>
-                            </div>
+
 
                             <button
                               type="submit"
@@ -3775,67 +3849,147 @@ export default function Home() {
                 </button>
               </div>
 
-              <div className="p-5 space-y-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-lg font-bold text-neutral-600 dark:text-neutral-300 border border-neutral-200/50 dark:border-neutral-700/50 flex-shrink-0">
-                    {selectedDriverProfile.name?.charAt(0) || "J"}
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
-                      {selectedDriverProfile.name || "John Driver"}
-                    </h4>
-                    <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 mt-0.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
-                      Active & On Duty
-                    </span>
-                  </div>
-                </div>
+              {isEditingDriver ? (
+                <Form method="post" className="p-5 space-y-4">
+                  <input type="hidden" name="_action" value="update_driver" />
+                  <input type="hidden" name="id" value={selectedDriverProfile.id} />
 
-                <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 text-xs space-y-2.5 text-neutral-500 dark:text-neutral-400">
-                  <div className="flex justify-between">
-                    <span>Fleet Assignment:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">Dreamline Primary</span>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Delivery Boy Name</label>
+                    <input
+                      type="text"
+                      name="name"
+                      required
+                      value={editDriverName}
+                      onChange={(e) => setEditDriverName(e.target.value)}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                    />
                   </div>
-                   <div className="flex justify-between">
-                    <span>Contact:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
-                      {selectedDriverProfile.phone || "+91 88888 88888"}
-                    </span>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Phone Number</label>
+                    <input
+                      type="tel"
+                      name="phone"
+                      required
+                      value={editDriverPhone}
+                      onChange={(e) => setEditDriverPhone(e.target.value)}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                    />
                   </div>
-                  <div className="flex justify-between">
-                    <span>Vehicle Number:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
-                      {selectedDriverProfile.vehicleNumber || "Not Set"}
-                    </span>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Monthly Salary (₹)</label>
+                    <input
+                      type="number"
+                      name="salary"
+                      value={editDriverSalary}
+                      onChange={(e) => setEditDriverSalary(e.target.value)}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                    />
                   </div>
-                  <div className="flex justify-between">
-                    <span>Login Status:</span>
-                    <span className={`font-semibold ${selectedDriverProfile.loginEnabled ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-450"}`}>
-                      {selectedDriverProfile.loginEnabled ? "Allowed" : "Blocked"}
-                    </span>
+
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-neutral-500">Auto Assignment</label>
+                    <select
+                      name="vehicleNumber"
+                      value={editDriverVehicle}
+                      onChange={(e) => setEditDriverVehicle(e.target.value)}
+                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-850 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none text-neutral-850 dark:text-neutral-100"
+                    >
+                      <option value="" className="text-neutral-800 dark:text-neutral-900">None</option>
+                      {autos?.map((a: any) => (
+                        <option key={a.id} value={a.plateNumber} className="text-neutral-800 dark:text-neutral-900">
+                          {a.plateNumber} ({a.modelName || "N/A"})
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                   {selectedDriverProfile.passwordText && (
-                    <div className="flex justify-between">
-                      <span>Console Password:</span>
-                      <span className="font-mono font-bold text-neutral-750 dark:text-neutral-250 select-all bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
-                        {selectedDriverProfile.passwordText}
+
+                  <div className="pt-4 flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1"
+                    >
+                      {isSubmitting ? "Saving..." : "Save Changes"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingDriver(false)}
+                      className="flex-1 py-2 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 rounded-md text-xs font-bold transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </Form>
+              ) : (
+                <div className="p-5 space-y-4">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/10 flex items-center justify-center text-lg font-bold text-[#5D87FF] border border-[#5D87FF]/20 flex-shrink-0">
+                      {selectedDriverProfile.name?.charAt(0) || "J"}
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-neutral-855 dark:text-neutral-100">
+                        {selectedDriverProfile.name || "John Driver"}
+                      </h4>
+                      <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-450 flex items-center gap-1 mt-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
+                        Active & On Duty
                       </span>
                     </div>
-                  )}
-                  {selectedDriverProfile.salary && (
+                  </div>
+
+                  <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 text-xs space-y-2.5 text-neutral-500 dark:text-neutral-400">
                     <div className="flex justify-between">
-                      <span>Monthly Salary:</span>
-                      <span className="font-bold text-neutral-700 dark:text-neutral-300">
-                        ₹{selectedDriverProfile.salary.toLocaleString()}/mo
+                      <span>Fleet Assignment:</span>
+                      <span className="font-semibold text-neutral-700 dark:text-neutral-300">Dreamline Primary</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Contact Phone:</span>
+                      <span className="font-semibold text-neutral-700 dark:text-neutral-300">
+                        {selectedDriverProfile.phone || "+91 88888 88888"}
                       </span>
                     </div>
-                  )}
-                  <div className="flex justify-between">
-                    <span>Role:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">{selectedDriverProfile.role}</span>
+                    <div className="flex justify-between">
+                      <span>Vehicle Number:</span>
+                      <span className="font-semibold text-neutral-700 dark:text-neutral-300">
+                        {selectedDriverProfile.vehicleNumber || "Not Set"}
+                      </span>
+                    </div>
+                    {selectedDriverProfile.passwordText && (
+                      <div className="flex justify-between">
+                        <span>Console Password:</span>
+                        <span className="font-mono font-bold text-neutral-750 dark:text-neutral-250 select-all bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
+                          {selectedDriverProfile.passwordText}
+                        </span>
+                      </div>
+                    )}
+                    {selectedDriverProfile.salary && (
+                      <div className="flex justify-between">
+                        <span>Monthly Salary:</span>
+                        <span className="font-bold text-neutral-750 dark:text-neutral-300">
+                          ₹{selectedDriverProfile.salary.toLocaleString()}/mo
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex justify-between">
+                      <span>Role:</span>
+                      <span className="font-semibold text-neutral-700 dark:text-neutral-300">{selectedDriverProfile.role}</span>
+                    </div>
+                  </div>
+
+                  <div className="pt-4 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingDriver(true)}
+                      className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                    >
+                      ✏️ Edit Profile & Auto
+                    </button>
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         )}
