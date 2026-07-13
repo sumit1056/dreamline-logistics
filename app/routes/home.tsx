@@ -643,6 +643,7 @@ export default function Home() {
   const [parsedExpenseVisible, setParsedExpenseVisible] = useState(false);
   const [userControlSuccessVisible, setUserControlSuccessVisible] = useState(false);
   const [selectedDriverProfile, setSelectedDriverProfile] = useState<any | null>(null);
+  const [selectedAutoProfile, setSelectedAutoProfile] = useState<any | null>(null);
   const [isEditingDriver, setIsEditingDriver] = useState(false);
   const [editDriverName, setEditDriverName] = useState("");
   const [editDriverPhone, setEditDriverPhone] = useState("");
@@ -3626,28 +3627,37 @@ export default function Home() {
                                         </div>
                                       </div>
                                     </div>
-                                    <button
-                                      type="button"
-                                      disabled={isSubmitting}
-                                      onClick={() => {
-                                        triggerConfirm(
-                                          "Remove Auto?",
-                                          `Are you sure you want to remove auto ${a.plateNumber}?`,
-                                          () => {
-                                            const fd = new FormData();
-                                            fd.append("_action", "delete_auto");
-                                            fd.append("id", a.id.toString());
-                                            submit(fd, { method: "post" });
-                                          }
-                                        );
-                                      }}
-                                      className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 self-end sm:self-auto shrink-0"
-                                      title="Remove Auto"
-                                    >
-                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                      </svg>
-                                    </button>
+                                    <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => setSelectedAutoProfile(a)}
+                                        className="px-2.5 py-1.5 rounded-md text-[10px] font-bold bg-amber-500/10 text-amber-600 hover:bg-amber-500/15 transition-all cursor-pointer shrink-0"
+                                      >
+                                        View Card
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={isSubmitting}
+                                        onClick={() => {
+                                          triggerConfirm(
+                                            "Remove Auto?",
+                                            `Are you sure you want to remove auto ${a.plateNumber}?`,
+                                            () => {
+                                              const fd = new FormData();
+                                              fd.append("_action", "delete_auto");
+                                              fd.append("id", a.id.toString());
+                                              submit(fd, { method: "post" });
+                                            }
+                                          );
+                                        }}
+                                        className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
+                                        title="Remove Auto"
+                                      >
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                        </svg>
+                                      </button>
+                                    </div>
                                   </div>
                                 );
                               })}
@@ -3935,6 +3945,50 @@ export default function Home() {
                     )}
                   </div>
 
+                  {/* Driver Expense History */}
+                  {(() => {
+                    const driverExpenses = expenses.filter((exp: any) => exp.senderName === selectedDriverProfile.name);
+                    return (
+                      <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-2">
+                        <h5 className="text-[10px] font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest text-left">
+                          Recent Transaction History
+                        </h5>
+                        {driverExpenses.length === 0 ? (
+                          <div className="text-center py-4 text-[11px] text-neutral-400 italic">
+                            No transactions logged for this driver.
+                          </div>
+                        ) : (
+                          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
+                            {driverExpenses.map((exp: any) => (
+                              <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
+                                <div className="space-y-0.5 text-left">
+                                  <div className="font-semibold text-neutral-700 dark:text-neutral-200">
+                                    {exp.category === "fuel" && "⛽ "}
+                                    {exp.category === "bittu" && "👤 "}
+                                    {exp.category === "service" && "🔧 "}
+                                    {exp.category === "other" && "📦 "}
+                                    <span className="capitalize">{exp.category}</span>
+                                  </div>
+                                  <div className="text-neutral-450 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
+                                    {exp.notes}
+                                  </div>
+                                </div>
+                                <div className="text-right">
+                                  <div className="font-bold text-neutral-800 dark:text-neutral-100">
+                                    ₹{exp.amount.toLocaleString()}
+                                  </div>
+                                  <div className="text-[9px] text-neutral-400">
+                                    {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   <div className="pt-4 flex gap-2">
                     <button
                       type="button"
@@ -3946,6 +4000,108 @@ export default function Home() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Selected Auto Profile Modal Overlay */}
+        {selectedAutoProfile && (
+          <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in animate-duration-150">
+            <div className="bg-white dark:bg-[#1a1a1a] rounded-lg overflow-hidden border border-neutral-200 dark:border-neutral-800 w-full max-w-md shadow-2xl relative">
+              <div className="flex justify-between items-center p-4 border-b border-neutral-100 dark:border-neutral-800">
+                <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200 uppercase tracking-wider">
+                  Vehicle / Auto Profile
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedAutoProfile(null)}
+                  className="px-2.5 py-1 rounded bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-500 dark:text-neutral-300 transition-all cursor-pointer text-[10px] font-bold"
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-full bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 flex items-center justify-center text-lg font-bold border border-amber-200/50 dark:border-amber-700/50 flex-shrink-0">
+                    🛺
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-2 py-0.5 rounded inline-block">
+                      {selectedAutoProfile.plateNumber}
+                    </h4>
+                    <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 mt-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
+                      Active in Fleet
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 text-xs space-y-2.5 text-neutral-500 dark:text-neutral-400">
+                  <div className="flex justify-between">
+                    <span>Model Name:</span>
+                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
+                      {selectedAutoProfile.modelName || "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Ownership status:</span>
+                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
+                      {selectedAutoProfile.ownerName || "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Assigned Driver:</span>
+                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
+                      {(() => {
+                        const driver = users.find((u: any) => u.phone === selectedAutoProfile.driverPhone);
+                        return driver ? `${driver.name}` : <span className="text-neutral-400 italic">Unassigned</span>;
+                      })()}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Auto Expenses Log */}
+                <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-2">
+                  <h5 className="text-[10px] font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest text-left">
+                    Recent Auto Expenses
+                  </h5>
+                  {(() => {
+                    const autoExpenses = expenses.filter((exp: any) => exp.vehicle === selectedAutoProfile.plateNumber);
+                    return autoExpenses.length === 0 ? (
+                      <div className="text-center py-4 text-[11px] text-neutral-400 italic">
+                        No expenses logged for this vehicle.
+                      </div>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
+                        {autoExpenses.map((exp: any) => (
+                          <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
+                            <div className="space-y-0.5 text-left">
+                              <div className="font-semibold text-neutral-700 dark:text-neutral-200">
+                                {exp.category === "fuel" && "⛽ "}
+                                {exp.category === "service" && "🔧 "}
+                                {exp.category === "other" && "📦 "}
+                                <span className="capitalize">{exp.category}</span>
+                              </div>
+                              <div className="text-neutral-450 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
+                                {exp.notes}
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              <div className="font-bold text-neutral-800 dark:text-neutral-100">
+                                ₹{exp.amount.toLocaleString()}
+                              </div>
+                              <div className="text-[9px] text-neutral-400">
+                                {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
             </div>
           </div>
         )}

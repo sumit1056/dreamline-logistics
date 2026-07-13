@@ -8,7 +8,7 @@ function hashPassword(password) {
 }
 
 async function main() {
-  console.log("🌱 Seeding demo data...");
+  console.log("🌱 Seeding demo data with connected expenses...");
 
   // 1. Create Admins
   const adminCount = await prisma.adminCredential.count();
@@ -22,10 +22,11 @@ async function main() {
     console.log("  - Created Default Admin: sumit@6969");
   }
 
-  // 2. Clear existing demo users/autos
+  // 2. Clear existing entries to avoid duplicates
+  await prisma.expense.deleteMany({});
   await prisma.user.deleteMany({ where: { role: "DRIVER" } });
   await prisma.auto.deleteMany({});
-  console.log("  - Cleared existing delivery boys and autos");
+  console.log("  - Cleared existing expenses, delivery boys, and autos");
 
   // 3. Create Delivery Boys
   const driver1 = await prisma.user.create({
@@ -37,7 +38,7 @@ async function main() {
       passwordText: "pass123",
       vehicleNumber: "MH-12-PQ-4567",
       salary: 15000,
-      loginEnabled: true,
+      loginEnabled: false,
     },
   });
 
@@ -50,7 +51,7 @@ async function main() {
       passwordText: "pass456",
       vehicleNumber: "MH-12-RS-8901",
       salary: 16000,
-      loginEnabled: true,
+      loginEnabled: false,
     },
   });
 
@@ -98,6 +99,92 @@ async function main() {
   });
 
   console.log("  - Created 3 Autos");
+
+  // 5. Create Connected Expenses (Test logs to verify linking)
+  const now = new Date();
+
+  // Expenses for Amit Sharma / Auto MH-12-PQ-4567
+  await prisma.expense.create({
+    data: {
+      amount: 1200,
+      category: "fuel",
+      notes: "CNG gas fill up for Piaggio Ape",
+      vehicle: "MH-12-PQ-4567",
+      senderName: "Amit Sharma",
+      type: "EXPENSE",
+      approved: true,
+      timestamp: new Date(now.getTime() - 2 * 60 * 60 * 1000), // 2 hours ago
+    },
+  });
+
+  await prisma.expense.create({
+    data: {
+      amount: 15000,
+      category: "bittu",
+      notes: "Salary payout for the month",
+      vehicle: null,
+      senderName: "Amit Sharma",
+      type: "EXPENSE",
+      approved: true,
+      timestamp: new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000), // 2 days ago
+    },
+  });
+
+  await prisma.expense.create({
+    data: {
+      amount: 2500,
+      category: "service",
+      notes: "Engine oil change & general servicing",
+      vehicle: "MH-12-PQ-4567",
+      senderName: "Amit Sharma",
+      type: "EXPENSE",
+      approved: true,
+      timestamp: new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000), // 5 days ago
+    },
+  });
+
+  // Expenses for Rahul Verma / Auto MH-12-RS-8901
+  await prisma.expense.create({
+    data: {
+      amount: 950,
+      category: "fuel",
+      notes: "Petrol fill up",
+      vehicle: "MH-12-RS-8901",
+      senderName: "Rahul Verma",
+      type: "EXPENSE",
+      approved: true,
+      timestamp: new Date(now.getTime() - 1 * 60 * 60 * 1000), // 1 hour ago
+    },
+  });
+
+  await prisma.expense.create({
+    data: {
+      amount: 16000,
+      category: "bittu",
+      notes: "Salary payout for the month",
+      vehicle: null,
+      senderName: "Rahul Verma",
+      type: "EXPENSE",
+      approved: true,
+      timestamp: new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000), // 1 day ago
+    },
+  });
+
+  // Expenses for Vijay Kumar (No Auto)
+  await prisma.expense.create({
+    data: {
+      amount: 800,
+      category: "fuel",
+      notes: "Petrol fill up for backup route",
+      vehicle: null,
+      senderName: "Vijay Kumar",
+      type: "EXPENSE",
+      approved: true,
+      timestamp: new Date(now.getTime() - 4 * 60 * 60 * 1000), // 4 hours ago
+    },
+  });
+
+  console.log("  - Created 6 Connected Demo Transactions/Expenses");
   console.log("✅ Seeding completed successfully!");
 }
 
