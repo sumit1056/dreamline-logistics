@@ -550,9 +550,9 @@ export default function Home() {
     setDriverPassword(pwd);
   };
 
-  // Timeframe filter state
   const [expenseFilter, setExpenseFilter] = useState<"ALL" | "YEAR" | "MONTH" | "TODAY" | "CUSTOM">("ALL");
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<"ALL" | "EXPENSE" | "INCOME">("ALL");
+  const [entityFilter, setEntityFilter] = useState<string>("ALL");
 
   // Auto-hiding notification and driver profile states
   const [expenseSuccessVisible, setExpenseSuccessVisible] = useState(false);
@@ -794,6 +794,7 @@ export default function Home() {
     setFuelSlipBase64(null);
     setSelectedSlipImage(null);
     setExpenseCategoryFilter("ALL");
+    setEntityFilter("ALL");
   };
 
   // Dynamically extract all available years from expenses to populate the year filter dropdown
@@ -819,6 +820,22 @@ export default function Home() {
       }
       if (expenseCategoryFilter === "INCOME" && exp.type !== "INCOME") {
         return false;
+      }
+
+      // 1b. Apply Auto/Driver Entity filter
+      if (entityFilter !== "ALL") {
+        if (entityFilter === "ANY_AUTO") {
+          if (!exp.vehicle) return false;
+        } else if (entityFilter === "ANY_DRIVER") {
+          const isDriver = drivers.some((d: any) => d.name === exp.senderName);
+          if (!isDriver) return false;
+        } else if (entityFilter.startsWith("AUTO:")) {
+          const plate = entityFilter.substring(5);
+          if (exp.vehicle !== plate) return false;
+        } else if (entityFilter.startsWith("DRIVER:")) {
+          const name = entityFilter.substring(7);
+          if (exp.senderName !== name) return false;
+        }
       }
 
       // 2. Next apply Timeframe filter
@@ -861,7 +878,7 @@ export default function Home() {
 
       return true;
     });
-  }, [expenses, expenseFilter, expenseCategoryFilter, selectedYear, selectedMonth, customStartDate, customEndDate]);
+  }, [expenses, expenseFilter, expenseCategoryFilter, selectedYear, selectedMonth, customStartDate, customEndDate, entityFilter, drivers]);
 
   // Helper date checker for legacy dynamic visual filter
   const isDateInFilter = (dateObj: Date | string, filter: "ALL" | "YEAR" | "MONTH" | "TODAY") => {
@@ -1786,9 +1803,11 @@ export default function Home() {
                         Showing {filteredExpenses.length} of {expenses.length} Records
                       </div>
                     </div>
+                  </div>
 
-                    {/* Category Selector Row */}
-                    <div className="flex flex-col md:flex-row md:items-center gap-3 w-full border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30 pt-3">
+                  {/* Category & Entity Selector Row */}
+                  <div className="flex flex-col lg:flex-row lg:items-center gap-4 w-full border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30 pt-3">
+                    <div className="flex flex-col md:flex-row md:items-center gap-3 flex-shrink-0">
                       <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Category:</span>
                       <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-1 sm:pb-0 -mx-1 px-1">
                         {[
@@ -1803,12 +1822,44 @@ export default function Home() {
                             className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${
                               expenseCategoryFilter === cat.value
                                 ? "bg-[#5D87FF] border-[#5D87FF] text-white"
-                                : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
+                                : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-450"
                             }`}
                           >
                             {cat.label}
                           </button>
                         ))}
+                      </div>
+                    </div>
+
+                    {/* Entity Filter Dropdown */}
+                    <div className="flex items-center gap-2 lg:ml-auto">
+                      <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Driver/Auto:</span>
+                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
+                        <select
+                          value={entityFilter}
+                          onChange={(e) => setEntityFilter(e.target.value)}
+                          className="bg-transparent text-[11px] font-bold text-neutral-700 dark:text-neutral-350 outline-none cursor-pointer border-none py-0.5"
+                        >
+                          <option value="ALL" className="bg-white dark:bg-[#1a1a1a]">All Drivers & Autos</option>
+                          <option value="ANY_AUTO" className="bg-white dark:bg-[#1a1a1a]">Any Auto</option>
+                          <option value="ANY_DRIVER" className="bg-white dark:bg-[#1a1a1a]">Any Delivery Boy</option>
+                          
+                          <optgroup label="Registered Delivery Boys" className="bg-white dark:bg-[#1a1a1a] text-neutral-500 font-semibold">
+                            {drivers.map((d: any) => (
+                              <option key={d.id} value={`DRIVER:${d.name}`} className="bg-white dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200">
+                                👤 {d.name}
+                              </option>
+                            ))}
+                          </optgroup>
+
+                          <optgroup label="Registered Vehicles (Autos)" className="bg-white dark:bg-[#1a1a1a] text-neutral-500 font-semibold">
+                            {autos?.map((a: any) => (
+                              <option key={a.id} value={`AUTO:${a.plateNumber}`} className="bg-white dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200">
+                                🛺 {a.plateNumber}
+                              </option>
+                            ))}
+                          </optgroup>
+                        </select>
                       </div>
                     </div>
                   </div>
@@ -3490,9 +3541,9 @@ export default function Home() {
                                             {" • Owner: "}<span className="font-semibold text-neutral-700 dark:text-neutral-200">{a.ownerName || "N/A"}</span>
                                           </div>
                                           <div className="text-neutral-500 dark:text-neutral-450">
-                                            👤 Driver Assignment: {assignedDriver ? (
+                                            👤 Driver: {assignedDriver ? (
                                               <span className="font-bold text-emerald-600 dark:text-emerald-450">
-                                                {assignedDriver.name} ({assignedDriver.phone})
+                                                {assignedDriver.name}
                                               </span>
                                             ) : (
                                               <span className="italic text-neutral-400">Unassigned</span>
@@ -3676,12 +3727,12 @@ export default function Home() {
                             </div>
 
                             <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Driver Assignment</label>
+                              <label className="text-xs font-semibold text-neutral-500">Assign Driver</label>
                               <select
                                 name="driverPhone"
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none text-neutral-800 dark:text-neutral-100"
                               >
-                                <option value="">-- Assign to Delivery Boy (Optional) --</option>
+                                <option value="">Select Driver (Optional)</option>
                                 {drivers.map((d: any) => (
                                   <option key={d.id} value={d.phone} className="text-neutral-800 dark:text-neutral-900">
                                     {d.name} ({d.phone})
