@@ -3949,40 +3949,59 @@ export default function Home() {
                   {(() => {
                     const driverExpenses = expenses.filter((exp: any) => exp.senderName === selectedDriverProfile.name);
                     return (
-                      <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-2">
+                      <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-3">
                         <h5 className="text-[10px] font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest text-left">
-                          Recent Transaction History
+                          Recent Transaction History (Max 3)
                         </h5>
                         {driverExpenses.length === 0 ? (
                           <div className="text-center py-4 text-[11px] text-neutral-400 italic">
                             No transactions logged for this driver.
                           </div>
                         ) : (
-                          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
-                            {driverExpenses.map((exp: any) => (
-                              <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
-                                <div className="space-y-0.5 text-left">
-                                  <div className="font-semibold text-neutral-700 dark:text-neutral-200">
-                                    {exp.category === "fuel" && "⛽ "}
-                                    {exp.category === "bittu" && "👤 "}
-                                    {exp.category === "service" && "🔧 "}
-                                    {exp.category === "other" && "📦 "}
-                                    <span className="capitalize">{exp.category}</span>
+                          <div className="space-y-1.5">
+                            <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
+                              {driverExpenses.slice(0, 3).map((exp: any) => (
+                                <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
+                                  <div className="space-y-0.5 text-left">
+                                    <div className="font-semibold text-neutral-700 dark:text-neutral-200">
+                                      {exp.category === "fuel" && "⛽ "}
+                                      {exp.category === "bittu" && "👤 "}
+                                      {exp.category === "service" && "🔧 "}
+                                      {exp.category === "other" && "📦 "}
+                                      <span className="capitalize">{exp.category}</span>
+                                    </div>
+                                    <div className="text-neutral-450 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
+                                      {exp.notes}
+                                    </div>
                                   </div>
-                                  <div className="text-neutral-450 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
-                                    {exp.notes}
+                                  <div className="text-right">
+                                    <div className="font-bold text-neutral-800 dark:text-neutral-100">
+                                      ₹{exp.amount.toLocaleString()}
+                                    </div>
+                                    <div className="text-[9px] text-neutral-400">
+                                      {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
+                                    </div>
                                   </div>
                                 </div>
-                                <div className="text-right">
-                                  <div className="font-bold text-neutral-800 dark:text-neutral-100">
-                                    ₹{exp.amount.toLocaleString()}
-                                  </div>
-                                  <div className="text-[9px] text-neutral-400">
-                                    {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
-                                  </div>
-                                </div>
+                              ))}
+                            </div>
+                            
+                            {driverExpenses.length > 0 && (
+                              <div className="pt-1 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedDriverProfile(null);
+                                    setActiveTab("expenses");
+                                    setShowExpenseDashboard(true);
+                                    setEntityFilter(`DRIVER:${selectedDriverProfile.name}`);
+                                  }}
+                                  className="text-xs font-bold text-[#5D87FF] hover:underline flex items-center justify-center gap-1 mx-auto"
+                                >
+                                  🔍 View All in Ledger ({driverExpenses.length})
+                                </button>
                               </div>
-                            ))}
+                            )}
                           </div>
                         )}
                       </div>
@@ -4062,9 +4081,9 @@ export default function Home() {
                 </div>
 
                 {/* Auto Expenses Log */}
-                <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-2">
+                <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-3">
                   <h5 className="text-[10px] font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest text-left">
-                    Recent Auto Expenses
+                    Recent Auto Expenses (Max 3)
                   </h5>
                   {(() => {
                     const autoExpenses = expenses.filter((exp: any) => exp.vehicle === selectedAutoProfile.plateNumber);
@@ -4073,30 +4092,49 @@ export default function Home() {
                         No expenses logged for this vehicle.
                       </div>
                     ) : (
-                      <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
-                        {autoExpenses.map((exp: any) => (
-                          <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
-                            <div className="space-y-0.5 text-left">
-                              <div className="font-semibold text-neutral-700 dark:text-neutral-200">
-                                {exp.category === "fuel" && "⛽ "}
-                                {exp.category === "service" && "🔧 "}
-                                {exp.category === "other" && "📦 "}
-                                <span className="capitalize">{exp.category}</span>
+                      <div className="space-y-1.5">
+                        <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
+                          {autoExpenses.slice(0, 3).map((exp: any) => (
+                            <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
+                              <div className="space-y-0.5 text-left">
+                                <div className="font-semibold text-neutral-700 dark:text-neutral-200">
+                                  {exp.category === "fuel" && "⛽ "}
+                                  {exp.category === "service" && "🔧 "}
+                                  {exp.category === "other" && "📦 "}
+                                  <span className="capitalize">{exp.category}</span>
+                                </div>
+                                <div className="text-neutral-455 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
+                                  {exp.notes}
+                                </div>
                               </div>
-                              <div className="text-neutral-450 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
-                                {exp.notes}
+                              <div className="text-right">
+                                <div className="font-bold text-neutral-800 dark:text-neutral-100">
+                                  ₹{exp.amount.toLocaleString()}
+                                </div>
+                                <div className="text-[9px] text-neutral-400">
+                                  {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
+                                </div>
                               </div>
                             </div>
-                            <div className="text-right">
-                              <div className="font-bold text-neutral-800 dark:text-neutral-100">
-                                ₹{exp.amount.toLocaleString()}
-                              </div>
-                              <div className="text-[9px] text-neutral-400">
-                                {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
-                              </div>
-                            </div>
+                          ))}
+                        </div>
+
+                        {autoExpenses.length > 0 && (
+                          <div className="pt-1 text-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedAutoProfile(null);
+                                setActiveTab("expenses");
+                                setShowExpenseDashboard(true);
+                                setEntityFilter(`AUTO:${selectedAutoProfile.plateNumber}`);
+                              }}
+                              className="text-xs font-bold text-[#5D87FF] hover:underline flex items-center justify-center gap-1 mx-auto"
+                            >
+                              🔍 View All in Ledger ({autoExpenses.length})
+                            </button>
                           </div>
-                        ))}
+                        )}
                       </div>
                     );
                   })()}
