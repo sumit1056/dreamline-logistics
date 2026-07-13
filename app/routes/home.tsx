@@ -3543,18 +3543,7 @@ export default function Home() {
                                       <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5 font-sans">
                                         <div>
                                           📞 {u.phone} • 💰 Salary: {u.salary ? `₹${u.salary.toLocaleString()}/mo` : "Not Set"} • 🛺 Auto: {u.vehicleNumber || "None"}
-                                          {u.passwordText && (
-                                            <>
-                                              {" • 🔑 Pwd: "}
-                                              <span className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded font-bold text-neutral-800 dark:text-neutral-200 select-all">
-                                                {u.passwordText}
-                                              </span>
-                                            </>
-                                          )}
                                         </div>
-                                        {!u.passwordHash && (
-                                          <div className="text-rose-500 font-semibold text-[9px]">⚠️ No password set! Admin needs to set one.</div>
-                                        )}
                                       </div>
                                     </div>
                                   </div>
@@ -3727,26 +3716,7 @@ export default function Home() {
                               </select>
                             </div>
 
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500 flex justify-between items-center">
-                                <span>Password</span>
-                                <button
-                                  type="button"
-                                  onClick={generateRandomPassword}
-                                  className="text-[10px] text-[#5D87FF] hover:underline font-bold"
-                                >
-                                  ⚡ Generate Password
-                                </button>
-                              </label>
-                              <input
-                                type="text"
-                                name="password"
-                                value={driverPassword}
-                                onChange={(e) => setDriverPassword(e.target.value)}
-                                placeholder="Secure password"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 font-mono focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
+
 
 
 
@@ -3942,10 +3912,6 @@ export default function Home() {
 
                   <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 text-xs space-y-2.5 text-neutral-500 dark:text-neutral-400">
                     <div className="flex justify-between">
-                      <span>Fleet Assignment:</span>
-                      <span className="font-semibold text-neutral-700 dark:text-neutral-300">Dreamline Primary</span>
-                    </div>
-                    <div className="flex justify-between">
                       <span>Contact Phone:</span>
                       <span className="font-semibold text-neutral-700 dark:text-neutral-300">
                         {selectedDriverProfile.phone || "+91 88888 88888"}
@@ -3954,17 +3920,11 @@ export default function Home() {
                     <div className="flex justify-between">
                       <span>Vehicle Number:</span>
                       <span className="font-semibold text-neutral-700 dark:text-neutral-300">
-                        {selectedDriverProfile.vehicleNumber || "Not Set"}
+                        {selectedDriverProfile.vehicleNumber || (
+                          <span className="text-amber-500 font-semibold italic">Not Set</span>
+                        )}
                       </span>
                     </div>
-                    {selectedDriverProfile.passwordText && (
-                      <div className="flex justify-between">
-                        <span>Console Password:</span>
-                        <span className="font-mono font-bold text-neutral-750 dark:text-neutral-250 select-all bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
-                          {selectedDriverProfile.passwordText}
-                        </span>
-                      </div>
-                    )}
                     {selectedDriverProfile.salary && (
                       <div className="flex justify-between">
                         <span>Monthly Salary:</span>
@@ -3973,10 +3933,6 @@ export default function Home() {
                         </span>
                       </div>
                     )}
-                    <div className="flex justify-between">
-                      <span>Role:</span>
-                      <span className="font-semibold text-neutral-700 dark:text-neutral-300">{selectedDriverProfile.role}</span>
-                    </div>
                   </div>
 
                   <div className="pt-4 flex gap-2">
