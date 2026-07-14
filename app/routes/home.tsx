@@ -796,6 +796,32 @@ export default function Home() {
     }
   }, [activeTab]);
 
+  // Global Clipboard paste listener for images/receipts
+  useEffect(() => {
+    const handlePaste = async (event: ClipboardEvent) => {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.indexOf("image") !== -1) {
+          const file = item.getAsFile();
+          if (file) {
+            event.preventDefault();
+            const compressed = await compressImage(file);
+            setFuelSlipBase64(compressed);
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener("paste", handlePaste);
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+    };
+  }, []);
+
   // PWA Install Prompt & Compatibility Logic
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -1391,6 +1417,7 @@ export default function Home() {
                                   <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
                                     <span>⛽ Petrol Pump Slip Receipt</span>
                                   </h4>
+                                  <p className="text-[9px] text-orange-700/60 dark:text-orange-400/60 mt-0.5">You can paste (Ctrl+V) image here directly</p>
                                 </div>
                                 <div className="flex gap-2">
                                   <button
@@ -1609,7 +1636,7 @@ export default function Home() {
                                         <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
                                           <span>⛽ Petrol Pump Slip Required</span>
                                         </h4>
-                                        <p className="text-[10px] text-neutral-400 mt-0.5">Attach a photo of the receipt to log fuel expense.</p>
+                                        <p className="text-[10px] text-neutral-400 mt-0.5">Attach a photo (or paste Ctrl+V directly) to log fuel expense.</p>
                                       </div>
                                       <div className="flex gap-2">
                                         <button
