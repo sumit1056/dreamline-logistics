@@ -273,6 +273,136 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  if (actionType === "scan_and_save_receipt") {
+    const imageUrl = formData.get("imageUrl")?.toString() || null;
+    if (!imageUrl) {
+      return { error: "Please snap or paste a receipt image first." };
+    }
+
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY not configured in backend .env");
+      }
+
+      const prompt = `
+        Analyze this fuel pump / service receipt image. Extract operational logistics details:
+        - amount: (number) The total amount paid in Rupees/INR.
+        - vehicle: (string or null) The vehicle plate/license number if printed or hand-written on the slip (e.g. MH-12-PQ-4567), otherwise null.
+        - senderName: (string or null) The driver's name if printed or hand-written on the slip (e.g. Amit Sharma), otherwise null.
+        - notes: (string) A clean description of the transaction (e.g. "CNG Fuel refill", "Diesel fuel refill", "Auto Servicing").
+        - date: (string or null) The date/time printed on the receipt in ISO 8601 UTC format, or null if not readable.
+
+        Return ONLY a valid, raw JSON object with these fields, for example:
+        {"amount": 1200, "vehicle": "MH-12-PQ-4567", "senderName": "Amit Sharma", "notes": "CNG Fuel refill", "date": "2026-07-13T10:30:00Z"}
+        Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
+      `;
+
+      // Fast Model Failover Chain — switches immediately to fallback models without waiting
+      const MODEL_CHAIN = [
+        "gemini-2.5-flash",      // Primary: latest 2.5 flash, fastest & most available
+        "gemini-2.0-flash",      // Fallback 1: stable 2.0 flash
+        "gemini-2.0-flash-lite", // Fallback 2: lightest model, least load
+      ];
+
+      const base64Data = imageUrl.split(",")[1] || imageUrl;
+      const mimeType = imageUrl.split(";")[0]?.split(":")[1] || "image/jpeg";
+
+      const requestBody = JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType: mimeType,
+                  data: base64Data
+                }
+              }
+            ]
+          }
+        ]
+      });
+
+      let response: Response | null = null;
+      let lastError = "";
+
+      for (const model of MODEL_CHAIN) {
+        try {
+          console.log(`🤖 [Receipt Scan] Trying model: ${model}`);
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: requestBody,
+            }
+          );
+
+          if (res.ok) {
+            console.log(`✅ [Receipt Scan] Success with model: ${model}`);
+            response = res;
+            break;
+          }
+
+          if (res.status === 400 || res.status === 403 || res.status === 401) {
+            const errText = await res.text();
+            throw new Error(`Gemini API config error: ${errText}`);
+          }
+
+          console.warn(`⚡ [Receipt Scan] ${model} returned status ${res.status}. Falling back immediately...`);
+        } catch (err: any) {
+          lastError = err.message || String(err);
+          if (err.message?.includes("Gemini API config error")) throw err; // Don't retry config errors
+          console.warn(`⚡ [Receipt Scan] ${model} network error: ${lastError}. Trying next model...`);
+          continue;
+        }
+      }
+
+      if (!response) {
+        throw new Error("⚠️ All Gemini models are currently busy. Please try again or fill the manual form.");
+      }
+
+      const data = await response.json();
+      const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const cleanedText = generatedText.replace(/```json/g, "").replace(/```/g, "").trim();
+      const parsed = JSON.parse(cleanedText);
+
+      if (!parsed || typeof parsed.amount === "undefined") {
+        throw new Error("The AI couldn't parse the amount from this receipt. Please make sure the photo is clear and try again.");
+      }
+
+      const amount = Math.round(parseFloat(parsed.amount) || 0);
+      const vehicle = parsed.vehicle || null;
+      const notes = parsed.notes || "Fuel expense auto-scanned from receipt";
+      const senderName = parsed.senderName || "Founder";
+      const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
+
+      const expense = await prisma.expense.create({
+        data: {
+          amount,
+          category: notes.toLowerCase().includes("service") ? "service" : "fuel",
+          notes,
+          vehicle,
+          senderName,
+          approved: true, // Auto-approved because receipt is attached!
+          imageUrl,
+          type: "EXPENSE",
+          timestamp: parsedDate,
+        },
+      });
+
+      return {
+        success: true,
+        action: "scan_and_save_receipt",
+        expense,
+      };
+    } catch (err: any) {
+      console.error("Receipt Scan failed:", err);
+      return { error: err.message || "Failed to scan receipt image." };
+    }
+  }
+
   if (actionType === "approve_expense") {
     const id = parseInt(formData.get("id")?.toString() || "0") || 0;
     await prisma.expense.update({
@@ -1080,7 +1210,7 @@ export default function Home() {
       if (!hasPendingSlip) {
         setPendingSlipBase64(null);
 
-        if (actionData.action === "create_expense") {
+        if (actionData.action === "create_expense" || actionData.action === "scan_and_save_receipt") {
           setExpenseSuccessVisible(true);
           const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
@@ -1333,7 +1463,14 @@ export default function Home() {
               )}
               {expenseSuccessVisible && (
                 <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in flex items-center justify-between">
-                  {actionData && "isAi" in actionData && actionData.isAi ? (
+                  {actionData && actionData.action === "scan_and_save_receipt" ? (
+                    <span>
+                      🤖 AI Auto-Scanned Receipt & Logged: 
+                      <span className="font-bold"> ₹{actionData.expense.amount.toLocaleString()}</span>
+                      {actionData.expense.vehicle ? ` for vehicle ${actionData.expense.vehicle}` : ""}
+                      {actionData.expense.senderName ? ` by ${actionData.expense.senderName}` : ""}!
+                    </span>
+                  ) : actionData && "isAi" in actionData && actionData.isAi ? (
                     <span>
                       🤖 AI Parsed and Saved: 
                       {actionData.expensesCreated > 0 && ` 💸 ${actionData.expensesCreated} Expense/Income item(s)`}!
@@ -1417,7 +1554,6 @@ export default function Home() {
                                   <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
                                     <span>⛽ Petrol Pump Slip Receipt</span>
                                   </h4>
-                                  <p className="text-[9px] text-orange-700/60 dark:text-orange-400/60 mt-0.5">You can paste (Ctrl+V) image here directly</p>
                                 </div>
                                 <div className="flex gap-2">
                                   <button
@@ -1474,16 +1610,27 @@ export default function Home() {
                               <input type="hidden" name="imageUrl" value={fuelSlipBase64 || ""} />
 
                               {fuelSlipBase64 ? (
-                                <div className="relative w-full max-w-[100px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                  <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="AI Fuel Slip Preview" />
+                                <div className="space-y-2">
+                                  <div className="relative w-full max-w-[100px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
+                                    <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="AI Fuel Slip Preview" />
+                                    <button
+                                      type="button"
+                                      onClick={() => setFuelSlipBase64(null)}
+                                      className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
+                                    >
+                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                      </svg>
+                                    </button>
+                                  </div>
                                   <button
-                                    type="button"
-                                    onClick={() => setFuelSlipBase64(null)}
-                                    className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
+                                    type="submit"
+                                    name="_action"
+                                    value="scan_and_save_receipt"
+                                    disabled={isSubmitting}
+                                    className="w-full max-w-[120px] py-1.5 px-2 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded text-[10px] font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1 border border-transparent"
                                   >
-                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                    </svg>
+                                    {isSubmitting ? "Scanning..." : "🤖 Scan & Save"}
                                   </button>
                                 </div>
                               ) : null}
@@ -1693,16 +1840,27 @@ export default function Home() {
                                     <input type="hidden" name="imageUrl" value={fuelSlipBase64 || ""} />
 
                                     {fuelSlipBase64 ? (
-                                      <div className="relative w-full max-w-[120px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                        <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="Fuel Slip Preview" />
+                                      <div className="space-y-2">
+                                        <div className="relative w-full max-w-[120px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
+                                          <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="Fuel Slip Preview" />
+                                          <button
+                                            type="button"
+                                            onClick={() => setFuelSlipBase64(null)}
+                                            className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
+                                          >
+                                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                            </svg>
+                                          </button>
+                                        </div>
                                         <button
-                                          type="button"
-                                          onClick={() => setFuelSlipBase64(null)}
-                                          className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
+                                          type="submit"
+                                          name="_action"
+                                          value="scan_and_save_receipt"
+                                          disabled={isSubmitting}
+                                          className="w-full max-w-[120px] py-1.5 px-2 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded text-[10px] font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1 border border-transparent"
                                         >
-                                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                          </svg>
+                                          {isSubmitting ? "Scanning..." : "🤖 Scan & Save"}
                                         </button>
                                       </div>
                                     ) : (
