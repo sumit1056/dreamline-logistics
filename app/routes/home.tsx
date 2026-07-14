@@ -67,6 +67,166 @@ import { requireAdmin, hashPassword } from "../session.server";
 
 // Server Loader - Parallelized database queries (cuts Neon cloud DB lag by 66%)
 export async function loader({ request }: LoaderFunctionArgs) {
+  const url = new URL(request.url);
+  const processSharedIdsStr = url.searchParams.get("processSharedIds");
+
+  if (processSharedIdsStr) {
+    // Authenticate the user on GET (where session cookies are sent correctly)
+    await requireAdmin(request);
+
+    const ids = processSharedIdsStr.split(",").map(id => parseInt(id)).filter(id => !isNaN(id));
+    if (ids.length > 0) {
+      try {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          throw new Error("GEMINI_API_KEY not configured in backend .env");
+        }
+
+        // Fetch the temporary expenses
+        const tempExpenses = await prisma.expense.findMany({
+          where: { id: { in: ids }, category: "shared_temp" }
+        });
+
+        const MODEL_CHAIN = [
+          "gemini-2.5-flash",
+          "gemini-2.0-flash",
+          "gemini-2.0-flash-lite",
+        ];
+
+        const scanReceipt = async (imageUrl: string) => {
+          const prompt = `
+            Analyze this fuel pump / service receipt image. Extract operational logistics details:
+            - amount: (number) The total amount paid in Rupees/INR.
+            - vehicle: (string or null) The vehicle plate/license number if printed or hand-written on the slip (e.g. MH-12-PQ-4567), otherwise null.
+            - senderName: (string or null) The driver's name if printed or hand-written on the slip (e.g. Amit Sharma), otherwise null.
+            - notes: (string) A clean description of the transaction (e.g. "CNG Fuel refill", "Diesel fuel refill", "Auto Servicing").
+            - date: (string or null) The date/time printed on the receipt in ISO 8601 UTC format, or null if not readable.
+
+            Return ONLY a valid, raw JSON object with these fields, for example:
+            {"amount": 1200, "vehicle": "MH-12-PQ-4567", "senderName": "Amit Sharma", "notes": "CNG Fuel refill", "date": "2026-07-13T10:30:00Z"}
+            Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
+          `;
+
+          const base64Data = imageUrl.split(",")[1] || imageUrl;
+          const mimeType = imageUrl.split(";")[0]?.split(":")[1] || "image/jpeg";
+
+          const requestBody = JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  { text: prompt },
+                  {
+                    inlineData: {
+                      mimeType: mimeType,
+                      data: base64Data
+                    }
+                  }
+                ]
+              }
+            ]
+          });
+
+          let response: Response | null = null;
+          let lastError = "";
+
+          for (const model of MODEL_CHAIN) {
+            try {
+              console.log(`🤖 [Shared Loader Scan] Trying model: ${model}`);
+              const res = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: requestBody,
+                }
+              );
+
+              if (res.ok) {
+                console.log(`✅ [Shared Loader Scan] Success with model: ${model}`);
+                response = res;
+                break;
+              }
+
+              if (res.status === 400 || res.status === 403 || res.status === 401) {
+                const errText = await res.text();
+                throw new Error(`Gemini API config error: ${errText}`);
+              }
+
+              console.warn(`⚡ [Shared Loader Scan] ${model} returned status ${res.status}. Falling back...`);
+            } catch (err: any) {
+              lastError = err.message || String(err);
+              if (err.message?.includes("Gemini API config error")) throw err;
+              console.warn(`⚡ [Shared Loader Scan] ${model} network error: ${lastError}. Trying next...`);
+              continue;
+            }
+          }
+
+          if (!response) {
+            throw new Error(`⚠️ Gemini service busy: ${lastError}`);
+          }
+
+          const data = await response.json();
+          const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          const cleanedText = generatedText.replace(/```json/g, "").replace(/```/g, "").trim();
+          const parsed = JSON.parse(cleanedText);
+
+          if (!parsed || typeof parsed.amount === "undefined") {
+            throw new Error("Unable to parse amount from receipt image.");
+          }
+
+          const amount = Math.round(parseFloat(parsed.amount) || 0);
+          const vehicle = parsed.vehicle || null;
+          const notes = parsed.notes || "Fuel expense auto-scanned from shared receipt";
+          const senderName = parsed.senderName || "Founder";
+          const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
+
+          return { amount, vehicle, notes, senderName, parsedDate };
+        };
+
+        let successCount = 0;
+        let totalAmount = 0;
+
+        for (const tempExp of tempExpenses) {
+          if (!tempExp.imageUrl) continue;
+          try {
+            const result = await scanReceipt(tempExp.imageUrl);
+            await prisma.expense.update({
+              where: { id: tempExp.id },
+              data: {
+                amount: result.amount,
+                category: result.notes.toLowerCase().includes("service") ? "service" : "fuel",
+                notes: result.notes,
+                vehicle: result.vehicle,
+                senderName: result.senderName,
+                approved: true,
+                timestamp: result.parsedDate,
+              }
+            });
+            successCount++;
+            totalAmount += result.amount;
+          } catch (e: any) {
+            console.error(`Failed to parse temp shared expense ${tempExp.id}:`, e);
+            // Fallback: convert to an unapproved manual expense so they don't lose the image
+            await prisma.expense.update({
+              where: { id: tempExp.id },
+              data: {
+                amount: 0,
+                category: "fuel",
+                notes: "Manual Log (Shared scan failed: " + (e.message || "unknown error") + ")",
+                approved: false,
+              }
+            });
+          }
+        }
+
+        return redirect(`/?tab=expenses&shareSuccess=true&count=${successCount}&total=${totalAmount}`);
+      } catch (err: any) {
+        console.error("Shared loader processing failed:", err);
+        return redirect(`/?tab=expenses&shareError=${encodeURIComponent(err.message || "Failed to process shared files")}`);
+      }
+    }
+  }
+
   const session = await requireAdmin(request);
   const loggedInUser = {
     name: session.get("userName") || "User",
@@ -76,7 +236,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   const [users, expenses, adminCredentials, autos] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
-    prisma.expense.findMany({ orderBy: { timestamp: "desc" } }),
+    prisma.expense.findMany({
+      where: { NOT: { category: "shared_temp" } },
+      orderBy: { timestamp: "desc" }
+    }),
     prisma.adminCredential.findMany({
       select: { id: true, username: true, createdAt: true },
       orderBy: { createdAt: "desc" }
