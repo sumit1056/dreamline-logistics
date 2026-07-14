@@ -1101,6 +1101,7 @@ export default function Home() {
       const showAddParam = params.get("showAdd");
       const shareSuccessParam = params.get("shareSuccess");
       const shareErrorParam = params.get("shareError");
+      const sharedFromSW = params.get("sharedFromSW");
 
       if (tabParam === "expenses") {
         setActiveTab("expenses");
@@ -1122,6 +1123,26 @@ export default function Home() {
       } else if (shareErrorParam) {
         setShareErrorInfo(shareErrorParam);
         window.history.replaceState({}, document.title, "/?tab=expenses");
+      }
+
+      if (sharedFromSW === "true" && "caches" in navigator) {
+        (async () => {
+          try {
+            const cache = await caches.open("shared-receipt-cache");
+            const cachedResponse = await cache.match("/shared-image-temp");
+            if (cachedResponse) {
+              const dataUrl = await cachedResponse.text();
+              await cache.delete("/shared-image-temp");
+              
+              setFuelSlipsBase64(prev => [...prev, dataUrl]);
+              setActiveTab("expenses");
+              setShowExpenseDashboard(false);
+            }
+          } catch (e) {
+            console.error("Failed to read cached image from SW:", e);
+          }
+          window.history.replaceState({}, document.title, "/?tab=expenses");
+        })();
       }
     }
   }, []);
