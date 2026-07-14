@@ -62,7 +62,7 @@ export function meta({}: Route.MetaArgs) {
   ];
 }
 
-import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
+import { type LoaderFunctionArgs, type ActionFunctionArgs, redirect } from "react-router";
 import { requireAdmin, hashPassword } from "../session.server";
 
 // Server Loader - Parallelized database queries (cuts Neon cloud DB lag by 66%)
@@ -852,7 +852,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Home() {
-  const { users, expenses, adminCredentials, loggedInUser, autos } = useLoaderData<typeof loader>();
+  const { users, expenses, adminCredentials, loggedInUser, autos } = useLoaderData() as any;
   const drivers = users.filter((u: any) => u.role === "DRIVER");
 
   // Mock variables for deleted features to prevent TypeScript compilation errors
@@ -1263,7 +1263,7 @@ export default function Home() {
   // Dynamically extract all available years from expenses to populate the year filter dropdown
   const availableYears = useMemo(() => {
     const years = new Set<string>();
-    expenses.forEach((e) => {
+    expenses.forEach((e: any) => {
       const yr = new Date(e.timestamp).getFullYear();
       if (!isNaN(yr)) years.add(yr.toString());
     });
@@ -1276,7 +1276,7 @@ export default function Home() {
 
   // Filtered Expenses
   const filteredExpenses = useMemo(() => {
-    return expenses.filter((exp) => {
+    return expenses.filter((exp: any) => {
       // 1. First apply Category filter (Expense vs Income)
       if (expenseCategoryFilter === "EXPENSE" && exp.type !== "EXPENSE") {
         return false;
@@ -1376,7 +1376,7 @@ export default function Home() {
     let pendingExpense = 0;
     let fuel = 0;
 
-    filteredExpenses.forEach((exp) => {
+    filteredExpenses.forEach((exp: any) => {
       if (exp.type === "INCOME") {
         income += exp.amount;
       } else {
@@ -2133,7 +2133,7 @@ export default function Home() {
                       </h3>
                     </div>
                     <div className="space-y-1">
-                      {expenses.slice(0, 5).map((exp) => (
+                      {expenses.slice(0, 5).map((exp: any) => (
                         <div
                           key={exp.id}
                           className="flex flex-col gap-1.5 p-3 hover:bg-[#fbfbfa] dark:hover:bg-[#202020]/40 rounded-lg transition-all border border-transparent hover:border-[#edece9] dark:hover:border-[#2f2f2f]"
@@ -2409,7 +2409,7 @@ export default function Home() {
                               </td>
                             </tr>
                           ) : (
-                            paginatedExpenses.map((exp) => (
+                            paginatedExpenses.map((exp: any) => (
                               <tr key={exp.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
                                 <td className="p-3.5 font-semibold capitalize flex items-center gap-1.5">
                                   {exp.category === "fuel" && "⛽"}
@@ -2483,7 +2483,7 @@ export default function Home() {
                           No expenses logged within selected timeframe.
                         </div>
                       ) : (
-                        paginatedExpenses.map((exp) => (
+                        paginatedExpenses.map((exp: any) => (
                           <div key={exp.id} className="p-4 flex flex-col gap-2 hover:bg-neutral-50/40 dark:hover:bg-neutral-900/10">
                             {/* Top row: Category, image link */}
                             <div className="flex justify-between items-center w-full">
@@ -2862,7 +2862,7 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => {
-                          const driverInfo = users.find(u => u.role === "DRIVER") || { name: "John Driver", phone: "+91 88888 88888" };
+                          const driverInfo = users.find((u: any) => u.role === "DRIVER") || { name: "John Driver", phone: "+91 88888 88888" };
                           handleOpenDriverProfile(driverInfo);
                         }}
                         className="text-[10px] text-[#2383e2] hover:text-[#1a6ab8] font-bold transition-all cursor-pointer flex items-center gap-0.5"
@@ -2880,7 +2880,7 @@ export default function Home() {
                           <div
                             key={del.id}
                             onClick={() => {
-                              const driverInfo = users.find(u => u.name === del.driverName && u.role === "DRIVER") || { name: del.driverName, phone: "N/A" };
+                              const driverInfo = users.find((u: any) => u.name === del.driverName && u.role === "DRIVER") || { name: del.driverName, phone: "N/A" };
                               handleOpenDriverProfile(driverInfo);
                             }}
                             className="flex flex-col gap-1.5 p-3 hover:bg-[#fbfbfa] dark:hover:bg-[#202020]/40 rounded-lg transition-all border border-transparent hover:border-[#edece9] dark:hover:border-[#2f2f2f] cursor-pointer"
@@ -3424,8 +3424,8 @@ export default function Home() {
                         <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Payouts Received (Month)</div>
                         <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
                           ₹{expenses
-                            .filter(e => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory" || e.category === "vendor_income") && new Date(e.timestamp).getMonth() === new Date().getMonth())
-                            .reduce((sum, e) => sum + e.amount, 0)
+                            .filter((e: any) => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory" || e.category === "vendor_income") && new Date(e.timestamp).getMonth() === new Date().getMonth())
+                            .reduce((sum: number, e: any) => sum + e.amount, 0)
                             .toLocaleString()}
                         </div>
                       </div>
