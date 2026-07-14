@@ -947,6 +947,24 @@ export default function Home() {
     }
   }, []);
 
+  // Read shared image from cookie (set by /share-target Web Share Target handler)
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const cookies = document.cookie.split(";").map(c => c.trim());
+    const sharedCookie = cookies.find(c => c.startsWith("shared_receipt="));
+    if (!sharedCookie) return;
+
+    const value = decodeURIComponent(sharedCookie.split("=").slice(1).join("="));
+    // Clear the cookie immediately so it doesn't load again on refresh
+    document.cookie = "shared_receipt=; Path=/; Max-Age=0";
+
+    if (value && value !== "TOO_LARGE" && value.startsWith("data:image")) {
+      setFuelSlipsBase64(prev => [...prev, value]);
+      setActiveTab("expenses");
+      setShowExpenseDashboard(false); // Show entry form, not ledger
+    }
+  }, []);
+
   // Redirect away from disabled tabs if they try to access them
   useEffect(() => {
     if (activeTab === "orders") {
