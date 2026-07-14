@@ -800,6 +800,8 @@ export default function Home() {
   const [actionErrorVisible, setActionErrorVisible] = useState(false);
   const [parsedExpenseVisible, setParsedExpenseVisible] = useState(false);
   const [userControlSuccessVisible, setUserControlSuccessVisible] = useState(false);
+  const [shareSuccessInfo, setShareSuccessInfo] = useState<{ count: number; total: number } | null>(null);
+  const [shareErrorInfo, setShareErrorInfo] = useState<string | null>(null);
   const [selectedDriverProfile, setSelectedDriverProfile] = useState<any | null>(null);
   const [selectedAutoProfile, setSelectedAutoProfile] = useState<any | null>(null);
   const [isEditingDriver, setIsEditingDriver] = useState(false);
@@ -928,12 +930,15 @@ export default function Home() {
     }
   }, []);
 
-  // Read search parameters on mount to support PWA shortcuts
+  // Read search parameters on mount to support PWA shortcuts & Web Share Target success/error toasts
   useEffect(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
       const showAddParam = params.get("showAdd");
+      const shareSuccessParam = params.get("shareSuccess");
+      const shareErrorParam = params.get("shareError");
+
       if (tabParam === "expenses") {
         setActiveTab("expenses");
         if (showAddParam === "true") {
@@ -944,24 +949,17 @@ export default function Home() {
       } else if (tabParam === "orders") {
         setActiveTab("expenses");
       }
-    }
-  }, []);
 
-  // Read shared image from cookie (set by /share-target Web Share Target handler)
-  useEffect(() => {
-    if (typeof document === "undefined") return;
-    const cookies = document.cookie.split(";").map(c => c.trim());
-    const sharedCookie = cookies.find(c => c.startsWith("shared_receipt="));
-    if (!sharedCookie) return;
-
-    const value = decodeURIComponent(sharedCookie.split("=").slice(1).join("="));
-    // Clear the cookie immediately so it doesn't load again on refresh
-    document.cookie = "shared_receipt=; Path=/; Max-Age=0";
-
-    if (value && value !== "TOO_LARGE" && value.startsWith("data:image")) {
-      setFuelSlipsBase64(prev => [...prev, value]);
-      setActiveTab("expenses");
-      setShowExpenseDashboard(false); // Show entry form, not ledger
+      if (shareSuccessParam === "true") {
+        const count = parseInt(params.get("count") || "1");
+        const total = parseInt(params.get("total") || "0");
+        setShareSuccessInfo({ count, total });
+        // Clean URL to prevent showing toast again on page reload
+        window.history.replaceState({}, document.title, "/?tab=expenses");
+      } else if (shareErrorParam) {
+        setShareErrorInfo(shareErrorParam);
+        window.history.replaceState({}, document.title, "/?tab=expenses");
+      }
     }
   }, []);
 
@@ -1502,6 +1500,21 @@ export default function Home() {
               </div>
 
               {/* ACTION NOTIFICATIONS */}
+              {shareErrorInfo && (
+                <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in flex justify-between items-center">
+                  <span>⚠️ Share Scan Error: {shareErrorInfo}</span>
+                  <button onClick={() => setShareErrorInfo(null)} className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold ml-2">×</button>
+                </div>
+              )}
+              {shareSuccessInfo && (
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in flex items-center justify-between">
+                  <span>
+                    🤖 AI Auto-Scanned Shared {shareSuccessInfo.count} Receipt(s) & Logged:
+                    <span className="font-bold"> ₹{shareSuccessInfo.total.toLocaleString()}</span> total!
+                  </span>
+                  <button onClick={() => setShareSuccessInfo(null)} className="text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-200 font-bold ml-2">×</button>
+                </div>
+              )}
               {actionData && "error" in actionData && actionErrorVisible && (
                 <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
                   ⚠️ {actionData.error}
