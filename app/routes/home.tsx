@@ -1610,33 +1610,33 @@ export default function Home() {
                               <input type="hidden" name="imageUrl" value={fuelSlipBase64 || ""} />
 
                               {fuelSlipBase64 ? (
-                                <div className="space-y-2">
-                                  <div className="relative w-full max-w-[100px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                    <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="AI Fuel Slip Preview" />
-                                    <button
-                                      type="button"
-                                      onClick={() => setFuelSlipBase64(null)}
-                                      className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
-                                    >
-                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                      </svg>
-                                    </button>
-                                  </div>
+                                <div className="relative w-full max-w-[100px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
+                                  <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="AI Fuel Slip Preview" />
                                   <button
-                                    type="submit"
-                                    name="_action"
-                                    value="scan_and_save_receipt"
-                                    disabled={isSubmitting}
-                                    className="w-full max-w-[120px] py-1.5 px-2 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded text-[10px] font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1 border border-transparent"
+                                    type="button"
+                                    onClick={() => setFuelSlipBase64(null)}
+                                    className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
                                   >
-                                    {isSubmitting ? "Scanning..." : "🤖 Scan & Save"}
+                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
                                   </button>
                                 </div>
                               ) : null}
                             </div>
 
-                            <div className="flex flex-col sm:flex-row justify-end sm:items-center gap-3">
+                            <div className="flex flex-col sm:flex-row justify-end sm:items-center gap-3 pt-2">
+                              {fuelSlipBase64 && (
+                                <button
+                                  type="submit"
+                                  name="_action"
+                                  value="scan_and_save_receipt"
+                                  disabled={isSubmitting}
+                                  className="py-2.5 px-4 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded-md text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 border border-transparent self-end sm:self-auto"
+                                >
+                                  {isSubmitting ? "Scanning..." : "🤖 Scan & Save Receipt (AI)"}
+                                </button>
+                              )}
                               <button
                                 type="submit"
                                 disabled={isSubmitting || !aiRawInput.trim()}
@@ -1840,27 +1840,16 @@ export default function Home() {
                                     <input type="hidden" name="imageUrl" value={fuelSlipBase64 || ""} />
 
                                     {fuelSlipBase64 ? (
-                                      <div className="space-y-2">
-                                        <div className="relative w-full max-w-[120px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                          <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="Fuel Slip Preview" />
-                                          <button
-                                            type="button"
-                                            onClick={() => setFuelSlipBase64(null)}
-                                            className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
-                                          >
-                                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                            </svg>
-                                          </button>
-                                        </div>
+                                      <div className="relative w-full max-w-[120px] aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
+                                        <img src={fuelSlipBase64} className="w-full h-full object-cover" alt="Fuel Slip Preview" />
                                         <button
-                                          type="submit"
-                                          name="_action"
-                                          value="scan_and_save_receipt"
-                                          disabled={isSubmitting}
-                                          className="w-full max-w-[120px] py-1.5 px-2 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded text-[10px] font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1 border border-transparent"
+                                          type="button"
+                                          onClick={() => setFuelSlipBase64(null)}
+                                          className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
                                         >
-                                          {isSubmitting ? "Scanning..." : "🤖 Scan & Save"}
+                                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                          </svg>
                                         </button>
                                       </div>
                                     ) : (
@@ -1871,11 +1860,24 @@ export default function Home() {
                               </div>
                             )}
 
-                            <div className="sm:col-span-2 pt-2">
+                            <div className="sm:col-span-2 pt-2 flex flex-col sm:flex-row gap-3">
+                              {manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipBase64 && (
+                                <button
+                                  type="submit"
+                                  name="_action"
+                                  value="scan_and_save_receipt"
+                                  disabled={isSubmitting}
+                                  className="flex-1 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded-md text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 border border-transparent"
+                                >
+                                  {isSubmitting ? "Scanning..." : "🤖 Scan & Save Receipt (AI)"}
+                                </button>
+                              )}
                               <button
                                 type="submit"
                                 disabled={isSubmitting || (manualType === "EXPENSE" && selectedCategory === "fuel" && !fuelSlipBase64 && !skipReceiptRequired)}
-                                className="notion-btn w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-md cursor-pointer transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                                className={`py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-md cursor-pointer transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+                                  manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipBase64 ? "flex-1" : "w-full"
+                                }`}
                               >
                                 {isSubmitting
                                   ? "Saving log..."
