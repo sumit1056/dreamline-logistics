@@ -1536,7 +1536,6 @@ export default function Home() {
                           </div>
 
                           <Form ref={aiFormRef} method="post" className="space-y-4">
-                            <input type="hidden" name="_action" value="create_expense" />
                             <input type="hidden" name="isAi" value="true" />
                             <textarea
                               name="rawText"
@@ -1639,6 +1638,8 @@ export default function Home() {
                               )}
                               <button
                                 type="submit"
+                                name="_action"
+                                value="create_expense"
                                 disabled={isSubmitting || !aiRawInput.trim()}
                                 className="notion-btn text-xs px-4 py-2.5 bg-[#5D87FF] hover:bg-[#4570EA] font-bold text-white rounded-md disabled:opacity-50 cursor-pointer shadow-sm self-end sm:self-auto transition-all"
                               >
@@ -1657,7 +1658,6 @@ export default function Home() {
                           </div>
 
                           <Form ref={manualExpenseFormRef} method="post" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <input type="hidden" name="_action" value="create_expense" />
                             <input type="hidden" name="isAi" value="false" />
 
                             {/* Transaction Type Segmented Toggle */}
@@ -1874,6 +1874,8 @@ export default function Home() {
                               )}
                               <button
                                 type="submit"
+                                name="_action"
+                                value="create_expense"
                                 disabled={isSubmitting || (manualType === "EXPENSE" && selectedCategory === "fuel" && !fuelSlipBase64 && !skipReceiptRequired)}
                                 className={`py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-md cursor-pointer transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed ${
                                   manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipBase64 ? "flex-1" : "w-full"
