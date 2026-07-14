@@ -3018,7 +3018,7 @@ export default function Home() {
                         <div className="flex gap-1.5">
                           <button
                             type="button"
-                            onClick={() => setDeliveryPage(p => Math.max(1, p - 1))}
+                            onClick={() => setDeliveryPage((p: number) => Math.max(1, p - 1))}
                             disabled={activeDeliveryPage === 1}
                             className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
                           >
@@ -3054,7 +3054,7 @@ export default function Home() {
                           </div>
                           <button
                             type="button"
-                            onClick={() => setDeliveryPage(p => Math.min(totalDeliveryPages, p + 1))}
+                            onClick={() => setDeliveryPage((p: number) => Math.min(totalDeliveryPages, p + 1))}
                             disabled={activeDeliveryPage === totalDeliveryPages}
                             className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
                           >
@@ -3159,7 +3159,7 @@ export default function Home() {
                         <div className="flex gap-1.5 w-full justify-between sm:justify-center">
                           <button
                             type="button"
-                            onClick={() => setDeliveryPage(p => Math.max(1, p - 1))}
+                            onClick={() => setDeliveryPage((p: number) => Math.max(1, p - 1))}
                             disabled={activeDeliveryPage === 1}
                             className="px-3 py-2 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-[#202020] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
                           >
@@ -3195,7 +3195,7 @@ export default function Home() {
                           </div>
                           <button
                             type="button"
-                            onClick={() => setDeliveryPage(p => Math.min(totalDeliveryPages, p + 1))}
+                            onClick={() => setDeliveryPage((p: number) => Math.min(totalDeliveryPages, p + 1))}
                             disabled={activeDeliveryPage === totalDeliveryPages}
                             className="px-3 py-2 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-[#202020] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
                           >
