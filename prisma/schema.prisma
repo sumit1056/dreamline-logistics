@@ -54,3 +54,15 @@ model Auto {
   createdAt   DateTime @default(now())
 }
 
+model TemporaryPass {
+  id          Int      @id @default(autoincrement())
+  passCode    String   @unique
+  label       String?
+  permission  String   @default("VIEW_ONLY") // "VIEW_ONLY", "FULL_EDIT"
+  expiresAt   DateTime
+  isActive    Boolean  @default(true)
+  usedCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+}
+
+

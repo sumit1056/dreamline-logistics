@@ -58,7 +58,78 @@ export async function requireAdmin(request: Request) {
     throw redirect("/login");
   }
 
+  // Check if session is a temporary access pass
+  if (session.get("isTempPass")) {
+    const expiresAtStr = session.get("expiresAt");
+    const passId = session.get("passId");
+
+    const isExpiredByTime = expiresAtStr && new Date() > new Date(expiresAtStr);
+
+    if (isExpiredByTime) {
+      throw redirect("/login?expired=true", {
+        headers: {
+          "Set-Cookie": await sessionStorage.destroySession(session),
+        },
+      });
+    }
+
+    if (passId) {
+      const pass = await prisma.temporaryPass.findUnique({ where: { id: passId } });
+      if (!pass || !pass.isActive || new Date() > pass.expiresAt) {
+        throw redirect("/login?expired=true", {
+          headers: {
+            "Set-Cookie": await sessionStorage.destroySession(session),
+          },
+        });
+      }
+    }
+  }
+
   return session;
+}
+
+/**
+ * Authenticates using a Temporary Access Pass Code or Share Link.
+ */
+export async function loginWithTempPass(request: Request, passCodeInput: string) {
+  const passCode = passCodeInput.trim();
+
+  const pass = await prisma.temporaryPass.findUnique({
+    where: { passCode: passCode },
+  });
+
+  if (!pass) {
+    return { error: "Invalid temporary access pass code." };
+  }
+
+  if (!pass.isActive) {
+    return { error: "This access pass has been revoked by the administrator." };
+  }
+
+  if (new Date() > pass.expiresAt) {
+    return { error: "This temporary access pass has expired." };
+  }
+
+  // Increment usage count
+  await prisma.temporaryPass.update({
+    where: { id: pass.id },
+    data: { usedCount: { increment: 1 } },
+  });
+
+  const session = await getSession(request);
+  session.set("isAuthenticated", true);
+  session.set("userRole", "TEMP_PASS");
+  session.set("userName", pass.label || `Guest (${pass.passCode})`);
+  session.set("isTempPass", true);
+  session.set("permission", pass.permission); // "VIEW_ONLY" or "FULL_EDIT"
+  session.set("expiresAt", pass.expiresAt.toISOString());
+  session.set("passId", pass.id);
+
+  return redirect("/", {
+    headers: {
+      "Set-Cookie": await sessionStorage.commitSession(session),
+    },
+  });
 }
 
 /**
@@ -73,6 +144,13 @@ export async function loginAdmin(request: Request, usernameInput: string, passwo
 
   console.log(`🔑 Login Attempt: "${username}"`);
 
+  // 0. Check if input is a temporary pass code (e.g. TEMP-XXXX)
+  if (username.toUpperCase().startsWith("TEMP-") || password.toUpperCase().startsWith("TEMP-")) {
+    const code = username.toUpperCase().startsWith("TEMP-") ? username : password;
+    const tempRes = await loginWithTempPass(request, code);
+    if (tempRes) return tempRes;
+  }
+
   // 1. Try AdminCredential
   const credential = await prisma.adminCredential.findUnique({
     where: { username: username.toLowerCase() },
@@ -86,6 +164,8 @@ export async function loginAdmin(request: Request, usernameInput: string, passwo
       session.set("isAuthenticated", true);
       session.set("userRole", "ADMIN");
       session.set("userName", credential.username);
+      session.set("permission", "FULL_ADMIN");
+      session.set("isTempPass", false);
       return redirect("/", {
         headers: {
           "Set-Cookie": await sessionStorage.commitSession(session),
@@ -122,6 +202,8 @@ export async function loginAdmin(request: Request, usernameInput: string, passwo
       session.set("userName", user.name);
       session.set("userPhone", user.phone);
       session.set("userId", user.id);
+      session.set("permission", user.role === "FOUNDER" ? "FULL_ADMIN" : "OPERATOR");
+      session.set("isTempPass", false);
       return redirect("/", {
         headers: {
           "Set-Cookie": await sessionStorage.commitSession(session),
@@ -148,3 +230,4 @@ export async function logoutAdmin(request: Request) {
     },
   });
 }
+

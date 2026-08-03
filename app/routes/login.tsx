@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { Form, useNavigation, useActionData, redirect } from "react-router";
+import { Form, useNavigation, useActionData, useLoaderData, redirect } from "react-router";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { getSession, loginAdmin, logoutAdmin } from "../session.server";
+import { getSession, loginAdmin, logoutAdmin, loginWithTempPass } from "../session.server";
 
 // Page metadata
 export function meta() {
@@ -11,14 +11,30 @@ export function meta() {
   ];
 }
 
-// Redirect authenticated users away from the login page
+// Redirect authenticated users away from the login page & handle auto-login share links
 export async function loader({ request }: LoaderFunctionArgs) {
+  const url = new URL(request.url);
+  const passParam = url.searchParams.get("pass") || url.searchParams.get("token");
+  const isExpired = url.searchParams.get("expired") === "true";
+
+  // If a temporary pass code is provided in the URL, attempt auto-login
+  if (passParam && passParam.trim()) {
+    const loginRes = await loginWithTempPass(request, passParam);
+    if (loginRes && "error" in loginRes) {
+      return { error: loginRes.error, isExpired };
+    }
+    if (loginRes) {
+      return loginRes; // Performs cookie set & redirect
+    }
+  }
+
   const session = await getSession(request);
   const isAuthenticated = session.get("isAuthenticated");
   if (isAuthenticated) {
     return redirect("/");
   }
-  return {};
+
+  return { isExpired };
 }
 
 // Handle administrative login credentials and logout operations
@@ -30,16 +46,25 @@ export async function action({ request }: ActionFunctionArgs) {
     return await logoutAdmin(request);
   }
 
+  const passCodeInput = formData.get("passCode")?.toString() || "";
+  if (passCodeInput.trim()) {
+    const tempRes = await loginWithTempPass(request, passCodeInput);
+    if (tempRes && "error" in tempRes) {
+      return { error: tempRes.error };
+    }
+    if (tempRes) return tempRes;
+  }
+
   const username = formData.get("username")?.toString() || "";
   const password = formData.get("password")?.toString() || "";
 
   if (!username.trim() || !password.trim()) {
-    return { error: "Please enter both administrative username and password." };
+    return { error: "Please enter your administrative username & password or temporary pass code." };
   }
 
   const redirectResponse = await loginAdmin(request, username, password);
   if (!redirectResponse) {
-    return { error: "Invalid administrative credentials. Access Denied." };
+    return { error: "Invalid administrative credentials or expired pass code." };
   }
 
   if (typeof redirectResponse === "object" && "error" in redirectResponse) {
@@ -51,17 +76,20 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function LoginRoute() {
   const actionData = useActionData() as { error?: string } | undefined;
+  const loaderData = useLoaderData() as { isExpired?: boolean; error?: string } | undefined;
   const navigation = useNavigation();
   const [showPassword, setShowPassword] = useState(false);
   const [errorVisible, setErrorVisible] = useState(false);
 
+  const errorMessage = actionData?.error || loaderData?.error;
+
   useEffect(() => {
-    if (actionData?.error) {
+    if (errorMessage) {
       setErrorVisible(true);
       const timer = setTimeout(() => setErrorVisible(false), 6000);
       return () => clearTimeout(timer);
     }
-  }, [actionData]);
+  }, [errorMessage]);
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -90,14 +118,24 @@ export default function LoginRoute() {
             </h2>
           </div>
 
+          {/* Expired pass alert banner */}
+          {loaderData?.isExpired && (
+            <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-start gap-3 animate-fade-in">
+              <span className="text-base">⌛</span>
+              <span className="text-xs font-semibold text-amber-700 dark:text-amber-300 leading-tight">
+                Your temporary guest access pass has expired or been revoked. Please ask the admin for a new pass link.
+              </span>
+            </div>
+          )}
+
           {/* Secure credentials warning error alert banner */}
-          {actionData?.error && errorVisible && (
+          {errorMessage && errorVisible && (
             <div className="p-4 bg-rose-500/10 dark:bg-rose-500/5 border border-rose-500/20 rounded-2xl flex items-start gap-3 animate-headShake">
               <svg className="w-5 h-5 text-rose-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
               <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 leading-tight">
-                {actionData.error}
+                {errorMessage}
               </span>
             </div>
           )}

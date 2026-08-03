@@ -228,13 +228,20 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const session = await requireAdmin(request);
+  const isTempPass = session.get("isTempPass") || false;
+  const permission = session.get("permission") || "FULL_ADMIN";
+  const expiresAt = session.get("expiresAt") || null;
+
   const loggedInUser = {
     name: session.get("userName") || "User",
     role: session.get("userRole") || "ADMIN",
     phone: session.get("userPhone") || null,
+    isTempPass,
+    permission,
+    expiresAt,
   };
 
-  const [users, expenses, adminCredentials, autos] = await Promise.all([
+  const [users, expenses, adminCredentials, autos, temporaryPasses] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({
       where: { NOT: { category: "shared_temp" } },
@@ -245,16 +252,63 @@ export async function loader({ request }: LoaderFunctionArgs) {
       orderBy: { createdAt: "desc" }
     }),
     prisma.auto.findMany({ orderBy: { createdAt: "desc" } }),
+    prisma.temporaryPass.findMany({ orderBy: { createdAt: "desc" } }),
   ]);
 
-  return { users, expenses, adminCredentials, loggedInUser, autos };
+  return { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
 export async function action({ request }: ActionFunctionArgs) {
-  await requireAdmin(request);
+  const session = await requireAdmin(request);
   const formData = await request.formData();
   const actionType = formData.get("_action")?.toString();
+
+  const isViewOnly = session.get("permission") === "VIEW_ONLY";
+  const isMutation = ["create_expense", "delete_expense", "create_user", "delete_user", "update_user_password", "create_auto", "delete_auto", "create_temp_pass", "revoke_temp_pass"].includes(actionType || "");
+
+  if (isViewOnly && isMutation) {
+    return { error: "Permission Denied: Your temporary access pass is set to View Only. You cannot perform write operations." };
+  }
+
+  if (actionType === "create_temp_pass") {
+    const label = formData.get("label")?.toString()?.trim() || "Guest Pass";
+    const passPermission = formData.get("permission")?.toString() || "VIEW_ONLY";
+    const duration = formData.get("duration")?.toString() || "1h";
+
+    let durationMs = 60 * 60 * 1000; // default 1 hour
+    if (duration === "30m") durationMs = 30 * 60 * 1000;
+    if (duration === "1h") durationMs = 60 * 60 * 1000;
+    if (duration === "6h") durationMs = 6 * 60 * 60 * 1000;
+    if (duration === "24h") durationMs = 24 * 60 * 60 * 1000;
+    if (duration === "7d") durationMs = 7 * 24 * 60 * 60 * 1000;
+
+    const expiresAt = new Date(Date.now() + durationMs);
+    const passCode = `TEMP-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    const newPass = await prisma.temporaryPass.create({
+      data: {
+        passCode,
+        label,
+        permission: passPermission,
+        expiresAt,
+        isActive: true,
+      },
+    });
+
+    return { success: true, action: "create_temp_pass", pass: newPass };
+  }
+
+  if (actionType === "revoke_temp_pass") {
+    const passId = parseInt(formData.get("id")?.toString() || "0");
+    if (passId) {
+      await prisma.temporaryPass.update({
+        where: { id: passId },
+        data: { isActive: false },
+      });
+    }
+    return { success: true, action: "revoke_temp_pass" };
+  }
 
   if (actionType === "create_expense") {
     const isAi = formData.get("isAi") === "true";
@@ -852,7 +906,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Home() {
-  const { users, expenses, adminCredentials, loggedInUser, autos } = useLoaderData() as any;
+  const { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses = [] } = useLoaderData() as any;
   const drivers = users.filter((u: any) => u.role === "DRIVER");
 
   // Mock variables for deleted features to prevent TypeScript compilation errors
@@ -965,6 +1019,37 @@ export default function Home() {
   const [userControlSuccessVisible, setUserControlSuccessVisible] = useState(false);
   const [shareSuccessInfo, setShareSuccessInfo] = useState<{ count: number; total: number } | null>(null);
   const [shareErrorInfo, setShareErrorInfo] = useState<string | null>(null);
+  const [showPassModal, setShowPassModal] = useState(false);
+  const [copiedPassId, setCopiedPassId] = useState<number | null>(null);
+  const [passTimeRemaining, setPassTimeRemaining] = useState<string>("");
+
+  // Live countdown timer for Temporary Access Pass holders
+  useEffect(() => {
+    if (!loggedInUser?.isTempPass || !loggedInUser?.expiresAt) return;
+
+    const updateTimer = () => {
+      const diff = new Date(loggedInUser.expiresAt).getTime() - Date.now();
+      if (diff <= 0) {
+        setPassTimeRemaining("Expired");
+        window.location.href = "/login?expired=true";
+        return;
+      }
+
+      const hours = Math.floor(diff / (1000 * 60 * 60));
+      const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const secs = Math.floor((diff % (1000 * 60)) / 1000);
+
+      if (hours > 0) {
+        setPassTimeRemaining(`${hours}h ${mins}m ${secs}s`);
+      } else {
+        setPassTimeRemaining(`${mins}m ${secs}s`);
+      }
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [loggedInUser?.expiresAt, loggedInUser?.isTempPass]);
   const [selectedDriverProfile, setSelectedDriverProfile] = useState<any | null>(null);
   const [selectedAutoProfile, setSelectedAutoProfile] = useState<any | null>(null);
   const [isEditingDriver, setIsEditingDriver] = useState(false);
@@ -1612,8 +1697,20 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Header Action Items (Theme Toggle) */}
+          {/* Header Action Items (Theme Toggle & Share Pass) */}
           <div className="flex items-center gap-3.5">
+            {/* Generate Share Access Pass Button */}
+            {loggedInUser?.permission !== "VIEW_ONLY" && (
+              <button
+                onClick={() => setShowPassModal(true)}
+                className="px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 border border-blue-500/30 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                title="Generate Temporary Share Access Pass"
+              >
+                <span>🔑</span>
+                <span className="hidden sm:inline">Share Access Pass</span>
+              </button>
+            )}
+
             {/* Light / Dark Mode Toggle */}
             <button
               onClick={toggleTheme}
@@ -1650,6 +1747,22 @@ export default function Home() {
         {/* Content Container */}
         <div className="flex-grow p-6 max-w-5xl mx-auto w-full space-y-6 pb-24">
           
+          {/* Guest Access Live Countdown Banner */}
+          {loggedInUser?.isTempPass && (
+            <div className="bg-amber-500/10 border border-amber-500/30 dark:bg-amber-500/15 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-sm animate-fade-in">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-800 dark:text-amber-200">
+                <span className="text-sm">👁️</span>
+                <span>
+                  Guest Access Pass ({loggedInUser?.permission === "VIEW_ONLY" ? "View Only Mode" : "Full Access Mode"})
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs font-mono font-extrabold text-amber-900 dark:text-amber-100 bg-amber-500/20 px-3 py-1 rounded-md w-fit">
+                <span>⌛ Expires in:</span>
+                <span>{passTimeRemaining || "Calculating..."}</span>
+              </div>
+            </div>
+          )}
+
           {/* EXPENSES TAB VIEW */}
           {activeTab === "expenses" && (
             <div className="animate-fade-in space-y-6">
@@ -5647,6 +5760,171 @@ export default function Home() {
             </div>
           </div>
         )}
+      {/* Temporary Access Pass Management Modal */}
+      {showPassModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-white dark:bg-[#1a1a1a] border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl max-w-lg w-full p-6 space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b border-neutral-100 dark:border-neutral-800 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🔑</span>
+                <h3 className="text-base font-bold text-neutral-900 dark:text-white">
+                  Temporary Access Pass Manager
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowPassModal(false)}
+                className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold text-lg cursor-pointer"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Create New Pass Form */}
+            <Form method="post" className="bg-neutral-50 dark:bg-neutral-900/60 p-4 rounded-xl border border-neutral-200/80 dark:border-neutral-800 space-y-3">
+              <input type="hidden" name="_action" value="create_temp_pass" />
+              <div className="text-xs font-bold uppercase tracking-wider text-neutral-500">
+                Generate New Guest Pass
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-3 space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">
+                    Pass Description / Label
+                  </label>
+                  <input
+                    type="text"
+                    name="label"
+                    placeholder="e.g. CA Audit, Partner Inspection"
+                    className="w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-lg px-3 py-2 bg-white dark:bg-[#121212] text-neutral-900 dark:text-white outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">
+                    Permission Level
+                  </label>
+                  <select
+                    name="permission"
+                    className="w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-lg px-2 py-2 bg-white dark:bg-[#121212] text-neutral-900 dark:text-white outline-none"
+                  >
+                    <option value="VIEW_ONLY">👁️ View Only</option>
+                    <option value="FULL_EDIT">✏️ Full Edit</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">
+                    Duration
+                  </label>
+                  <select
+                    name="duration"
+                    defaultValue="1h"
+                    className="w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-lg px-2 py-2 bg-white dark:bg-[#121212] text-neutral-900 dark:text-white outline-none"
+                  >
+                    <option value="30m">30 Minutes</option>
+                    <option value="1h">1 Hour</option>
+                    <option value="6h">6 Hours</option>
+                    <option value="24h">24 Hours</option>
+                    <option value="7d">7 Days</option>
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
+                  >
+                    + Generate
+                  </button>
+                </div>
+              </div>
+            </Form>
+
+            {/* List of Passes */}
+            <div className="space-y-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-neutral-500">
+                Active & Recent Temporary Passes ({temporaryPasses.length})
+              </div>
+
+              {temporaryPasses.length === 0 ? (
+                <div className="text-xs text-neutral-400 text-center py-6 border border-dashed border-neutral-200 dark:border-neutral-800 rounded-xl">
+                  No temporary passes generated yet.
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                  {temporaryPasses.map((p: any) => {
+                    const isExpired = new Date() > new Date(p.expiresAt) || !p.isActive;
+                    const shareUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/login?pass=${p.passCode}`;
+
+                    return (
+                      <div
+                        key={p.id}
+                        className={`p-3 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                          isExpired
+                            ? "bg-neutral-50 dark:bg-neutral-900/30 border-neutral-200 dark:border-neutral-800 opacity-60"
+                            : "bg-white dark:bg-[#121212] border-blue-100 dark:border-blue-900/40 shadow-sm"
+                        }`}
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-neutral-900 dark:text-white">
+                              {p.label || "Guest Pass"}
+                            </span>
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
+                              p.permission === "VIEW_ONLY"
+                                ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
+                                : "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
+                            }`}>
+                              {p.permission === "VIEW_ONLY" ? "👁️ View Only" : "✏️ Full Edit"}
+                            </span>
+                            {isExpired && (
+                              <span className="bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                Expired / Revoked
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-neutral-500 text-[11px] flex items-center gap-2">
+                            <span>Code: <code className="font-mono font-bold text-neutral-800 dark:text-neutral-200">{p.passCode}</code></span>
+                            <span>•</span>
+                            <span>Expires: {new Date(p.expiresAt).toLocaleString()}</span>
+                          </div>
+                        </div>
+
+                        {!isExpired && (
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(shareUrl);
+                                setCopiedPassId(p.id);
+                                setTimeout(() => setCopiedPassId(null), 3000);
+                              }}
+                              className="px-2.5 py-1.5 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 font-semibold rounded-lg text-neutral-800 dark:text-neutral-200 transition-all cursor-pointer text-[11px]"
+                            >
+                              {copiedPassId === p.id ? "✅ Copied!" : "📋 Copy Link"}
+                            </button>
+
+                            <Form method="post">
+                              <input type="hidden" name="_action" value="revoke_temp_pass" />
+                              <input type="hidden" name="id" value={p.id} />
+                              <button
+                                type="submit"
+                                className="px-2 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 font-semibold rounded-lg transition-all cursor-pointer text-[11px]"
+                              >
+                                Revoke
+                              </button>
+                            </Form>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       </main>
     </div>
   );
