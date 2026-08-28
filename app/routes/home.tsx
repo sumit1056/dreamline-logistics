@@ -900,6 +900,8 @@ export async function action({ request }: ActionFunctionArgs) {
       await prisma.auto.delete({ where: { id } });
     }
     return { success: true, action: "delete_auto" };
+  }
+
   if (actionType === "ask_ai_financial_query") {
     const query = formData.get("query")?.toString()?.trim() || "";
     if (!query) {
