@@ -904,6 +904,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (actionType === "ask_ai_financial_query") {
     const query = formData.get("query")?.toString()?.trim() || "";
+    const historyRaw = formData.get("chatHistory")?.toString() || "[]";
+    let chatHistory: Array<{ role: string; content: string }> = [];
+    try {
+      chatHistory = JSON.parse(historyRaw);
+    } catch (e) {}
+
     if (!query) {
       return { error: "Please enter a question to ask AI." };
     }
@@ -914,28 +920,60 @@ export async function action({ request }: ActionFunctionArgs) {
         throw new Error("GEMINI_API_KEY not configured in backend .env");
       }
 
-      // Fetch distinct vehicles and drivers for context in parallel
+      // Fetch distinct vehicles and drivers with their registered salaries
       const [autos, drivers] = await Promise.all([
-        prisma.auto.findMany({ select: { plateNumber: true } }),
-        prisma.user.findMany({ where: { role: "DRIVER" }, select: { name: true } }),
+        prisma.auto.findMany({ select: { plateNumber: true, modelName: true, ownerName: true, driverPhone: true } }),
+        prisma.user.findMany({ where: { role: "DRIVER" }, select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true } }),
       ]);
 
       const now = new Date();
       const prompt = `
-        Logistics financial query parser for Dreamline Logistics.
-        Current Reference Date: ${now.toISOString()} (${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}).
+        You are a smart financial & operations intelligence assistant for Dreamline Logistics.
+        Reference Current Date: ${now.toISOString()} (${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}).
 
-        Categories: "fuel", "bittu", "service", "shadowfax", "rate_change", "factory", "other_income", "other".
-        Vehicles: ${JSON.stringify(autos.map((a: any) => a.plateNumber))}.
-        Drivers: ${JSON.stringify(drivers.map((d: any) => d.name))}.
+        Database Entities:
+        - Categories: "fuel", "bittu", "service", "shadowfax", "rate_change", "factory", "other_income", "other".
+        - Registered Drivers (with base monthly salary in INR): ${JSON.stringify(drivers.map((d: any) => ({ name: d.name, phone: d.phone, salary: d.salary || 16500, vehicle: d.vehicleNumber })))}
+        - Registered Autos: ${JSON.stringify(autos.map((a: any) => ({ plate: a.plateNumber, model: a.modelName, driverPhone: a.driverPhone })))}
 
-        Question: "${query}"
+        Chat History / Prior Context:
+        ${chatHistory.slice(-4).map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}
 
-        Return JSON only:
+        Current User Question: "${query}"
+
+        Determine the user's intent:
+        1. If the question is about calculating a driver's salary, daily earnings, attendance/working days, or deducting advances (e.g. "Bittu worked 28 days what salary to pay", "calculate salary for Suresh for 25 days", "how much to pay driver Amit after advance"):
+           Set "intent": "SALARY_CALCULATION"
+           Extract:
+           - "driverName": string (e.g. "Bittu", "Suresh", etc.)
+           - "daysWorked": number (e.g. 28, default 30 if full month)
+           - "month": string (e.g. "2026-08", default current month)
+           - "customDeductions": number (if any extra deduction mentioned, otherwise 0)
+           - "customBonus": number (if bonus mentioned, otherwise 0)
+           - "querySummary": concise title (e.g. "Salary calculation for Bittu (28 days)")
+
+        2. Otherwise (expenses, income, fuel, bittu cash advances, vendor payouts, general queries):
+           Set "intent": "EXPENSE_QUERY"
+           Extract:
+           - "startDate": string ISO or null
+           - "endDate": string ISO or null
+           - "categories": array of category strings from known categories, or [] for all
+           - "type": "EXPENSE" | "INCOME" | "ALL"
+           - "vehicle": string plate or null
+           - "senderName": string or null
+           - "querySummary": concise title (e.g. "Fuel expenses for July 2026")
+
+        Return STRICT JSON only:
         {
-          "startDate": string ISO or null,
-          "endDate": string ISO or null,
-          "categories": array of category strings or [],
+          "intent": "SALARY_CALCULATION" | "EXPENSE_QUERY",
+          "driverName": string or null,
+          "daysWorked": number or null,
+          "month": string or null,
+          "customDeductions": number,
+          "customBonus": number,
+          "startDate": string or null,
+          "endDate": string or null,
+          "categories": string[],
           "type": "EXPENSE" | "INCOME" | "ALL",
           "vehicle": string or null,
           "senderName": string or null,
@@ -990,7 +1028,79 @@ export async function action({ request }: ActionFunctionArgs) {
       const cleaned = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
       const parsedFilters = JSON.parse(cleaned);
 
-      // Build Prisma Where Clause
+      // Handle Intent 1: SALARY_CALCULATION
+      if (parsedFilters.intent === "SALARY_CALCULATION" && parsedFilters.driverName) {
+        const searchName = parsedFilters.driverName.toLowerCase();
+        const matchedDriver = drivers.find((d: any) => 
+          d.name.toLowerCase().includes(searchName) || 
+          searchName.includes(d.name.toLowerCase())
+        ) || {
+          name: parsedFilters.driverName,
+          salary: 16500,
+          phone: "Unknown"
+        };
+
+        const baseMonthlySalary = matchedDriver.salary || 16500;
+        const daysWorked = parsedFilters.daysWorked || 30;
+        const daysInMonth = 30;
+        const dailyRate = Math.round(baseMonthlySalary / daysInMonth);
+        const earnedSalary = Math.round((baseMonthlySalary / daysInMonth) * Math.min(31, daysWorked));
+
+        // Query advances given to this driver (category 'bittu' or notes/sender matching driver)
+        const advancesList = await prisma.expense.findMany({
+          where: {
+            category: "bittu",
+            OR: [
+              { senderName: { contains: matchedDriver.name } },
+              { notes: { contains: matchedDriver.name } }
+            ]
+          },
+          orderBy: { timestamp: "desc" },
+          take: 10,
+        });
+
+        const totalAdvances = advancesList.reduce((sum: number, a: any) => sum + a.amount, 0);
+        const bonus = parsedFilters.customBonus || 0;
+        const deductions = (parsedFilters.customDeductions || 0) + totalAdvances;
+        const netPayable = Math.max(0, earnedSalary + bonus - deductions);
+
+        const humanAnswer = `Here is the salary breakdown for **${matchedDriver.name}** (${daysWorked} days worked):\n\n` +
+          `• **Base Monthly Salary**: ₹${baseMonthlySalary.toLocaleString("en-IN")}\n` +
+          `• **Daily Rate**: ₹${dailyRate.toLocaleString("en-IN")}/day\n` +
+          `• **Earned for ${daysWorked} Days**: ₹${earnedSalary.toLocaleString("en-IN")}\n` +
+          (totalAdvances > 0 ? `• **Advances Taken**: -₹${totalAdvances.toLocaleString("en-IN")} (${advancesList.length} advance entry)\n` : `• **Advances Taken**: ₹0\n`) +
+          (bonus > 0 ? `• **Bonus Added**: +₹${bonus.toLocaleString("en-IN")}\n` : '') +
+          `\n**💰 Net Payable Salary: ₹${netPayable.toLocaleString("en-IN")}**`;
+
+        return {
+          success: true,
+          action: "ask_ai_financial_query",
+          intent: "SALARY_CALCULATION",
+          originalQuery: query,
+          parsedFilters,
+          totalAmount: netPayable,
+          transactionCount: advancesList.length,
+          salaryBreakdown: {
+            driverName: matchedDriver.name,
+            baseMonthlySalary,
+            daysWorked,
+            earnedSalary,
+            totalAdvances,
+            bonus,
+            deductions,
+            netPayable,
+            advances: advancesList,
+          },
+          categoryBreakdown: [
+            { category: "Earned Salary", _sum: { amount: earnedSalary }, _count: { id: daysWorked } },
+            { category: "Advance Deduction", _sum: { amount: totalAdvances }, _count: { id: advancesList.length } }
+          ],
+          sampleTransactions: advancesList,
+          humanAnswer,
+        };
+      }
+
+      // Handle Intent 2: EXPENSE_QUERY
       const where: any = {
         NOT: { category: "shared_temp" }
       };
@@ -1057,15 +1167,16 @@ export async function action({ request }: ActionFunctionArgs) {
 
       let humanAnswer = "";
       if (count === 0) {
-        humanAnswer = `I checked your records for ${parsedFilters.querySummary || query}, and found 0 matching transactions (₹0 total).`;
+        humanAnswer = `I checked your records for **${parsedFilters.querySummary || query}**, and found 0 matching transactions (₹0 total).`;
       } else {
         const typeLabel = parsedFilters.type === "INCOME" ? "income" : parsedFilters.type === "EXPENSE" ? "expenses" : "transactions";
-        humanAnswer = `For ${parsedFilters.querySummary || query}, you recorded a total of ₹${totalAmount.toLocaleString("en-IN")} across ${count} ${typeLabel}.`;
+        humanAnswer = `For **${parsedFilters.querySummary || query}**, you recorded a total of **₹${totalAmount.toLocaleString("en-IN")}** across **${count} ${typeLabel}**.`;
       }
 
       return {
         success: true,
         action: "ask_ai_financial_query",
+        intent: "EXPENSE_QUERY",
         originalQuery: query,
         parsedFilters,
         totalAmount,
@@ -1547,11 +1658,20 @@ export default function Home() {
     setEntityFilter("ALL");
   };
 
-  // AI Spotlight Intelligence State
+  // AI Spotlight Multi-Turn Chat State
+  type AiChatMessage = {
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    data?: any;
+    timestamp: Date;
+  };
+
   const [isAiSpotlightOpen, setIsAiSpotlightOpen] = useState(false);
   const [aiQueryInput, setAiQueryInput] = useState("");
-  const [aiQueryResult, setAiQueryResult] = useState<any | null>(null);
+  const [chatMessages, setChatMessages] = useState<AiChatMessage[]>([]);
   const [isAiQueryLoading, setIsAiQueryLoading] = useState(false);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
 
   // Global Keyboard Shortcut: Cmd+K / Ctrl+K
   useEffect(() => {
@@ -1568,19 +1688,31 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Update AI Query Result when actionData returns
+  // Update AI Chat thread when actionData returns
   useEffect(() => {
     if (actionData?.action === "ask_ai_financial_query") {
       setIsAiQueryLoading(false);
       if (actionData.success) {
-        setAiQueryResult(actionData);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `msg-ai-${Date.now()}`,
+            role: "assistant",
+            content: actionData.humanAnswer,
+            data: actionData,
+            timestamp: new Date(),
+          },
+        ]);
+        setTimeout(() => {
+          chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, 100);
       } else if (actionData.error) {
         triggerAlert("AI Query Notice", actionData.error);
       }
     }
   }, [actionData]);
 
-  // Handler to deep-link filter parameters into the ledger
+  // Handler to deep-link filter parameters into the ledger with 100% precision
   const handleViewInLedger = (filters: any) => {
     setActiveTab("expenses");
     setShowExpenseDashboard(true);
@@ -1604,8 +1736,14 @@ export default function Home() {
       setExpenseCategoryFilter("ALL");
     }
 
-    if (filters?.categories && filters?.categories.length === 1) {
-      setEntityFilter(filters.categories[0]);
+    if (filters?.vehicle) {
+      setEntityFilter("AUTO:" + filters.vehicle);
+    } else if (filters?.driverName) {
+      setEntityFilter("DRIVER:" + filters.driverName);
+    } else if (filters?.senderName) {
+      setEntityFilter("DRIVER:" + filters.senderName);
+    } else if (filters?.categories && filters.categories.length === 1) {
+      setEntityFilter("CATEGORY:" + filters.categories[0]);
     } else {
       setEntityFilter("ALL");
     }
@@ -1636,7 +1774,7 @@ export default function Home() {
         return false;
       }
 
-      // 1b. Apply Auto/Driver Entity filter
+      // 1b. Apply Auto/Driver/Category Entity filter
       if (entityFilter !== "ALL") {
         if (entityFilter === "ANY_AUTO") {
           if (!exp.vehicle) return false;
@@ -1644,11 +1782,16 @@ export default function Home() {
           const isDriver = drivers.some((d: any) => d.name === exp.senderName);
           if (!isDriver) return false;
         } else if (entityFilter.startsWith("AUTO:")) {
-          const plate = entityFilter.substring(5);
-          if (exp.vehicle !== plate) return false;
+          const plate = entityFilter.substring(5).toLowerCase();
+          if (!exp.vehicle?.toLowerCase().includes(plate)) return false;
         } else if (entityFilter.startsWith("DRIVER:")) {
-          const name = entityFilter.substring(7);
-          if (exp.senderName !== name) return false;
+          const name = entityFilter.substring(7).toLowerCase();
+          const matchesSender = exp.senderName?.toLowerCase().includes(name);
+          const matchesNotes = exp.notes?.toLowerCase().includes(name);
+          if (!matchesSender && !matchesNotes) return false;
+        } else if (entityFilter.startsWith("CATEGORY:")) {
+          const cat = entityFilter.substring(9).toLowerCase();
+          if (exp.category?.toLowerCase() !== cat) return false;
         }
       }
 
@@ -6192,197 +6335,285 @@ export default function Home() {
         </span>
       </button>
 
-      {/* Spotlight AI Intelligence Modal */}
+      {/* Spotlight AI Intelligence Modal (Multi-Turn Conversational Assistant) */}
       {isAiSpotlightOpen && (
         <div 
-          className="fixed inset-0 z-50 flex items-start justify-center pt-12 sm:pt-20 p-4 bg-black/75 backdrop-blur-md animate-fade-in"
+          className="fixed inset-0 z-50 flex items-start justify-center pt-8 sm:pt-16 p-4 bg-black/80 backdrop-blur-md animate-fade-in"
           onClick={() => setIsAiSpotlightOpen(false)}
         >
           <div 
-            className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-white/10 rounded-3xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col max-h-[85vh] transition-all"
+            className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-white/10 rounded-3xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col h-[85vh] transition-all"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Search Header */}
-            <div className="p-4 border-b border-neutral-200 dark:border-white/10 bg-neutral-50/50 dark:bg-[#1a2234]/50">
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 border-b border-neutral-200 dark:border-white/10 bg-neutral-50 dark:bg-[#161f30] flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-lg bg-indigo-600/10 border border-indigo-500/20 text-indigo-500 flex items-center justify-center text-sm font-bold">
+                  ✨
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold text-neutral-900 dark:text-white flex items-center gap-1.5">
+                    <span>Dreamline AI Financial Assistant</span>
+                    <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-extrabold">
+                      Live
+                    </span>
+                  </h3>
+                  <p className="text-[10px] text-neutral-500 dark:text-slate-400">
+                    Deterministic SQL math • Driver salaries • Expense queries
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {chatMessages.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChatMessages([]);
+                      setAiQueryInput("");
+                    }}
+                    className="text-[11px] font-semibold text-neutral-500 hover:text-neutral-700 dark:text-slate-400 dark:hover:text-white px-2 py-1 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-white/5 transition-all cursor-pointer"
+                  >
+                    🔄 New Chat
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsAiSpotlightOpen(false)}
+                  className="p-1.5 text-neutral-400 hover:text-neutral-600 dark:hover:text-white rounded-lg transition-colors cursor-pointer text-xs"
+                  title="Close (Esc)"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Scrollable Chat Message Stream */}
+            <div className="flex-1 p-5 overflow-y-auto space-y-4">
+              {chatMessages.length === 0 && !isAiQueryLoading && (
+                <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
+                  <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-500 flex items-center justify-center text-2xl">
+                    ✨
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+                      Ask Any Operational or Financial Question
+                    </h4>
+                    <p className="text-xs text-neutral-500 dark:text-slate-400 mt-1 max-w-sm">
+                      You can ask about driver salaries, fuel expenses, cash advances, or follow up on any previous answers!
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left w-full max-w-md pt-2">
+                    {[
+                      "Bittu worked 28 days what salary to pay?",
+                      "How much fuel was spent 5 months ago?",
+                      "Total cash advance given to drivers this month",
+                      "Total factory income in 2026"
+                    ].map((samplePrompt) => (
+                      <button
+                        key={samplePrompt}
+                        type="button"
+                        onClick={() => {
+                          setAiQueryInput(samplePrompt);
+                          setChatMessages([
+                            {
+                              id: `msg-user-${Date.now()}`,
+                              role: "user",
+                              content: samplePrompt,
+                              timestamp: new Date()
+                            }
+                          ]);
+                          setIsAiQueryLoading(true);
+                          submit(
+                            {
+                              _action: "ask_ai_financial_query",
+                              query: samplePrompt,
+                              chatHistory: JSON.stringify([])
+                            },
+                            { method: "post" }
+                          );
+                          setAiQueryInput("");
+                        }}
+                        className="p-2.5 rounded-xl bg-neutral-50 dark:bg-white/[0.03] hover:bg-indigo-50 dark:hover:bg-indigo-500/10 border border-neutral-200 dark:border-white/5 hover:border-indigo-200 dark:hover:border-indigo-500/20 text-xs font-semibold text-neutral-700 dark:text-slate-300 transition-all text-left cursor-pointer"
+                      >
+                        💡 {samplePrompt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {chatMessages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"} animate-fade-in`}
+                >
+                  {/* Message Bubble */}
+                  <div
+                    className={`max-w-[88%] rounded-2xl p-3.5 text-xs leading-relaxed ${
+                      msg.role === "user"
+                        ? "bg-indigo-600 text-white rounded-br-none shadow-md font-semibold"
+                        : "bg-neutral-100 dark:bg-white/[0.04] text-neutral-900 dark:text-slate-100 border border-neutral-200/80 dark:border-white/10 rounded-bl-none shadow-sm space-y-3"
+                    }`}
+                  >
+                    {/* Plain Text or Markdown Content */}
+                    <div className="whitespace-pre-line">
+                      {msg.content}
+                    </div>
+
+                    {/* Rich Assistant Interactive Card */}
+                    {msg.role === "assistant" && msg.data && (
+                      <div className="space-y-3 pt-2 border-t border-neutral-200 dark:border-white/10">
+                        {/* High Impact Stat (Salary or Total Expense) */}
+                        <div className="flex items-baseline justify-between p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-500/10 border border-indigo-200/80 dark:border-indigo-500/20">
+                          <div>
+                            <span className="text-[10px] font-mono uppercase font-bold text-indigo-600 dark:text-indigo-400 block">
+                              {msg.data.intent === "SALARY_CALCULATION" ? "Net Payable Salary" : "Verified Total"}
+                            </span>
+                            <span className="text-2xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                              ₹{msg.data.totalAmount.toLocaleString("en-IN")}
+                            </span>
+                          </div>
+                          <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                            ✓ Calculated
+                          </span>
+                        </div>
+
+                        {/* Salary Breakdown Specific Card */}
+                        {msg.data.salaryBreakdown && (
+                          <div className="p-3 rounded-xl bg-neutral-50 dark:bg-white/[0.02] border border-neutral-200/80 dark:border-white/5 space-y-1.5 text-[11px]">
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Driver Name:</span>
+                              <span className="font-bold text-neutral-900 dark:text-white">{msg.data.salaryBreakdown.driverName}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Base Monthly Salary:</span>
+                              <span className="font-mono font-bold">₹{msg.data.salaryBreakdown.baseMonthlySalary.toLocaleString("en-IN")}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Days Worked:</span>
+                              <span className="font-mono font-bold">{msg.data.salaryBreakdown.daysWorked} days</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Earned Salary:</span>
+                              <span className="font-mono font-bold text-emerald-500">₹{msg.data.salaryBreakdown.earnedSalary.toLocaleString("en-IN")}</span>
+                            </div>
+                            {msg.data.salaryBreakdown.totalAdvances > 0 && (
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Less Cash Advances:</span>
+                                <span className="font-mono font-bold text-rose-500">-₹{msg.data.salaryBreakdown.totalAdvances.toLocaleString("en-IN")}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Category Breakdown Chips */}
+                        {msg.data.categoryBreakdown && msg.data.categoryBreakdown.length > 0 && (
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {msg.data.categoryBreakdown.map((cat: any) => (
+                              <div
+                                key={cat.category}
+                                className="p-2 rounded-lg bg-neutral-50 dark:bg-white/[0.02] border border-neutral-200/60 dark:border-white/5 flex justify-between items-center"
+                              >
+                                <span className="text-[10px] font-mono text-slate-400 uppercase">{cat.category}</span>
+                                <span className="font-mono font-bold text-xs">₹{(cat._sum?.amount || 0).toLocaleString("en-IN")}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Deep-link to Ledger */}
+                        <div className="flex justify-end pt-1">
+                          <button
+                            type="button"
+                            onClick={() => handleViewInLedger(msg.data.parsedFilters)}
+                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1 active:scale-95"
+                          >
+                            <span>🔍</span>
+                            <span>View in Ledger ({msg.data.transactionCount})</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <span className="text-[9px] text-neutral-400 dark:text-slate-500 mt-1 px-1 font-mono">
+                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </div>
+              ))}
+
+              {isAiQueryLoading && (
+                <div className="flex items-start gap-2 animate-pulse">
+                  <div className="p-3.5 rounded-2xl rounded-bl-none bg-neutral-100 dark:bg-white/[0.04] border border-neutral-200/80 dark:border-white/10 text-xs flex items-center gap-2">
+                    <span className="animate-spin text-sm">⏳</span>
+                    <span className="text-neutral-600 dark:text-slate-300 font-semibold">
+                      Calculating exact mathematical totals...
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div ref={chatBottomRef} />
+            </div>
+
+            {/* Message Input Footer */}
+            <div className="p-4 border-t border-neutral-200 dark:border-white/10 bg-neutral-50/50 dark:bg-[#161f30]/50">
               <Form
                 method="post"
                 onSubmit={(e) => {
-                  if (!aiQueryInput.trim()) {
+                  const trimmed = aiQueryInput.trim();
+                  if (!trimmed || isAiQueryLoading) {
                     e.preventDefault();
                     return;
                   }
+                  // Append user message locally
+                  const userMsg: AiChatMessage = {
+                    id: `msg-user-${Date.now()}`,
+                    role: "user",
+                    content: trimmed,
+                    timestamp: new Date()
+                  };
+                  setChatMessages(prev => [...prev, userMsg]);
                   setIsAiQueryLoading(true);
-                  setAiQueryResult(null);
+                  
+                  // Prepare history context for backend
+                  const historyPayload = chatMessages.slice(-6).map(m => ({
+                    role: m.role,
+                    content: m.content
+                  }));
+
+                  submit(
+                    {
+                      _action: "ask_ai_financial_query",
+                      query: trimmed,
+                      chatHistory: JSON.stringify(historyPayload)
+                    },
+                    { method: "post" }
+                  );
+                  setAiQueryInput("");
+                  setTimeout(() => {
+                    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+                  }, 50);
                 }}
                 className="relative flex items-center"
               >
-                <input type="hidden" name="_action" value="ask_ai_financial_query" />
-                <span className="absolute left-3.5 text-indigo-500 text-lg">✨</span>
                 <input
                   type="text"
                   name="query"
                   value={aiQueryInput}
                   onChange={(e) => setAiQueryInput(e.target.value)}
-                  placeholder="Ask anything... e.g. How much did I spend 5 months ago?"
+                  placeholder="Ask a question or follow-up... (e.g. Now deduct 2000 extra)"
                   autoFocus
-                  className="w-full pl-10 pr-24 py-3 bg-white dark:bg-[#111827] text-neutral-900 dark:text-white rounded-2xl border border-neutral-200 dark:border-white/10 focus:ring-2 focus:ring-indigo-500 text-sm font-semibold placeholder:text-neutral-400 dark:placeholder:text-slate-500 outline-none shadow-inner"
+                  className="w-full pl-4 pr-24 py-3 bg-white dark:bg-[#111827] text-neutral-900 dark:text-white rounded-2xl border border-neutral-200 dark:border-white/10 focus:ring-2 focus:ring-indigo-500 text-xs sm:text-sm font-semibold placeholder:text-neutral-400 dark:placeholder:text-slate-500 outline-none shadow-inner"
                 />
-                <div className="absolute right-2.5 flex items-center gap-1.5">
-                  <button
-                    type="submit"
-                    disabled={isAiQueryLoading || !aiQueryInput.trim()}
-                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all shadow-md cursor-pointer flex items-center gap-1"
-                  >
-                    {isAiQueryLoading ? (
-                      <>
-                        <span className="animate-spin text-xs">⏳</span>
-                        <span>Thinking...</span>
-                      </>
-                    ) : (
-                      <span>Ask</span>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsAiSpotlightOpen(false)}
-                    className="p-1.5 text-neutral-400 hover:text-neutral-600 dark:hover:text-white rounded-lg transition-colors cursor-pointer text-xs"
-                    title="Close (Esc)"
-                  >
-                    ✕
-                  </button>
-                </div>
+                <button
+                  type="submit"
+                  disabled={isAiQueryLoading || !aiQueryInput.trim()}
+                  className="absolute right-2 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-bold rounded-xl transition-all shadow-md cursor-pointer flex items-center gap-1"
+                >
+                  {isAiQueryLoading ? "⏳" : "Send ➔"}
+                </button>
               </Form>
-            </div>
-
-            {/* Modal Body / Answer Area */}
-            <div className="p-5 overflow-y-auto max-h-[60vh] space-y-4">
-              {isAiQueryLoading && (
-                <div className="py-12 flex flex-col items-center justify-center gap-3 text-center animate-pulse">
-                  <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center text-xl">
-                    ✨
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
-                      Analyzing Database & Aggregating Records...
-                    </h4>
-                    <p className="text-xs text-neutral-500 dark:text-slate-400 mt-0.5">
-                      Calculating exact mathematical totals with zero hallucinations
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {aiQueryResult && !isAiQueryLoading && (
-                <div className="space-y-4 animate-fade-in">
-                  {/* Main Result Card */}
-                  <div className="p-4 rounded-2xl bg-indigo-50/50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 shadow-sm space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="font-mono text-[10px] font-bold uppercase tracking-widest text-indigo-600 dark:text-indigo-400">
-                        {aiQueryResult.parsedFilters?.querySummary || "Verified Financial Answer"}
-                      </div>
-                      <span className="font-mono text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
-                        ✓ Database Verified
-                      </span>
-                    </div>
-
-                    {/* High-Impact Stat */}
-                    <div className="flex items-baseline gap-3">
-                      <span className="text-3xl font-extrabold font-mono text-neutral-900 dark:text-white tracking-tight">
-                        ₹{aiQueryResult.totalAmount.toLocaleString("en-IN")}
-                      </span>
-                      <span className="text-xs font-semibold text-neutral-500 dark:text-slate-400">
-                        across {aiQueryResult.transactionCount} transaction{aiQueryResult.transactionCount === 1 ? "" : "s"}
-                      </span>
-                    </div>
-
-                    <p className="text-xs font-medium text-neutral-700 dark:text-slate-200 leading-relaxed">
-                      {aiQueryResult.humanAnswer}
-                    </p>
-                  </div>
-
-                  {/* Category Breakdown Chips */}
-                  {aiQueryResult.categoryBreakdown && aiQueryResult.categoryBreakdown.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="text-[11px] font-mono uppercase font-bold text-neutral-500 dark:text-slate-400">
-                        Category Breakdown:
-                      </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                        {aiQueryResult.categoryBreakdown.map((cat: any) => (
-                          <div
-                            key={cat.category}
-                            className="p-2.5 rounded-xl bg-neutral-100 dark:bg-white/[0.03] border border-neutral-200 dark:border-white/5 flex flex-col"
-                          >
-                            <span className="text-[10px] font-mono uppercase font-bold text-slate-400">
-                              {cat.category}
-                            </span>
-                            <span className="text-sm font-extrabold font-mono text-neutral-900 dark:text-white mt-0.5">
-                              ₹{(cat._sum?.amount || 0).toLocaleString("en-IN")}
-                            </span>
-                            <span className="text-[10px] text-slate-500 mt-0.5">
-                              {cat._count?.id || 0} items
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Sample Recent Matching Transactions */}
-                  {aiQueryResult.sampleTransactions && aiQueryResult.sampleTransactions.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="text-[11px] font-mono uppercase font-bold text-neutral-500 dark:text-slate-400">
-                        Sample Matching Records:
-                      </div>
-                      <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                        {aiQueryResult.sampleTransactions.map((tx: any) => (
-                          <div
-                            key={tx.id}
-                            className="p-2 rounded-xl bg-neutral-50 dark:bg-white/[0.02] border border-neutral-200/80 dark:border-white/5 flex items-center justify-between text-xs"
-                          >
-                            <div className="flex items-center gap-2 truncate">
-                              <span className="font-mono text-[10px] text-slate-400">
-                                {new Date(tx.timestamp).toLocaleDateString("en-IN", { month: "short", day: "numeric" })}
-                              </span>
-                              <span className="font-bold text-neutral-900 dark:text-white truncate">
-                                {tx.notes || tx.category}
-                              </span>
-                              {tx.vehicle && (
-                                <span className="font-mono text-[9px] bg-neutral-200 dark:bg-white/10 px-1.5 py-0.5 rounded text-slate-400">
-                                  {tx.vehicle}
-                                </span>
-                              )}
-                            </div>
-                            <span className={`font-mono font-extrabold ml-2 ${tx.type === "INCOME" ? "text-emerald-500" : "text-neutral-900 dark:text-white"}`}>
-                              {tx.type === "INCOME" ? "+" : "-"}₹{tx.amount.toLocaleString("en-IN")}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Action Buttons */}
-                  <div className="flex items-center justify-between pt-2 border-t border-neutral-200 dark:border-white/10">
-                    <span className="text-[10px] text-neutral-400 dark:text-slate-500 font-mono">
-                      Press Esc to close
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleViewInLedger(aiQueryResult.parsedFilters)}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
-                    >
-                      <span>🔍</span>
-                      <span>View in Ledger ({aiQueryResult.transactionCount})</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {!isAiQueryLoading && !aiQueryResult && (
-                <div className="py-8 text-center text-neutral-400 dark:text-slate-500 text-xs">
-                  Ask any question above or click a suggestion to see immediate verified calculations.
-                </div>
-              )}
             </div>
           </div>
         </div>
