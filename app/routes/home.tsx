@@ -914,63 +914,41 @@ export async function action({ request }: ActionFunctionArgs) {
         throw new Error("GEMINI_API_KEY not configured in backend .env");
       }
 
-      // Fetch distinct vehicles and drivers for context
+      // Fetch distinct vehicles and drivers for context in parallel
       const [autos, drivers] = await Promise.all([
-        prisma.auto.findMany({ select: { plateNumber: true, modelName: true, ownerName: true } }),
-        prisma.user.findMany({ where: { role: "DRIVER" }, select: { name: true, phone: true, vehicleNumber: true } }),
+        prisma.auto.findMany({ select: { plateNumber: true } }),
+        prisma.user.findMany({ where: { role: "DRIVER" }, select: { name: true } }),
       ]);
 
       const now = new Date();
       const prompt = `
-        You are a financial intelligence query parser for a logistics management platform called Dreamline Logistics.
-        The user is asking a natural language question about their income, expenses, fuel, bittu payments, services, or driver costs.
+        Logistics financial query parser for Dreamline Logistics.
+        Current Reference Date: ${now.toISOString()} (${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}).
 
-        Reference Current Date & Time:
-        - ISO: ${now.toISOString()}
-        - Local Time: ${now.toString()}
-        - Current Year: ${now.getFullYear()}
-        - Current Month Index: ${now.getMonth() + 1} (${MONTH_NAMES[now.getMonth()]})
+        Categories: "fuel", "bittu", "service", "shadowfax", "rate_change", "factory", "other_income", "other".
+        Vehicles: ${JSON.stringify(autos.map((a: any) => a.plateNumber))}.
+        Drivers: ${JSON.stringify(drivers.map((d: any) => d.name))}.
 
-        Known expense/income categories:
-        - "fuel" (Petrol, diesel, CNG, fuel pump receipts)
-        - "bittu" (Cash given to Bittu / driver advance / owner cash transfers)
-        - "service" (Auto repairs, oil change, maintenance, tyre replacement, mechanic)
-        - "shadowfax" (Income or logistics vendor payout)
-        - "rate_change" (Logistics rate variation adjustments)
-        - "factory" (Factory logistics / warehouse income)
-        - "other_income" (Miscellaneous incoming credits)
-        - "other" (General miscellaneous operational expenses)
+        Question: "${query}"
 
-        Known Registered Vehicles:
-        ${JSON.stringify(autos.map((a: any) => a.plateNumber))}
-
-        Known Drivers / Senders:
-        ${JSON.stringify(drivers.map((d: any) => ({ name: d.name, vehicle: d.vehicleNumber })))}
-
-        Analyze the user's question: "${query}"
-
-        Return a STRICT JSON object (no markdown, no backticks):
+        Return JSON only:
         {
-          "startDate": (ISO string for start of timeframe or null),
-          "endDate": (ISO string for end of timeframe or null),
-          "categories": (array of strings from known categories, or [] for all),
-          "type": ("EXPENSE" or "INCOME" or "ALL"),
-          "vehicle": (string vehicle plate or null),
-          "senderName": (string sender/driver name or null),
-          "querySummary": (concise title/description of what is being asked, e.g. "Total expenses in March 2026")
+          "startDate": string ISO or null,
+          "endDate": string ISO or null,
+          "categories": array of category strings or [],
+          "type": "EXPENSE" | "INCOME" | "ALL",
+          "vehicle": string or null,
+          "senderName": string or null,
+          "querySummary": string
         }
-
-        Examples:
-        - "how much i spend 5 months ago": If current month is August 2026, 5 months ago is March 2026 (startDate: 2026-03-01T00:00:00.000Z, endDate: 2026-03-31T23:59:59.999Z), type: "EXPENSE", categories: [].
-        - "total fuel expense last month": startDate: 2026-07-01T00:00:00.000Z, endDate: 2026-07-31T23:59:59.999Z, categories: ["fuel"], type: "EXPENSE".
-        - "how much given to bittu this year": startDate: 2026-01-01T00:00:00.000Z, endDate: 2026-12-31T23:59:59.999Z, categories: ["bittu"], type: "EXPENSE".
-        - "total factory income in 2026": startDate: 2026-01-01T00:00:00.000Z, endDate: 2026-12-31T23:59:59.999Z, categories: ["factory", "other_income"], type: "INCOME".
       `;
 
+      // Ultra low-latency Flash model chain
       const MODEL_CHAIN = [
-        "gemini-2.5-flash",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash",
       ];
 
       let response: Response | null = null;
@@ -986,7 +964,8 @@ export async function action({ request }: ActionFunctionArgs) {
               contents: [{ parts: [{ text: prompt }] }],
               generationConfig: {
                 temperature: 0.1,
-                responseMimeType: "application/json"
+                responseMimeType: "application/json",
+                thinkingConfig: { thinkingBudget: 0 }
               }
             })
           });
@@ -6273,37 +6252,6 @@ export default function Home() {
                   </button>
                 </div>
               </Form>
-
-              {/* Quick Suggestion Chips */}
-              <div className="flex items-center gap-1.5 flex-wrap mt-3 pt-2 border-t border-neutral-200/60 dark:border-white/5">
-                <span className="text-[10px] font-mono uppercase font-bold text-neutral-400 dark:text-slate-500 mr-1">
-                  Suggestions:
-                </span>
-                {[
-                  "How much did I spend 5 months ago?",
-                  "Total fuel expenses in July",
-                  "Total cash given to Bittu",
-                  "Factory income last month",
-                  "Auto repair & service costs this year"
-                ].map((promptText) => (
-                  <button
-                    key={promptText}
-                    type="button"
-                    onClick={() => {
-                      setAiQueryInput(promptText);
-                      setIsAiQueryLoading(true);
-                      setAiQueryResult(null);
-                      submit(
-                        { _action: "ask_ai_financial_query", query: promptText },
-                        { method: "post" }
-                      );
-                    }}
-                    className="text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-neutral-200/60 dark:bg-white/[0.05] hover:bg-indigo-500/10 hover:text-indigo-600 dark:hover:text-indigo-300 text-neutral-700 dark:text-slate-300 border border-neutral-300/60 dark:border-white/5 transition-all cursor-pointer"
-                  >
-                    {promptText}
-                  </button>
-                ))}
-              </div>
             </div>
 
             {/* Modal Body / Answer Area */}
