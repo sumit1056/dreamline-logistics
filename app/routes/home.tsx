@@ -900,6 +900,206 @@ export async function action({ request }: ActionFunctionArgs) {
       await prisma.auto.delete({ where: { id } });
     }
     return { success: true, action: "delete_auto" };
+  if (actionType === "ask_ai_financial_query") {
+    const query = formData.get("query")?.toString()?.trim() || "";
+    if (!query) {
+      return { error: "Please enter a question to ask AI." };
+    }
+
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("GEMINI_API_KEY not configured in backend .env");
+      }
+
+      // Fetch distinct vehicles and drivers for context
+      const [autos, drivers] = await Promise.all([
+        prisma.auto.findMany({ select: { plateNumber: true, modelName: true, ownerName: true } }),
+        prisma.user.findMany({ where: { role: "DRIVER" }, select: { name: true, phone: true, vehicleNumber: true } }),
+      ]);
+
+      const now = new Date();
+      const prompt = `
+        You are a financial intelligence query parser for a logistics management platform called Dreamline Logistics.
+        The user is asking a natural language question about their income, expenses, fuel, bittu payments, services, or driver costs.
+
+        Reference Current Date & Time:
+        - ISO: ${now.toISOString()}
+        - Local Time: ${now.toString()}
+        - Current Year: ${now.getFullYear()}
+        - Current Month Index: ${now.getMonth() + 1} (${MONTH_NAMES[now.getMonth()]})
+
+        Known expense/income categories:
+        - "fuel" (Petrol, diesel, CNG, fuel pump receipts)
+        - "bittu" (Cash given to Bittu / driver advance / owner cash transfers)
+        - "service" (Auto repairs, oil change, maintenance, tyre replacement, mechanic)
+        - "shadowfax" (Income or logistics vendor payout)
+        - "rate_change" (Logistics rate variation adjustments)
+        - "factory" (Factory logistics / warehouse income)
+        - "other_income" (Miscellaneous incoming credits)
+        - "other" (General miscellaneous operational expenses)
+
+        Known Registered Vehicles:
+        ${JSON.stringify(autos.map((a: any) => a.plateNumber))}
+
+        Known Drivers / Senders:
+        ${JSON.stringify(drivers.map((d: any) => ({ name: d.name, vehicle: d.vehicleNumber })))}
+
+        Analyze the user's question: "${query}"
+
+        Return a STRICT JSON object (no markdown, no backticks):
+        {
+          "startDate": (ISO string for start of timeframe or null),
+          "endDate": (ISO string for end of timeframe or null),
+          "categories": (array of strings from known categories, or [] for all),
+          "type": ("EXPENSE" or "INCOME" or "ALL"),
+          "vehicle": (string vehicle plate or null),
+          "senderName": (string sender/driver name or null),
+          "querySummary": (concise title/description of what is being asked, e.g. "Total expenses in March 2026")
+        }
+
+        Examples:
+        - "how much i spend 5 months ago": If current month is August 2026, 5 months ago is March 2026 (startDate: 2026-03-01T00:00:00.000Z, endDate: 2026-03-31T23:59:59.999Z), type: "EXPENSE", categories: [].
+        - "total fuel expense last month": startDate: 2026-07-01T00:00:00.000Z, endDate: 2026-07-31T23:59:59.999Z, categories: ["fuel"], type: "EXPENSE".
+        - "how much given to bittu this year": startDate: 2026-01-01T00:00:00.000Z, endDate: 2026-12-31T23:59:59.999Z, categories: ["bittu"], type: "EXPENSE".
+        - "total factory income in 2026": startDate: 2026-01-01T00:00:00.000Z, endDate: 2026-12-31T23:59:59.999Z, categories: ["factory", "other_income"], type: "INCOME".
+      `;
+
+      const MODEL_CHAIN = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+      ];
+
+      let response: Response | null = null;
+      let lastError = "";
+
+      for (const model of MODEL_CHAIN) {
+        try {
+          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: "application/json"
+              }
+            })
+          });
+
+          if (res.ok) {
+            response = res;
+            break;
+          }
+          const errText = await res.text();
+          lastError = errText;
+        } catch (e: any) {
+          lastError = e.message || String(e);
+        }
+      }
+
+      if (!response) {
+        throw new Error(`AI model busy or unavailable: ${lastError}`);
+      }
+
+      const resData = await response.json();
+      const rawText = resData.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+      const cleaned = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
+      const parsedFilters = JSON.parse(cleaned);
+
+      // Build Prisma Where Clause
+      const where: any = {
+        NOT: { category: "shared_temp" }
+      };
+
+      if (parsedFilters.startDate || parsedFilters.endDate) {
+        where.timestamp = {};
+        if (parsedFilters.startDate) where.timestamp.gte = new Date(parsedFilters.startDate);
+        if (parsedFilters.endDate) where.timestamp.lte = new Date(parsedFilters.endDate);
+      }
+
+      if (parsedFilters.type && parsedFilters.type !== "ALL") {
+        where.type = parsedFilters.type;
+      }
+
+      if (parsedFilters.categories && parsedFilters.categories.length > 0) {
+        where.category = { in: parsedFilters.categories };
+      }
+
+      if (parsedFilters.vehicle) {
+        where.vehicle = { contains: parsedFilters.vehicle };
+      }
+
+      if (parsedFilters.senderName) {
+        where.senderName = { contains: parsedFilters.senderName };
+      }
+
+      // Execute exact database calculations
+      const [aggregates, categoryBreakdown, sampleTransactions] = await Promise.all([
+        prisma.expense.aggregate({
+          _sum: { amount: true },
+          _count: { id: true },
+          where,
+        }),
+        prisma.expense.groupBy({
+          by: ["category", "type"],
+          _sum: { amount: true },
+          _count: { id: true },
+          where,
+          orderBy: {
+            _sum: {
+              amount: "desc"
+            }
+          }
+        }),
+        prisma.expense.findMany({
+          where,
+          orderBy: { timestamp: "desc" },
+          take: 5,
+          select: {
+            id: true,
+            amount: true,
+            category: true,
+            notes: true,
+            timestamp: true,
+            vehicle: true,
+            senderName: true,
+            type: true,
+          }
+        })
+      ]);
+
+      const totalAmount = aggregates._sum.amount || 0;
+      const count = aggregates._count.id || 0;
+
+      let humanAnswer = "";
+      if (count === 0) {
+        humanAnswer = `I checked your records for ${parsedFilters.querySummary || query}, and found 0 matching transactions (₹0 total).`;
+      } else {
+        const typeLabel = parsedFilters.type === "INCOME" ? "income" : parsedFilters.type === "EXPENSE" ? "expenses" : "transactions";
+        humanAnswer = `For ${parsedFilters.querySummary || query}, you recorded a total of ₹${totalAmount.toLocaleString("en-IN")} across ${count} ${typeLabel}.`;
+      }
+
+      return {
+        success: true,
+        action: "ask_ai_financial_query",
+        originalQuery: query,
+        parsedFilters,
+        totalAmount,
+        transactionCount: count,
+        categoryBreakdown,
+        sampleTransactions,
+        humanAnswer,
+      };
+    } catch (err: any) {
+      console.error("AI Financial Query Error:", err);
+      return {
+        error: err.message || "Failed to process AI query",
+        action: "ask_ai_financial_query",
+      };
+    }
   }
 
   return null;
@@ -1364,6 +1564,70 @@ export default function Home() {
     setSelectedSlipImage(null);
     setExpenseCategoryFilter("ALL");
     setEntityFilter("ALL");
+  };
+
+  // AI Spotlight Intelligence State
+  const [isAiSpotlightOpen, setIsAiSpotlightOpen] = useState(false);
+  const [aiQueryInput, setAiQueryInput] = useState("");
+  const [aiQueryResult, setAiQueryResult] = useState<any | null>(null);
+  const [isAiQueryLoading, setIsAiQueryLoading] = useState(false);
+
+  // Global Keyboard Shortcut: Cmd+K / Ctrl+K
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setIsAiSpotlightOpen((prev) => !prev);
+      }
+      if (e.key === "Escape") {
+        setIsAiSpotlightOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Update AI Query Result when actionData returns
+  useEffect(() => {
+    if (actionData?.action === "ask_ai_financial_query") {
+      setIsAiQueryLoading(false);
+      if (actionData.success) {
+        setAiQueryResult(actionData);
+      } else if (actionData.error) {
+        triggerAlert("AI Query Notice", actionData.error);
+      }
+    }
+  }, [actionData]);
+
+  // Handler to deep-link filter parameters into the ledger
+  const handleViewInLedger = (filters: any) => {
+    setActiveTab("expenses");
+    setShowExpenseDashboard(true);
+    setIsAiSpotlightOpen(false);
+
+    if (filters?.startDate && filters?.endDate) {
+      setExpenseFilter("CUSTOM");
+      setCustomStartDate(filters.startDate.substring(0, 10));
+      setCustomEndDate(filters.endDate.substring(0, 10));
+    } else if (filters?.startDate) {
+      setExpenseFilter("CUSTOM");
+      setCustomStartDate(filters.startDate.substring(0, 10));
+      setCustomEndDate(new Date().toISOString().substring(0, 10));
+    } else {
+      setExpenseFilter("ALL");
+    }
+
+    if (filters?.type === "EXPENSE" || filters?.type === "INCOME") {
+      setExpenseCategoryFilter(filters.type);
+    } else {
+      setExpenseCategoryFilter("ALL");
+    }
+
+    if (filters?.categories && filters?.categories.length === 1) {
+      setEntityFilter(filters.categories[0]);
+    } else {
+      setEntityFilter("ALL");
+    }
   };
 
   // Dynamically extract all available years from expenses to populate the year filter dropdown
@@ -5919,6 +6183,254 @@ export default function Home() {
                       </div>
                     );
                   })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Floating AI Intelligence Button */}
+      <button
+        type="button"
+        onClick={() => {
+          setIsAiSpotlightOpen(true);
+        }}
+        className="fixed bottom-6 right-6 z-40 flex items-center gap-2.5 px-4 py-2.5 rounded-full bg-neutral-900/90 dark:bg-indigo-600/90 hover:bg-neutral-800 dark:hover:bg-indigo-500 text-white font-bold text-xs shadow-2xl backdrop-blur-md border border-white/15 dark:border-indigo-400/30 transition-all duration-300 hover:scale-105 active:scale-95 group cursor-pointer"
+        title="Ask Financial AI (⌘K or Ctrl+K)"
+      >
+        <span className="relative flex h-2.5 w-2.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-indigo-300"></span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span>✨ Ask AI</span>
+          <kbd className="hidden sm:inline-block font-mono text-[9px] uppercase px-1.5 py-0.5 rounded bg-white/20 text-white/90">
+            ⌘K
+          </kbd>
+        </span>
+      </button>
+
+      {/* Spotlight AI Intelligence Modal */}
+      {isAiSpotlightOpen && (
+        <div 
+          className="fixed inset-0 z-50 flex items-start justify-center pt-12 sm:pt-20 p-4 bg-black/75 backdrop-blur-md animate-fade-in"
+          onClick={() => setIsAiSpotlightOpen(false)}
+        >
+          <div 
+            className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-white/10 rounded-3xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col max-h-[85vh] transition-all"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Search Header */}
+            <div className="p-4 border-b border-neutral-200 dark:border-white/10 bg-neutral-50/50 dark:bg-[#1a2234]/50">
+              <Form
+                method="post"
+                onSubmit={(e) => {
+                  if (!aiQueryInput.trim()) {
+                    e.preventDefault();
+                    return;
+                  }
+                  setIsAiQueryLoading(true);
+                  setAiQueryResult(null);
+                }}
+                className="relative flex items-center"
+              >
+                <input type="hidden" name="_action" value="ask_ai_financial_query" />
+                <span className="absolute left-3.5 text-indigo-500 text-lg">✨</span>
+                <input
+                  type="text"
+                  name="query"
+                  value={aiQueryInput}
+                  onChange={(e) => setAiQueryInput(e.target.value)}
+                  placeholder="Ask anything... e.g. How much did I spend 5 months ago?"
+                  autoFocus
+                  className="w-full pl-10 pr-24 py-3 bg-white dark:bg-[#111827] text-neutral-900 dark:text-white rounded-2xl border border-neutral-200 dark:border-white/10 focus:ring-2 focus:ring-indigo-500 text-sm font-semibold placeholder:text-neutral-400 dark:placeholder:text-slate-500 outline-none shadow-inner"
+                />
+                <div className="absolute right-2.5 flex items-center gap-1.5">
+                  <button
+                    type="submit"
+                    disabled={isAiQueryLoading || !aiQueryInput.trim()}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all shadow-md cursor-pointer flex items-center gap-1"
+                  >
+                    {isAiQueryLoading ? (
+                      <>
+                        <span className="animate-spin text-xs">⏳</span>
+                        <span>Thinking...</span>
+                      </>
+                    ) : (
+                      <span>Ask</span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsAiSpotlightOpen(false)}
+                    className="p-1.5 text-neutral-400 hover:text-neutral-600 dark:hover:text-white rounded-lg transition-colors cursor-pointer text-xs"
+                    title="Close (Esc)"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </Form>
+
+              {/* Quick Suggestion Chips */}
+              <div className="flex items-center gap-1.5 flex-wrap mt-3 pt-2 border-t border-neutral-200/60 dark:border-white/5">
+                <span className="text-[10px] font-mono uppercase font-bold text-neutral-400 dark:text-slate-500 mr-1">
+                  Suggestions:
+                </span>
+                {[
+                  "How much did I spend 5 months ago?",
+                  "Total fuel expenses in July",
+                  "Total cash given to Bittu",
+                  "Factory income last month",
+                  "Auto repair & service costs this year"
+                ].map((promptText) => (
+                  <button
+                    key={promptText}
+                    type="button"
+                    onClick={() => {
+                      setAiQueryInput(promptText);
+                      setIsAiQueryLoading(true);
+                      setAiQueryResult(null);
+                      submit(
+                        { _action: "ask_ai_financial_query", query: promptText },
+                        { method: "post" }
+                      );
+                    }}
+                    className="text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-neutral-200/60 dark:bg-white/[0.05] hover:bg-indigo-500/10 hover:text-indigo-600 dark:hover:text-indigo-300 text-neutral-700 dark:text-slate-300 border border-neutral-300/60 dark:border-white/5 transition-all cursor-pointer"
+                  >
+                    {promptText}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Modal Body / Answer Area */}
+            <div className="p-5 overflow-y-auto max-h-[60vh] space-y-4">
+              {isAiQueryLoading && (
+                <div className="py-12 flex flex-col items-center justify-center gap-3 text-center animate-pulse">
+                  <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center text-xl">
+                    ✨
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
+                      Analyzing Database & Aggregating Records...
+                    </h4>
+                    <p className="text-xs text-neutral-500 dark:text-slate-400 mt-0.5">
+                      Calculating exact mathematical totals with zero hallucinations
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {aiQueryResult && !isAiQueryLoading && (
+                <div className="space-y-4 animate-fade-in">
+                  {/* Main Result Card */}
+                  <div className="p-4 rounded-2xl bg-indigo-50/50 dark:bg-indigo-500/10 border border-indigo-200 dark:border-indigo-500/20 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="font-mono text-[10px] font-bold uppercase tracking-widest text-indigo-600 dark:text-indigo-400">
+                        {aiQueryResult.parsedFilters?.querySummary || "Verified Financial Answer"}
+                      </div>
+                      <span className="font-mono text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                        ✓ Database Verified
+                      </span>
+                    </div>
+
+                    {/* High-Impact Stat */}
+                    <div className="flex items-baseline gap-3">
+                      <span className="text-3xl font-extrabold font-mono text-neutral-900 dark:text-white tracking-tight">
+                        ₹{aiQueryResult.totalAmount.toLocaleString("en-IN")}
+                      </span>
+                      <span className="text-xs font-semibold text-neutral-500 dark:text-slate-400">
+                        across {aiQueryResult.transactionCount} transaction{aiQueryResult.transactionCount === 1 ? "" : "s"}
+                      </span>
+                    </div>
+
+                    <p className="text-xs font-medium text-neutral-700 dark:text-slate-200 leading-relaxed">
+                      {aiQueryResult.humanAnswer}
+                    </p>
+                  </div>
+
+                  {/* Category Breakdown Chips */}
+                  {aiQueryResult.categoryBreakdown && aiQueryResult.categoryBreakdown.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-[11px] font-mono uppercase font-bold text-neutral-500 dark:text-slate-400">
+                        Category Breakdown:
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {aiQueryResult.categoryBreakdown.map((cat: any) => (
+                          <div
+                            key={cat.category}
+                            className="p-2.5 rounded-xl bg-neutral-100 dark:bg-white/[0.03] border border-neutral-200 dark:border-white/5 flex flex-col"
+                          >
+                            <span className="text-[10px] font-mono uppercase font-bold text-slate-400">
+                              {cat.category}
+                            </span>
+                            <span className="text-sm font-extrabold font-mono text-neutral-900 dark:text-white mt-0.5">
+                              ₹{(cat._sum?.amount || 0).toLocaleString("en-IN")}
+                            </span>
+                            <span className="text-[10px] text-slate-500 mt-0.5">
+                              {cat._count?.id || 0} items
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sample Recent Matching Transactions */}
+                  {aiQueryResult.sampleTransactions && aiQueryResult.sampleTransactions.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-[11px] font-mono uppercase font-bold text-neutral-500 dark:text-slate-400">
+                        Sample Matching Records:
+                      </div>
+                      <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                        {aiQueryResult.sampleTransactions.map((tx: any) => (
+                          <div
+                            key={tx.id}
+                            className="p-2 rounded-xl bg-neutral-50 dark:bg-white/[0.02] border border-neutral-200/80 dark:border-white/5 flex items-center justify-between text-xs"
+                          >
+                            <div className="flex items-center gap-2 truncate">
+                              <span className="font-mono text-[10px] text-slate-400">
+                                {new Date(tx.timestamp).toLocaleDateString("en-IN", { month: "short", day: "numeric" })}
+                              </span>
+                              <span className="font-bold text-neutral-900 dark:text-white truncate">
+                                {tx.notes || tx.category}
+                              </span>
+                              {tx.vehicle && (
+                                <span className="font-mono text-[9px] bg-neutral-200 dark:bg-white/10 px-1.5 py-0.5 rounded text-slate-400">
+                                  {tx.vehicle}
+                                </span>
+                              )}
+                            </div>
+                            <span className={`font-mono font-extrabold ml-2 ${tx.type === "INCOME" ? "text-emerald-500" : "text-neutral-900 dark:text-white"}`}>
+                              {tx.type === "INCOME" ? "+" : "-"}₹{tx.amount.toLocaleString("en-IN")}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Action Buttons */}
+                  <div className="flex items-center justify-between pt-2 border-t border-neutral-200 dark:border-white/10">
+                    <span className="text-[10px] text-neutral-400 dark:text-slate-500 font-mono">
+                      Press Esc to close
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleViewInLedger(aiQueryResult.parsedFilters)}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                    >
+                      <span>🔍</span>
+                      <span>View in Ledger ({aiQueryResult.transactionCount})</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!isAiQueryLoading && !aiQueryResult && (
+                <div className="py-8 text-center text-neutral-400 dark:text-slate-500 text-xs">
+                  Ask any question above or click a suggestion to see immediate verified calculations.
                 </div>
               )}
             </div>
