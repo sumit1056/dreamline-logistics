@@ -4,4 +4,5 @@ export default [
   index("routes/home.tsx"),
   route("login", "routes/login.tsx"),
   route("share-target", "routes/share-target.tsx"),
+  route("api/chat-stream", "routes/api.chat-stream.ts"),
 ] satisfies RouteConfig;

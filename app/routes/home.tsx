@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { useLoaderData, Form, useNavigation, useActionData, useSubmit } from "react-router";
 import type { Route } from "./+types/home";
 import { prisma } from "../db.server";
+import { parseExpenseText, scanReceiptImage } from "../services/ai.server";
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -327,108 +328,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       try {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-          throw new Error("GEMINI_API_KEY not configured in backend .env");
-        }
-
-        const prompt = `
-          You are an AI logistics assistant parsing operational logs and financial entries into a structured JSON array.
-          Analyze the user's input. It may contain one or multiple separate entries of expenses or incomes.
-
-          Parse the input into a strict JSON array where each item represents an entry to be saved to our database.
-          Each item in the array must be an expense or income entry.
-
-          Reference current time is: ${new Date().toISOString()} (Local current date: ${new Date().toString()}).
-
-          For each item, if the user mentions a past date, relative date (e.g., 'yesterday', '2 days ago', 'last Friday', 'on 25th May'), parse it into a strict UTC ISO 8601 string and set the field "date". Otherwise, if no date is mentioned, omit or set "date" to null.
-
-          Fields for each item:
-          - amount: (number) The cost or income in rupees/INR.
-          - type: (string) Must be either "EXPENSE" or "INCOME".
-          - category: (string) Must be one of the following exactly:
-            For "EXPENSE":
-              'bittu' (CRITICAL: Use this for ANY driver/delivery boy cash advance, salary advance, food advance, medicine advance, or money given to drivers like Bittu, Rahul, John, etc.)
-              'fuel' (Petrol, CNG, diesel refill)
-              'service' (Auto maintenance, servicing, tyre, mechanics)
-              'other' (Office, stationery, misc)
-            For "INCOME":
-              'shadowfax' (70 per order delivery income)
-              'factory' (Vendor per order income)
-              'vendor_income' (General vendor freight income)
-              'other_income' (Any other income)
-          - notes: (string) Clean and concise description of the transaction (e.g. 'Rahul advance salary for medicine').
-          - senderName: (string or null) The name of the driver receiving the advance (e.g. 'Rahul', 'Bittu') or client name if mentioned, otherwise null.
-          - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234), otherwise null.
-          - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
-
-          User Input: "${rawText}"
-
-          Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
-        `;
-
-        // Smart Model Failover Chain with 429 rate-limit retry & brief backoff
-        const MODEL_CHAIN = [
-          "gemini-2.0-flash-lite", // Primary: lightest, highest free-tier quota
-          "gemini-2.0-flash",      // Fallback 1: stable 2.0 flash
-          "gemini-2.5-flash",      // Fallback 2: latest, but lower free quota
-        ];
-
-        const requestBody = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] });
-        let response: Response | null = null;
-        let lastError = "";
-
-        for (let i = 0; i < MODEL_CHAIN.length; i++) {
-          const model = MODEL_CHAIN[i];
-          try {
-            console.log(`🤖 Trying model: ${model}`);
-            const res = await fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: requestBody,
-              }
-            );
-
-            if (res.ok) {
-              console.log(`✅ Success with model: ${model}`);
-              response = res;
-              break;
-            }
-
-            // For hard client errors (400, 403, etc.) → no point trying other models
-            if (res.status === 400 || res.status === 403 || res.status === 401) {
-              const errText = await res.text();
-              throw new Error(`Gemini API config error: ${errText}`);
-            }
-
-            // Rate limit (429) or server overload (503) → wait briefly then try next model
-            if (res.status === 429 || res.status === 503) {
-              console.warn(`⚡ ${model} rate-limited (${res.status}). Waiting 1.5s then trying next...`);
-              await new Promise(r => setTimeout(r, 1500));
-              continue;
-            }
-
-            console.warn(`⚡ ${model} returned status ${res.status}. Falling back...`);
-          } catch (err: any) {
-            lastError = err.message || String(err);
-            if (err.message?.includes("Gemini API config error")) throw err;
-            console.warn(`⚡ ${model} error: ${lastError}. Trying next...`);
-            // Brief pause before next attempt
-            if (i < MODEL_CHAIN.length - 1) await new Promise(r => setTimeout(r, 800));
-            continue;
-          }
-        }
-
-        if (!response) {
-          throw new Error("⚠️ Gemini AI quota temporarily exceeded. Please wait 30 seconds and try again, or use the ✍️ Manual Form tab for instant saving!");
-        }
-
-        const data = await response.json();
-        const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        const cleanedText = generatedText.replace(/```json/g, "").replace(/```/g, "").trim();
-        const parsed = JSON.parse(cleanedText);
+        const parsed = await parseExpenseText(rawText);
 
         if (!Array.isArray(parsed)) {
           throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4550.");
@@ -559,87 +459,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
       // Helper function to scan a single receipt using the failover chain
       const scanReceipt = async (imageUrl: string) => {
-        const prompt = `
-          Analyze this fuel pump / service receipt image. Extract operational logistics details:
-          - amount: (number) The total amount paid in Rupees/INR.
-          - vehicle: (string or null) The vehicle plate/license number if printed or hand-written on the slip (e.g. MH-12-PQ-4567), otherwise null.
-          - senderName: (string or null) The driver's name if printed or hand-written on the slip (e.g. Amit Sharma), otherwise null.
-          - notes: (string) A clean description of the transaction (e.g. "CNG Fuel refill", "Diesel fuel refill", "Auto Servicing").
-          - date: (string or null) The date/time printed on the receipt in ISO 8601 UTC format, or null if not readable.
-
-          Return ONLY a valid, raw JSON object with these fields, for example:
-          {"amount": 1200, "vehicle": "MH-12-PQ-4567", "senderName": "Amit Sharma", "notes": "CNG Fuel refill", "date": "2026-07-13T10:30:00Z"}
-          Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
-        `;
-
-        const base64Data = imageUrl.split(",")[1] || imageUrl;
-        const mimeType = imageUrl.split(";")[0]?.split(":")[1] || "image/jpeg";
-
-        const requestBody = JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: prompt },
-                {
-                  inlineData: {
-                    mimeType: mimeType,
-                    data: base64Data
-                  }
-                }
-              ]
-            }
-          ]
-        });
-
-        let response: Response | null = null;
-        let lastError = "";
-
-        for (const model of MODEL_CHAIN) {
-          try {
-            console.log(`🤖 [Receipt Scan] Trying model: ${model}`);
-            const res = await fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: requestBody,
-              }
-            );
-
-            if (res.ok) {
-              console.log(`✅ [Receipt Scan] Success with model: ${model}`);
-              response = res;
-              break;
-            }
-
-            if (res.status === 400 || res.status === 403 || res.status === 401) {
-              const errText = await res.text();
-              throw new Error(`Gemini API config error: ${errText}`);
-            }
-
-            console.warn(`⚡ [Receipt Scan] ${model} returned status ${res.status}. Falling back immediately...`);
-          } catch (err: any) {
-            lastError = err.message || String(err);
-            if (err.message?.includes("Gemini API config error")) throw err;
-            console.warn(`⚡ [Receipt Scan] ${model} network error: ${lastError}. Trying next model...`);
-            continue;
-          }
-        }
-
-        if (!response) {
-          throw new Error(`⚠️ Gemini service busy: ${lastError}`);
-        }
-
-        const data = await response.json();
-        const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        const cleanedText = generatedText.replace(/```json/g, "").replace(/```/g, "").trim();
-        const parsed = JSON.parse(cleanedText);
+        const parsed = await scanReceiptImage(imageUrl);
 
         if (!parsed || typeof parsed.amount === "undefined") {
           throw new Error("Unable to parse amount from receipt image.");
         }
 
-        const amount = Math.round(parseFloat(parsed.amount) || 0);
+        const amount = Math.round(parseFloat(parsed.amount as any) || 0);
         const vehicle = parsed.vehicle || null;
         const notes = parsed.notes || "Fuel expense auto-scanned from receipt";
         const senderName = parsed.senderName || "Founder";
@@ -7489,42 +7315,79 @@ export default function Home() {
 
             {/* Message Input Footer */}
             <div className="p-4 border-t border-neutral-200 dark:border-white/10 bg-neutral-50/50 dark:bg-[#161f30]/50">
-              <Form
-                method="post"
+              <form
                 onSubmit={(e) => {
+                  e.preventDefault();
                   const trimmed = aiQueryInput.trim();
-                  if (!trimmed || isAiQueryLoading) {
-                    e.preventDefault();
-                    return;
-                  }
-                  // Append user message locally
+                  if (!trimmed || isAiQueryLoading) return;
+
                   const userMsg: AiChatMessage = {
                     id: `msg-user-${Date.now()}`,
                     role: "user",
                     content: trimmed,
                     timestamp: new Date()
                   };
-                  setChatMessages(prev => [...prev, userMsg]);
-                  setIsAiQueryLoading(true);
-                  
-                  // Prepare history context for backend
-                  const historyPayload = chatMessages.slice(-6).map(m => ({
-                    role: m.role,
-                    content: m.content
-                  }));
 
-                  submit(
-                    {
-                      _action: "ask_ai_financial_query",
-                      query: trimmed,
-                      chatHistory: JSON.stringify(historyPayload)
-                    },
-                    { method: "post" }
-                  );
+                  const assistantMsgId = `msg-assistant-${Date.now()}`;
+                  const assistantMsg: AiChatMessage = {
+                    id: assistantMsgId,
+                    role: "assistant",
+                    content: "",
+                    timestamp: new Date()
+                  };
+
+                  setChatMessages(prev => [...prev, userMsg, assistantMsg]);
+                  const currentQuery = trimmed;
                   setAiQueryInput("");
+                  setIsAiQueryLoading(true);
+
                   setTimeout(() => {
                     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
                   }, 50);
+
+                  const dbSummary = JSON.stringify({
+                    totalExpensesCount: expenses.length,
+                    recentEntries: expenses.slice(0, 35).map(e => ({
+                      amount: e.amount,
+                      category: e.category,
+                      notes: e.notes,
+                      senderName: e.senderName,
+                      vehicle: e.vehicle,
+                      type: e.type,
+                      date: e.timestamp
+                    })),
+                    registeredDrivers: drivers.map(d => ({ name: d.name, vehicle: d.vehicleNumber, salary: d.salary }))
+                  });
+
+                  fetch("/api/chat-stream", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ userQuery: currentQuery, dbContext: dbSummary }),
+                  })
+                    .then(async (res) => {
+                      setIsAiQueryLoading(false);
+                      if (!res.ok || !res.body) {
+                        throw new Error("Streaming error");
+                      }
+                      const reader = res.body.getReader();
+                      const decoder = new TextDecoder();
+
+                      while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        const chunkText = decoder.decode(value, { stream: true });
+                        setChatMessages(prev =>
+                          prev.map(m => m.id === assistantMsgId ? { ...m, content: m.content + chunkText } : m)
+                        );
+                        chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+                      }
+                    })
+                    .catch((err) => {
+                      setIsAiQueryLoading(false);
+                      setChatMessages(prev =>
+                        prev.map(m => m.id === assistantMsgId ? { ...m, content: m.content || "⚠️ Unable to generate response. Please try again." } : m)
+                      );
+                    });
                 }}
                 className="relative flex items-center"
               >
@@ -7533,7 +7396,7 @@ export default function Home() {
                   name="query"
                   value={aiQueryInput}
                   onChange={(e) => setAiQueryInput(e.target.value)}
-                  placeholder="Ask a question or follow-up... (e.g. Now deduct 2000 extra)"
+                  placeholder="Ask a question or follow-up... (e.g. Total fuel expenses this month)"
                   autoFocus
                   className="w-full pl-4 pr-24 py-3 bg-white dark:bg-[#111827] text-neutral-900 dark:text-white rounded-2xl border border-neutral-200 dark:border-white/10 focus:ring-2 focus:ring-indigo-500 text-xs sm:text-sm font-semibold placeholder:text-neutral-400 dark:placeholder:text-slate-500 outline-none shadow-inner"
                 />
@@ -7542,9 +7405,9 @@ export default function Home() {
                   disabled={isAiQueryLoading || !aiQueryInput.trim()}
                   className="absolute right-2 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-bold rounded-xl transition-all shadow-md cursor-pointer flex items-center gap-1"
                 >
-                  {isAiQueryLoading ? "⏳" : "Send ➔"}
+                  {isAiQueryLoading ? "⚡" : "Send ➔"}
                 </button>
-              </Form>
+              </form>
             </div>
           </div>
         </div>

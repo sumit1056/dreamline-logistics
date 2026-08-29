@@ -9,6 +9,7 @@
     "typecheck": "react-router typegen && tsc"
   },
   "dependencies": {
+    "@google/genai": "^2.19.0",
     "@prisma/client": "^6.19.3",
     "@react-router/node": "7.15.1",
     "@react-router/serve": "7.15.1",
