@@ -347,9 +347,18 @@ export async function action({ request }: ActionFunctionArgs) {
           - amount: (number) The cost or income in rupees/INR.
           - type: (string) Must be either "EXPENSE" or "INCOME".
           - category: (string) Must be one of the following exactly:
-            For "EXPENSE": 'fuel', 'bittu', 'service', 'other'
-            For "INCOME": 'shadowfax', 'factory', 'vendor_income', 'other_income'
-          - notes: (string) Clean and concise description of the transaction.
+            For "EXPENSE":
+              'bittu' (CRITICAL: Use this for ANY driver/delivery boy cash advance, salary advance, food advance, medicine advance, or money given to drivers like Bittu, Rahul, John, etc.)
+              'fuel' (Petrol, CNG, diesel refill)
+              'service' (Auto maintenance, servicing, tyre, mechanics)
+              'other' (Office, stationery, misc)
+            For "INCOME":
+              'shadowfax' (70 per order delivery income)
+              'factory' (Vendor per order income)
+              'vendor_income' (General vendor freight income)
+              'other_income' (Any other income)
+          - notes: (string) Clean and concise description of the transaction (e.g. 'Rahul advance salary for medicine').
+          - senderName: (string or null) The name of the driver receiving the advance (e.g. 'Rahul', 'Bittu') or client name if mentioned, otherwise null.
           - vehicle: (string or null) The vehicle plate/license number if mentioned (e.g. MH-12-AB-1234), otherwise null.
           - date: (string or null) The parsed UTC ISO 8601 date string if a past/relative date is specified.
 
@@ -434,9 +443,15 @@ export async function action({ request }: ActionFunctionArgs) {
 
           const amount = Math.round(parseFloat(item.amount) || 0);
           const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
-          const category = item.category || "other";
+          let category = item.category || "other";
           const notes = item.notes || rawText;
           const vehicle = item.vehicle || null;
+          const senderName = item.senderName || (category === "bittu" ? "Driver" : "AI Assistant");
+
+          // Auto-classify as driver advance if notes mention advance/salary
+          if (/advance|salary|kharcha|loan/i.test(notes) && type === "EXPENSE") {
+            category = "bittu";
+          }
 
           // If it is a CNG/Fuel expense, we absolutely need a receipt slip!
           if (category === "fuel" && !imageUrl) {
@@ -457,7 +472,7 @@ export async function action({ request }: ActionFunctionArgs) {
               category,
               notes,
               vehicle,
-              senderName: "AI Assistant",
+              senderName,
               approved: false,
               imageUrl: category === "fuel" ? imageUrl : null,
               type,
@@ -1062,21 +1077,54 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     });
 
-    // Mark matching advances as settled
-    await (prisma as any).expense.updateMany({
-      where: {
-        category: "bittu",
-        settled: false,
-        OR: [
-          { senderName: { contains: driverName } },
-          { notes: { contains: driverName } }
-        ]
-      },
-      data: {
-        settled: true,
-        settledAt: new Date(),
+    // Mark matching advances as settled by explicit IDs or driver name
+    const advanceIdsRaw = formData.get("advanceIds")?.toString() || "";
+    let advanceIds: number[] = [];
+    try {
+      if (advanceIdsRaw.startsWith("[")) {
+        advanceIds = JSON.parse(advanceIdsRaw);
+      } else if (advanceIdsRaw) {
+        advanceIds = advanceIdsRaw.split(",").map((s) => parseInt(s.trim())).filter((n) => !isNaN(n));
       }
-    });
+    } catch (e) {
+      console.warn("Failed to parse advanceIds:", e);
+    }
+
+    if (advanceIds.length > 0) {
+      await (prisma as any).expense.updateMany({
+        where: { id: { in: advanceIds } },
+        data: {
+          settled: true,
+          settledAt: new Date(),
+        }
+      });
+    } else {
+      const firstName = driverName.split(/\s+/)[0];
+      await (prisma as any).expense.updateMany({
+        where: {
+          settled: false,
+          OR: [
+            { category: "bittu" },
+            { notes: { contains: "advance", mode: "insensitive" } },
+            { notes: { contains: "salary", mode: "insensitive" } },
+          ],
+          AND: [
+            {
+              OR: [
+                { senderName: { contains: driverName, mode: "insensitive" } },
+                { notes: { contains: driverName, mode: "insensitive" } },
+                { senderName: { contains: firstName, mode: "insensitive" } },
+                { notes: { contains: firstName, mode: "insensitive" } },
+              ]
+            }
+          ]
+        },
+        data: {
+          settled: true,
+          settledAt: new Date(),
+        }
+      });
+    }
 
     // Log the salary payment into Expense ledger
     await (prisma as any).expense.create({
@@ -1796,13 +1844,31 @@ export default function Home() {
       const dailyRate = Math.round(baseSalary / 30);
       const earnedSalary = Math.round((baseSalary / 30) * daysWorked);
 
-      // Find all un-settled advances for this driver
-      const unSettledAdvances = expenses.filter((e: any) => 
-        e.category === "bittu" && 
-        !e.settled && 
-        ((e.senderName && e.senderName.toLowerCase().includes(d.name.toLowerCase())) ||
-         (e.notes && e.notes.toLowerCase().includes(d.name.toLowerCase())))
-      );
+      // Find all un-settled advances for this driver with smart fuzzy & first-name matching
+      const unSettledAdvances = expenses.filter((e: any) => {
+        if (e.settled) return false;
+
+        const isAdvanceCategory = e.category === "bittu" || 
+          /advance|salary|kharcha|loan|uthav/i.test(e.notes || "") ||
+          /advance|salary/i.test(e.category || "");
+
+        if (!isAdvanceCategory) return false;
+
+        const driverFullName = (d.name || "").toLowerCase().trim();
+        const driverFirstName = driverFullName.split(/\s+/)[0]; // e.g. "rahul" from "rahul kumar"
+        const notesLower = (e.notes || "").toLowerCase();
+        const senderLower = (e.senderName || "").toLowerCase();
+        const vehiclePlate = (d.vehicleNumber || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const expVehicle = (e.vehicle || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+        const nameMatch = 
+          (driverFullName && (notesLower.includes(driverFullName) || senderLower.includes(driverFullName))) ||
+          (driverFirstName && driverFirstName.length >= 3 && (notesLower.includes(driverFirstName) || senderLower.includes(driverFirstName)));
+
+        const vehicleMatch = Boolean(vehiclePlate && expVehicle && (vehiclePlate.includes(expVehicle) || expVehicle.includes(vehiclePlate)));
+
+        return nameMatch || vehicleMatch;
+      });
 
       const totalAdvances = unSettledAdvances.reduce((sum: number, a: any) => sum + (a.amount || 0), 0);
       const netPayable = Math.max(0, earnedSalary + bonus - totalAdvances - customDeductions);
@@ -2697,7 +2763,7 @@ export default function Home() {
                                 {manualType === "EXPENSE" ? (
                                   <>
                                     <option value="fuel">⛽ Fuel</option>
-                                    <option value="bittu">👤 Payment to Bittu</option>
+                                    <option value="bittu">👤 Driver Advance / Salary (Bittu, Rahul, etc.)</option>
                                     <option value="service">🔧 Service / Auto-related</option>
                                     <option value="other">📦 Other Expenses</option>
                                   </>
@@ -5586,6 +5652,7 @@ export default function Home() {
                 <input type="hidden" name="bonusAmount" value={settlingDriver.bonus} />
                 <input type="hidden" name="otherDeductions" value={settlingDriver.customDeductions} />
                 <input type="hidden" name="netPaidAmount" value={settlingDriver.netPayable} />
+                <input type="hidden" name="advanceIds" value={JSON.stringify(settlingDriver.unSettledAdvances.map((a: any) => a.id))} />
 
                 <div className="space-y-1">
                   <label className="font-semibold text-neutral-500">Payment Mode</label>
