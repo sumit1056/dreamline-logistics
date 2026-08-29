@@ -924,11 +924,11 @@ export async function action({ request }: ActionFunctionArgs) {
       const [drivers, autos, allUsers, recentExpenses, categoryStats] = await Promise.all([
         prisma.user.findMany({
           where: { role: "DRIVER" },
-          select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true, active: true },
+          select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true, loginEnabled: true },
           orderBy: { name: "asc" }
         }),
         prisma.auto.findMany({
-          select: { id: true, plateNumber: true, modelName: true, ownerName: true, driverPhone: true, status: true },
+          select: { id: true, plateNumber: true, modelName: true, ownerName: true, driverPhone: true },
           orderBy: { plateNumber: "asc" }
         }),
         prisma.user.findMany({
@@ -955,7 +955,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
         === LIVE COMPANY DATABASE SNAPSHOT ===
         1. Registered Drivers (${drivers.length} total):
-        ${JSON.stringify(drivers.map(d => ({ name: d.name, phone: d.phone, monthlySalary: d.salary || 16500, assignedVehicle: d.vehicleNumber || "None", active: d.active })))}
+        ${JSON.stringify(drivers.map(d => ({ name: d.name, phone: d.phone, monthlySalary: d.salary || 16500, assignedVehicle: d.vehicleNumber || "None", loginEnabled: d.loginEnabled })))}
 
         2. Registered Autos (${autos.length} total):
         ${JSON.stringify(autos.map(a => ({ plate: a.plateNumber, model: a.modelName, owner: a.ownerName, driverPhone: a.driverPhone })))}
@@ -6340,8 +6340,6 @@ export default function Home() {
                       {msg.content}
                     </div>
 
-                    {/* Rich Assistant Interactive Card */}
-                    {msg.role === "assistant" && msg.data && (
                     {/* Rich Assistant Interactive Elements */}
                     {msg.role === "assistant" && msg.data && (
                       <div className="space-y-2 pt-1 border-t border-neutral-200 dark:border-white/10">
