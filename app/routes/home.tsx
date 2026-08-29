@@ -245,7 +245,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({
       where: { NOT: { category: "shared_temp" } },
-      orderBy: { timestamp: "desc" }
+      orderBy: { timestamp: "desc" },
+      take: 500,
     }),
     prisma.adminCredential.findMany({
       select: { id: true, username: true, createdAt: true },
@@ -357,18 +358,19 @@ export async function action({ request }: ActionFunctionArgs) {
           Return ONLY a valid, raw, double-quoted JSON array of these objects. Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
         `;
 
-        // Fast Model Failover Chain — switches immediately to fallback models without waiting
+        // Smart Model Failover Chain with 429 rate-limit retry & brief backoff
         const MODEL_CHAIN = [
-          "gemini-2.5-flash",      // Primary: latest 2.5 flash, fastest & most available
+          "gemini-2.0-flash-lite", // Primary: lightest, highest free-tier quota
           "gemini-2.0-flash",      // Fallback 1: stable 2.0 flash
-          "gemini-2.0-flash-lite", // Fallback 2: lightest model, least load
+          "gemini-2.5-flash",      // Fallback 2: latest, but lower free quota
         ];
 
         const requestBody = JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] });
         let response: Response | null = null;
         let lastError = "";
 
-        for (const model of MODEL_CHAIN) {
+        for (let i = 0; i < MODEL_CHAIN.length; i++) {
+          const model = MODEL_CHAIN[i];
           try {
             console.log(`🤖 Trying model: ${model}`);
             const res = await fetch(
@@ -386,23 +388,32 @@ export async function action({ request }: ActionFunctionArgs) {
               break;
             }
 
-            // For client errors (400, 403, etc.) → no point trying other models
+            // For hard client errors (400, 403, etc.) → no point trying other models
             if (res.status === 400 || res.status === 403 || res.status === 401) {
               const errText = await res.text();
               throw new Error(`Gemini API config error: ${errText}`);
             }
 
-            console.warn(`⚡ ${model} returned status ${res.status}. Falling back immediately...`);
+            // Rate limit (429) or server overload (503) → wait briefly then try next model
+            if (res.status === 429 || res.status === 503) {
+              console.warn(`⚡ ${model} rate-limited (${res.status}). Waiting 1.5s then trying next...`);
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+            }
+
+            console.warn(`⚡ ${model} returned status ${res.status}. Falling back...`);
           } catch (err: any) {
             lastError = err.message || String(err);
-            if (err.message?.includes("Gemini API config error")) throw err; // Don't retry config errors
-            console.warn(`⚡ ${model} network error: ${lastError}. Trying next model...`);
+            if (err.message?.includes("Gemini API config error")) throw err;
+            console.warn(`⚡ ${model} error: ${lastError}. Trying next...`);
+            // Brief pause before next attempt
+            if (i < MODEL_CHAIN.length - 1) await new Promise(r => setTimeout(r, 800));
             continue;
           }
         }
 
         if (!response) {
-          throw new Error("⚠️ All Gemini models are currently busy due to high traffic. Please try again in a moment, or use the ✍️ Manual Form below for instant saving!");
+          throw new Error("⚠️ Gemini AI quota temporarily exceeded. Please wait 30 seconds and try again, or use the ✍️ Manual Form tab for instant saving!");
         }
 
         const data = await response.json();
