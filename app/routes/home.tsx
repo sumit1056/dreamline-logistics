@@ -5207,14 +5207,14 @@ export default function Home() {
                     <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-rose-200/80 dark:border-rose-500/20 bg-rose-50/20 dark:bg-rose-500/5 shadow-sm space-y-1">
                       <span className="text-[11px] font-bold text-rose-500 uppercase tracking-wider block">Unsettled Advances</span>
                       <span className="text-xl font-extrabold font-mono text-rose-500">
-                        ₹{driverSalaryReconciliation.reduce((s, r) => s + r.totalAdvances, 0).toLocaleString("en-IN")}
+                        ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.totalAdvances, 0).toLocaleString("en-IN")}
                       </span>
                     </div>
 
                     <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-emerald-200/80 dark:border-emerald-500/20 bg-emerald-50/20 dark:bg-emerald-500/5 shadow-sm space-y-1">
                       <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Est. Net Payable</span>
                       <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
-                        ₹{driverSalaryReconciliation.reduce((s, r) => s + r.netPayable, 0).toLocaleString("en-IN")}
+                        ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.netPayable, 0).toLocaleString("en-IN")}
                       </span>
                     </div>
                   </div>
@@ -5226,7 +5226,7 @@ export default function Home() {
                     </h2>
 
                     <div className="space-y-3">
-                      {driverSalaryReconciliation.map((item) => (
+                      {driverSalaryReconciliation.map((item: any) => (
                         <div
                           key={item.driver.id}
                           className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 transition-all hover:border-[#5D87FF]/40"
