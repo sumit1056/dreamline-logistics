@@ -24,17 +24,19 @@ model User {
 }
 
 model Expense {
-  id         Int      @id @default(autoincrement())
+  id         Int       @id @default(autoincrement())
   amount     Float
-  currency   String   @default("INR")
-  category   String   // 'fuel', 'bittu', 'service', 'other', 'shadowfax', 'rate_change', 'factory', 'other_income'
+  currency   String    @default("INR")
+  category   String    // 'fuel', 'bittu', 'service', 'other', 'shadowfax', 'rate_change', 'factory', 'other_income'
   notes      String
   vehicle    String?
   senderName String
-  timestamp  DateTime @default(now())
-  approved   Boolean  @default(false)
+  timestamp  DateTime  @default(now())
+  approved   Boolean   @default(false)
   imageUrl   String?
-  type       String   @default("EXPENSE") // "EXPENSE", "INCOME"
+  type       String    @default("EXPENSE") // "EXPENSE", "INCOME"
+  settled    Boolean   @default(false)
+  settledAt  DateTime?
 }
 
 model AdminCredential {
@@ -63,6 +65,37 @@ model TemporaryPass {
   isActive    Boolean  @default(true)
   usedCount   Int      @default(0)
   createdAt   DateTime @default(now())
+}
+
+model PendingPayment {
+  id             Int       @id @default(autoincrement())
+  title          String
+  clientName     String
+  totalAmount    Float
+  receivedAmount Float     @default(0)
+  dueDate        DateTime?
+  status         String    @default("PENDING") // "PENDING", "PARTIAL", "PAID"
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model DriverSalarySettlement {
+  id               Int      @id @default(autoincrement())
+  driverName       String
+  driverPhone      String?
+  monthYear        String   // e.g. "2026-08"
+  baseSalary       Float
+  daysWorked       Int      @default(30)
+  earnedSalary     Float
+  advancesDeducted Float    @default(0)
+  bonusAmount      Float    @default(0)
+  otherDeductions  Float    @default(0)
+  netPaidAmount    Float
+  paymentDate      DateTime @default(now())
+  paymentMode      String   @default("CASH") // "CASH", "UPI", "BANK_TRANSFER"
+  notes            String?
+  createdAt        DateTime @default(now())
 }
 
 

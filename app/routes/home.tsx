@@ -241,7 +241,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     expiresAt,
   };
 
-  const [users, expenses, adminCredentials, autos, temporaryPasses] = await Promise.all([
+  const [users, expenses, adminCredentials, autos, temporaryPasses, pendingPayments, salarySettlements] = await Promise.all([
     prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.expense.findMany({
       where: { NOT: { category: "shared_temp" } },
@@ -253,9 +253,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }),
     prisma.auto.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.temporaryPass.findMany({ orderBy: { createdAt: "desc" } }),
+    prisma.pendingPayment.findMany({ orderBy: { createdAt: "desc" } }),
+    prisma.driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } }),
   ]);
 
-  return { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses };
+  return { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses, pendingPayments, salarySettlements };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -265,7 +267,12 @@ export async function action({ request }: ActionFunctionArgs) {
   const actionType = formData.get("_action")?.toString();
 
   const isViewOnly = session.get("permission") === "VIEW_ONLY";
-  const isMutation = ["create_expense", "delete_expense", "create_user", "delete_user", "update_user_password", "create_auto", "delete_auto", "create_temp_pass", "revoke_temp_pass"].includes(actionType || "");
+  const isMutation = [
+    "create_expense", "delete_expense", "create_user", "delete_user",
+    "update_user_password", "create_auto", "delete_auto", "create_temp_pass",
+    "revoke_temp_pass", "create_pending_payment", "collect_pending_payment",
+    "delete_pending_payment", "settle_driver_salary"
+  ].includes(actionType || "");
 
   if (isViewOnly && isMutation) {
     return { error: "Permission Denied: Your temporary access pass is set to View Only. You cannot perform write operations." };
@@ -902,6 +909,163 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true, action: "delete_auto" };
   }
 
+  if (actionType === "create_pending_payment") {
+    const title = formData.get("title")?.toString()?.trim() || "Pending Payment";
+    const clientName = formData.get("clientName")?.toString()?.trim() || "General Client";
+    const totalAmount = parseFloat(formData.get("totalAmount")?.toString() || "0") || 0;
+    const receivedAmount = parseFloat(formData.get("receivedAmount")?.toString() || "0") || 0;
+    const dueDateRaw = formData.get("dueDate")?.toString();
+    const notes = formData.get("notes")?.toString()?.trim() || "";
+
+    if (totalAmount <= 0) {
+      return { error: "Total amount must be greater than 0." };
+    }
+
+    const status = receivedAmount >= totalAmount ? "PAID" : receivedAmount > 0 ? "PARTIAL" : "PENDING";
+    const dueDate = dueDateRaw ? new Date(dueDateRaw) : null;
+
+    const payment = await prisma.pendingPayment.create({
+      data: {
+        title,
+        clientName,
+        totalAmount,
+        receivedAmount,
+        dueDate,
+        status,
+        notes,
+      }
+    });
+
+    if (receivedAmount > 0) {
+      await prisma.expense.create({
+        data: {
+          amount: receivedAmount,
+          category: "other_income",
+          notes: `Initial collection for invoice: ${title} (${clientName})`,
+          senderName: clientName,
+          type: "INCOME",
+          approved: true,
+        }
+      });
+    }
+
+    return { success: true, action: "create_pending_payment", payment };
+  }
+
+  if (actionType === "collect_pending_payment") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const amountToCollect = parseFloat(formData.get("amountToCollect")?.toString() || "0") || 0;
+    const notes = formData.get("notes")?.toString()?.trim() || "";
+
+    if (id <= 0 || amountToCollect <= 0) {
+      return { error: "Invalid payment collection amount." };
+    }
+
+    const current = await prisma.pendingPayment.findUnique({ where: { id } });
+    if (!current) {
+      return { error: "Pending payment entry not found." };
+    }
+
+    const newReceived = current.receivedAmount + amountToCollect;
+    const newStatus = newReceived >= current.totalAmount ? "PAID" : "PARTIAL";
+
+    const updated = await prisma.pendingPayment.update({
+      where: { id },
+      data: {
+        receivedAmount: newReceived,
+        status: newStatus,
+        notes: notes ? (current.notes ? `${current.notes}\n${notes}` : notes) : current.notes,
+      }
+    });
+
+    await prisma.expense.create({
+      data: {
+        amount: amountToCollect,
+        category: "other_income",
+        notes: `Collected payment for ${current.title} (${current.clientName})${notes ? ` - ${notes}` : ''}`,
+        senderName: current.clientName,
+        type: "INCOME",
+        approved: true,
+      }
+    });
+
+    return { success: true, action: "collect_pending_payment", payment: updated };
+  }
+
+  if (actionType === "delete_pending_payment") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    await prisma.pendingPayment.delete({ where: { id } });
+    return { success: true, action: "delete_pending_payment" };
+  }
+
+  if (actionType === "settle_driver_salary") {
+    const driverName = formData.get("driverName")?.toString()?.trim() || "";
+    const driverPhone = formData.get("driverPhone")?.toString()?.trim() || "";
+    const monthYear = formData.get("monthYear")?.toString()?.trim() || new Date().toISOString().substring(0, 7);
+    const baseSalary = parseFloat(formData.get("baseSalary")?.toString() || "0") || 0;
+    const daysWorked = parseInt(formData.get("daysWorked")?.toString() || "30") || 30;
+    const earnedSalary = parseFloat(formData.get("earnedSalary")?.toString() || "0") || 0;
+    const advancesDeducted = parseFloat(formData.get("advancesDeducted")?.toString() || "0") || 0;
+    const bonusAmount = parseFloat(formData.get("bonusAmount")?.toString() || "0") || 0;
+    const otherDeductions = parseFloat(formData.get("otherDeductions")?.toString() || "0") || 0;
+    const netPaidAmount = parseFloat(formData.get("netPaidAmount")?.toString() || "0") || 0;
+    const paymentMode = formData.get("paymentMode")?.toString() || "CASH";
+    const notes = formData.get("notes")?.toString()?.trim() || "";
+
+    if (!driverName || netPaidAmount < 0) {
+      return { error: "Invalid salary calculation or driver name." };
+    }
+
+    const settlement = await prisma.driverSalarySettlement.create({
+      data: {
+        driverName,
+        driverPhone,
+        monthYear,
+        baseSalary,
+        daysWorked,
+        earnedSalary,
+        advancesDeducted,
+        bonusAmount,
+        otherDeductions,
+        netPaidAmount,
+        paymentMode,
+        notes,
+      }
+    });
+
+    // Mark matching advances as settled
+    await prisma.expense.updateMany({
+      where: {
+        category: "bittu",
+        settled: false,
+        OR: [
+          { senderName: { contains: driverName } },
+          { notes: { contains: driverName } }
+        ]
+      },
+      data: {
+        settled: true,
+        settledAt: new Date(),
+      }
+    });
+
+    // Log the salary payment into Expense ledger
+    await prisma.expense.create({
+      data: {
+        amount: netPaidAmount,
+        category: "bittu",
+        notes: `Salary for ${monthYear} (${daysWorked} days) to ${driverName}. Base: ₹${baseSalary}, Advances Deducted: ₹${advancesDeducted}${bonusAmount > 0 ? `, Bonus: ₹${bonusAmount}` : ''}${notes ? ` (${notes})` : ''}`,
+        senderName: driverName,
+        type: "EXPENSE",
+        approved: true,
+        settled: true,
+        settledAt: new Date(),
+      }
+    });
+
+    return { success: true, action: "settle_driver_salary", settlement };
+  }
+
   if (actionType === "ask_ai_financial_query") {
     const query = formData.get("query")?.toString()?.trim() || "";
     const historyRaw = formData.get("chatHistory")?.toString() || "[]";
@@ -921,7 +1085,7 @@ export async function action({ request }: ActionFunctionArgs) {
       }
 
       // Fetch live company database context in parallel
-      const [drivers, autos, allUsers, recentExpenses, categoryStats] = await Promise.all([
+      const [drivers, autos, allUsers, recentExpenses, categoryStats, pendingList, settlementsList] = await Promise.all([
         prisma.user.findMany({
           where: { role: "DRIVER" },
           select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true, loginEnabled: true },
@@ -937,12 +1101,20 @@ export async function action({ request }: ActionFunctionArgs) {
         prisma.expense.findMany({
           take: 60,
           orderBy: { timestamp: "desc" },
-          select: { id: true, amount: true, category: true, type: true, timestamp: true, notes: true, vehicle: true, senderName: true }
+          select: { id: true, amount: true, category: true, type: true, timestamp: true, notes: true, vehicle: true, senderName: true, settled: true }
         }),
         prisma.expense.groupBy({
           by: ["category", "type"],
           _sum: { amount: true },
           _count: { id: true }
+        }),
+        prisma.pendingPayment.findMany({
+          orderBy: { createdAt: "desc" },
+          take: 20
+        }),
+        prisma.driverSalarySettlement.findMany({
+          orderBy: { paymentDate: "desc" },
+          take: 15
         })
       ]);
 
@@ -960,14 +1132,20 @@ export async function action({ request }: ActionFunctionArgs) {
         2. Registered Autos (${autos.length} total):
         ${JSON.stringify(autos.map(a => ({ plate: a.plateNumber, model: a.modelName, owner: a.ownerName, driverPhone: a.driverPhone })))}
 
-        3. All Team Members (${allUsers.length} total):
+        3. Pending Payments & Receivables (${pendingList.length} total):
+        ${JSON.stringify(pendingList.map(p => ({ title: p.title, client: p.clientName, total: p.totalAmount, received: p.receivedAmount, pending: p.totalAmount - p.receivedAmount, due: p.dueDate, status: p.status })))}
+
+        4. Recent Driver Salary Settlements:
+        ${JSON.stringify(settlementsList.map(s => ({ driver: s.driverName, month: s.monthYear, daysWorked: s.daysWorked, netPaid: s.netPaidAmount, advancesDeducted: s.advancesDeducted, date: s.paymentDate })))}
+
+        5. All Team Members (${allUsers.length} total):
         ${JSON.stringify(allUsers.map(u => ({ name: u.name, role: u.role, phone: u.phone, salary: u.salary })))}
 
-        4. Category Totals across All Time:
+        6. Category Totals across All Time:
         ${JSON.stringify(categoryStats.map(c => ({ category: c.category, type: c.type, totalAmount: c._sum.amount, count: c._count.id })))}
 
-        5. Recent 60 Expense & Income Transactions (sorted newest first):
-        ${JSON.stringify(recentExpenses.map(e => ({ amount: e.amount, cat: e.category, type: e.type, date: e.timestamp.toISOString().split("T")[0], notes: e.notes, vehicle: e.vehicle, sender: e.senderName })))}
+        7. Recent 60 Expense & Income Transactions (sorted newest first):
+        ${JSON.stringify(recentExpenses.map(e => ({ amount: e.amount, cat: e.category, type: e.type, date: e.timestamp.toISOString().split("T")[0], notes: e.notes, vehicle: e.vehicle, sender: e.senderName, settled: e.settled })))}
 
         === CONVERSATION HISTORY ===
         ${chatHistory.slice(-5).map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}
@@ -1163,11 +1341,28 @@ export default function Home() {
   };
 
   // Tab state & Dashboard workflow controls
-  const [activeTab, setActiveTab] = useState<"expenses" | "users" | "orders">("expenses");
+  const [activeTab, setActiveTab] = useState<"expenses" | "users" | "pending_dues" | "driver_salaries" | "orders">("expenses");
   const [userSubTab, setUserSubTab] = useState<"drivers" | "autos" | "admins">("drivers");
   const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger">("entry");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
   const [driverPassword, setDriverPassword] = useState("");
+
+  // Pending Payments & Receivables State
+  const [showAddPendingModal, setShowAddPendingModal] = useState(false);
+  const [collectingPayment, setCollectingPayment] = useState<any | null>(null);
+  const [collectAmount, setCollectAmount] = useState("");
+  const [collectNotes, setCollectNotes] = useState("");
+  const [pendingFilterStatus, setPendingFilterStatus] = useState<"ALL" | "PENDING" | "PARTIAL" | "PAID">("ALL");
+
+  // Driver Salaries & Advance Settlement State
+  const [salaryMonthYear, setSalaryMonthYear] = useState<string>(new Date().toISOString().substring(0, 7));
+  const [driverDaysWorkedMap, setDriverDaysWorkedMap] = useState<Record<string, number>>({});
+  const [driverBonusMap, setDriverBonusMap] = useState<Record<string, number>>({});
+  const [driverDeductionMap, setDriverDeductionMap] = useState<Record<string, number>>({});
+  const [settlingDriver, setSettlingDriver] = useState<any | null>(null);
+  const [selectedSlipData, setSelectedSlipData] = useState<any | null>(null);
+  const [viewingDriverAdvances, setViewingDriverAdvances] = useState<any | null>(null);
+  const [copiedSlipText, setCopiedSlipText] = useState(false);
 
   const generateRandomPassword = () => {
     const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%";
@@ -1523,7 +1718,7 @@ export default function Home() {
   };
 
   // Automated state resets upon switching tabs
-  const switchTab = (tab: "expenses" | "orders" | "users") => {
+  const switchTab = (tab: "expenses" | "orders" | "users" | "pending_dues" | "driver_salaries") => {
     setActiveTab(tab);
     setShowExpenseDashboard(false);
     setShowDeliveryDashboard(false);
@@ -1534,6 +1729,88 @@ export default function Home() {
     setSelectedSlipImage(null);
     setExpenseCategoryFilter("ALL");
     setEntityFilter("ALL");
+  };
+
+  // Pending Dues Aggregates
+  const pendingDuesSummary = useMemo(() => {
+    let totalBilled = 0;
+    let totalCollected = 0;
+    let totalPending = 0;
+    let overdueCount = 0;
+    const now = new Date();
+
+    pendingPayments.forEach((p: any) => {
+      totalBilled += p.totalAmount || 0;
+      totalCollected += p.receivedAmount || 0;
+      const pending = Math.max(0, (p.totalAmount || 0) - (p.receivedAmount || 0));
+      totalPending += pending;
+      if (p.dueDate && new Date(p.dueDate) < now && p.status !== "PAID") {
+        overdueCount++;
+      }
+    });
+
+    return { totalBilled, totalCollected, totalPending, overdueCount };
+  }, [pendingPayments]);
+
+  const filteredPendingPayments = useMemo(() => {
+    if (pendingFilterStatus === "ALL") return pendingPayments;
+    return pendingPayments.filter((p: any) => p.status === pendingFilterStatus);
+  }, [pendingPayments, pendingFilterStatus]);
+
+  // Driver Salary Hub Live Reconciliation
+  const driverSalaryReconciliation = useMemo(() => {
+    return drivers.map((d: any) => {
+      const baseSalary = d.salary || 16500;
+      const daysWorked = driverDaysWorkedMap[d.id] !== undefined ? driverDaysWorkedMap[d.id] : 30;
+      const bonus = driverBonusMap[d.id] || 0;
+      const customDeductions = driverDeductionMap[d.id] || 0;
+      const dailyRate = Math.round(baseSalary / 30);
+      const earnedSalary = Math.round((baseSalary / 30) * daysWorked);
+
+      // Find all un-settled advances for this driver
+      const unSettledAdvances = expenses.filter((e: any) => 
+        e.category === "bittu" && 
+        !e.settled && 
+        ((e.senderName && e.senderName.toLowerCase().includes(d.name.toLowerCase())) ||
+         (e.notes && e.notes.toLowerCase().includes(d.name.toLowerCase())))
+      );
+
+      const totalAdvances = unSettledAdvances.reduce((sum: number, a: any) => sum + (a.amount || 0), 0);
+      const netPayable = Math.max(0, earnedSalary + bonus - totalAdvances - customDeductions);
+
+      return {
+        driver: d,
+        baseSalary,
+        daysWorked,
+        dailyRate,
+        earnedSalary,
+        unSettledAdvances,
+        totalAdvances,
+        bonus,
+        customDeductions,
+        netPayable,
+      };
+    });
+  }, [drivers, expenses, driverDaysWorkedMap, driverBonusMap, driverDeductionMap]);
+
+  const generateWhatsAppSlipText = (item: any) => {
+    return `🧾 *SALARY SLIP - DREAMLINE LOGISTICS* 🧾\n` +
+      `---------------------------------\n` +
+      `👤 *Driver Name:* ${item.driver.name}\n` +
+      `📅 *Month:* ${salaryMonthYear}\n` +
+      `🚗 *Vehicle:* ${item.driver.vehicleNumber || 'General'}\n` +
+      `---------------------------------\n` +
+      `💵 *Base Monthly Salary:* ₹${item.baseSalary.toLocaleString('en-IN')}\n` +
+      `⏱️ *Days Worked:* ${item.daysWorked} days (₹${item.dailyRate}/day)\n` +
+      `📈 *Earned Salary:* ₹${item.earnedSalary.toLocaleString('en-IN')}\n` +
+      (item.bonus > 0 ? `✨ *Bonus Added:* +₹${item.bonus.toLocaleString('en-IN')}\n` : '') +
+      (item.totalAdvances > 0 ? `⚠️ *Advances Deducted:* -₹${item.totalAdvances.toLocaleString('en-IN')} (${item.unSettledAdvances.length} entries)\n` : '') +
+      (item.customDeductions > 0 ? `📉 *Other Deductions:* -₹${item.customDeductions.toLocaleString('en-IN')}\n` : '') +
+      `---------------------------------\n` +
+      `💰 *NET PAYABLE SALARY:* *₹${item.netPayable.toLocaleString('en-IN')}*\n` +
+      `---------------------------------\n` +
+      `Status: ✅ Settled & Approved\n` +
+      `Thank you for your dedicated service! 🚚`;
   };
 
   // AI Spotlight Multi-Turn Chat State
@@ -1892,6 +2169,43 @@ export default function Home() {
             <span>Expenses Tracking</span>
           </button>
 
+
+          {/* Pending Dues & Receivables Tab */}
+          {loggedInUser?.role !== "DRIVER" && (
+            <button
+              onClick={() => switchTab("pending_dues")}
+              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center justify-between px-3.5 py-2.5 mx-2 rounded-md transition-all ${
+                activeTab === "pending_dues"
+                  ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
+                  : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <span className="text-sm">🟡</span>
+                <span>Pending Dues</span>
+              </div>
+              {pendingDuesSummary.totalPending > 0 && (
+                <span className="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded">
+                  ₹{Math.round(pendingDuesSummary.totalPending / 1000)}k
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Driver Salaries & Advances Hub Tab */}
+          {loggedInUser?.role !== "DRIVER" && (
+            <button
+              onClick={() => switchTab("driver_salaries")}
+              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
+                activeTab === "driver_salaries"
+                  ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
+                  : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
+              }`}
+            >
+              <span className="text-sm">💵</span>
+              <span>Driver Salaries Hub</span>
+            </button>
+          )}
 
           {loggedInUser?.role !== "DRIVER" && (
             <button
@@ -4626,10 +4940,816 @@ export default function Home() {
                         </div>
                       )}
                     </div>
+              )}
+
+              {/* ========================================================================= */}
+              {/* PENDING DUES & RECEIVABLES TAB VIEW */}
+              {/* ========================================================================= */}
+              {activeTab === "pending_dues" && (
+                <div className="animate-fade-in space-y-6">
+                  {/* Header & Add Button */}
+                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+                    <div>
+                      <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
+                        <span>🟡</span>
+                        <span>Pending Dues & Receivables</span>
+                      </h1>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                        Track customer/factory partial payments, due invoices, and collection reminders.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddPendingModal(true)}
+                        className="notion-btn text-xs px-3.5 py-2 font-semibold flex items-center gap-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md shadow-sm transition-all cursor-pointer"
+                      >
+                        <span>➕</span>
+                        <span>Add Pending Due / Invoice</span>
+                      </button>
+                    </div>
                   </div>
+
+                  {/* Summary Metric Cards */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Total Invoiced</span>
+                      <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                        ₹{pendingDuesSummary.totalBilled.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Collected So Far</span>
+                      <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                        ₹{pendingDuesSummary.totalCollected.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-amber-200/80 dark:border-amber-500/20 bg-amber-50/20 dark:bg-amber-500/5 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">Total Outstanding Pending</span>
+                      <span className="text-xl font-extrabold font-mono text-amber-600 dark:text-amber-400">
+                        ₹{pendingDuesSummary.totalPending.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-rose-500 uppercase tracking-wider block">Overdue Invoices</span>
+                      <span className="text-xl font-extrabold font-mono text-rose-500">
+                        {pendingDuesSummary.overdueCount}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Status Filter Tabs */}
+                  <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-lg w-fit border border-neutral-200/60 dark:border-slate-700/50">
+                    {(["ALL", "PENDING", "PARTIAL", "PAID"] as const).map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => setPendingFilterStatus(st)}
+                        className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
+                          pendingFilterStatus === st
+                            ? "bg-white dark:bg-[#1e293b] text-neutral-900 dark:text-white shadow-sm"
+                            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                        }`}
+                      >
+                        {st === "ALL" ? "All Dues" : st.charAt(0) + st.slice(1).toLowerCase()}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Invoices List / Table */}
+                  {filteredPendingPayments.length === 0 ? (
+                    <div className="p-12 text-center border border-dashed border-neutral-200 dark:border-slate-800 rounded-2xl bg-white/40 dark:bg-slate-900/20 space-y-3">
+                      <span className="text-3xl block">🎉</span>
+                      <p className="text-sm font-semibold text-neutral-600 dark:text-neutral-300">
+                        No pending dues found in this category!
+                      </p>
+                      <p className="text-xs text-neutral-400">
+                        Click "Add Pending Due / Invoice" above to record any client receivable or partial payment.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {filteredPendingPayments.map((p: any) => {
+                        const remaining = Math.max(0, p.totalAmount - p.receivedAmount);
+                        const percent = Math.min(100, Math.round((p.receivedAmount / p.totalAmount) * 100));
+                        const isOverdue = p.dueDate && new Date(p.dueDate) < new Date() && p.status !== "PAID";
+
+                        return (
+                          <div
+                            key={p.id}
+                            className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 hover:shadow-md transition-all flex flex-col justify-between"
+                          >
+                            <div className="space-y-2.5">
+                              <div className="flex justify-between items-start gap-2">
+                                <div>
+                                  <span className="text-[10px] font-bold uppercase tracking-wider font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-2 py-0.5 rounded">
+                                    {p.clientName}
+                                  </span>
+                                  <h3 className="text-base font-bold text-neutral-900 dark:text-white mt-1">
+                                    {p.title}
+                                  </h3>
+                                </div>
+                                <span
+                                  className={`text-[10px] font-extrabold uppercase font-mono px-2.5 py-1 rounded-full border ${
+                                    p.status === "PAID"
+                                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                                      : p.status === "PARTIAL"
+                                      ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
+                                      : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                                  }`}
+                                >
+                                  {p.status}
+                                </span>
+                              </div>
+
+                              {p.notes && (
+                                <p className="text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
+                                  {p.notes}
+                                </p>
+                              )}
+
+                              {/* Progress bar */}
+                              <div className="space-y-1.5 pt-1">
+                                <div className="flex justify-between text-xs font-mono">
+                                  <span className="text-slate-400">
+                                    Received: <strong className="text-emerald-600 dark:text-emerald-400">₹{p.receivedAmount.toLocaleString("en-IN")}</strong>
+                                  </span>
+                                  <span className="text-slate-400">
+                                    Total: <strong>₹{p.totalAmount.toLocaleString("en-IN")}</strong>
+                                  </span>
+                                </div>
+                                <div className="w-full h-2 rounded-full bg-neutral-100 dark:bg-slate-800 overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full transition-all ${
+                                      p.status === "PAID" ? "bg-emerald-500" : "bg-[#5D87FF]"
+                                    }`}
+                                    style={{ width: `${percent}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Card Footer: Due Date & Actions */}
+                            <div className="pt-3 border-t border-neutral-100 dark:border-slate-800/80 flex justify-between items-center text-xs">
+                              <div className="flex items-center gap-1.5">
+                                {p.dueDate ? (
+                                  <span
+                                    className={`text-[11px] font-medium font-mono ${
+                                      isOverdue
+                                        ? "text-rose-500 font-bold"
+                                        : "text-neutral-500 dark:text-neutral-400"
+                                    }`}
+                                  >
+                                    📅 Due: {new Date(p.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                                    {isOverdue && " ⚠️ Overdue"}
+                                  </span>
+                                ) : (
+                                  <span className="text-[11px] text-neutral-400 italic">No Due Date</span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                {p.status !== "PAID" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setCollectingPayment(p);
+                                      setCollectAmount(remaining.toString());
+                                      setCollectNotes("");
+                                    }}
+                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1"
+                                  >
+                                    <span>💵</span>
+                                    <span>Collect (₹{remaining.toLocaleString("en-IN")})</span>
+                                  </button>
+                                )}
+
+                                <Form
+                                  method="post"
+                                  onSubmit={(e) => {
+                                    if (!confirm(`Are you sure you want to delete "${p.title}"?`)) {
+                                      e.preventDefault();
+                                    }
+                                  }}
+                                >
+                                  <input type="hidden" name="_action" value="delete_pending_payment" />
+                                  <input type="hidden" name="id" value={p.id} />
+                                  <button
+                                    type="submit"
+                                    className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-all cursor-pointer"
+                                    title="Delete invoice"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  </button>
+                                </Form>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ========================================================================= */}
+              {/* DRIVER SALARIES & ADVANCES HUB TAB VIEW */}
+              {/* ========================================================================= */}
+              {activeTab === "driver_salaries" && (
+                <div className="animate-fade-in space-y-6">
+                  {/* Header & Month Selector */}
+                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+                    <div>
+                      <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
+                        <span>💵</span>
+                        <span>Driver Salaries & Advance Settlement Hub</span>
+                      </h1>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                        Calculate exact working day salary, auto-deduct cash advances taken during the month, settle with 1-click, and send WhatsApp slips!
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-neutral-500">Settlement Month:</span>
+                      <input
+                        type="month"
+                        value={salaryMonthYear}
+                        onChange={(e) => setSalaryMonthYear(e.target.value)}
+                        className="notion-input px-3 py-1.5 text-xs font-bold rounded-lg border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#1e293b] text-neutral-800 dark:text-white outline-none cursor-pointer font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Summary Metric Cards */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Active Drivers</span>
+                      <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                        {drivers.length}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Base Salary Commitment</span>
+                      <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                        ₹{drivers.reduce((s: number, d: any) => s + (d.salary || 16500), 0).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-rose-200/80 dark:border-rose-500/20 bg-rose-50/20 dark:bg-rose-500/5 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-rose-500 uppercase tracking-wider block">Unsettled Advances</span>
+                      <span className="text-xl font-extrabold font-mono text-rose-500">
+                        ₹{driverSalaryReconciliation.reduce((s, r) => s + r.totalAdvances, 0).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-emerald-200/80 dark:border-emerald-500/20 bg-emerald-50/20 dark:bg-emerald-500/5 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Est. Net Payable</span>
+                      <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                        ₹{driverSalaryReconciliation.reduce((s, r) => s + r.netPayable, 0).toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Driver Reconciliation Interactive Grid */}
+                  <div className="space-y-4">
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
+                      Live Month-End Driver Payout Breakdown
+                    </h2>
+
+                    <div className="space-y-3">
+                      {driverSalaryReconciliation.map((item) => (
+                        <div
+                          key={item.driver.id}
+                          className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 transition-all hover:border-[#5D87FF]/40"
+                        >
+                          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                            {/* Driver Info */}
+                            <div className="flex items-center gap-3.5">
+                              <div className="w-11 h-11 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-extrabold text-base flex items-center justify-center border border-[#5D87FF]/20">
+                                {item.driver.name.charAt(0)}
+                              </div>
+                              <div>
+                                <h3 className="text-base font-bold text-neutral-900 dark:text-white flex items-center gap-2">
+                                  <span>{item.driver.name}</span>
+                                  {item.driver.vehicleNumber && (
+                                    <span className="text-[10px] font-mono bg-neutral-100 dark:bg-slate-800 text-neutral-600 dark:text-slate-300 px-2 py-0.5 rounded font-bold">
+                                      🛺 {item.driver.vehicleNumber}
+                                    </span>
+                                  )}
+                                </h3>
+                                <span className="text-xs text-neutral-400 font-mono">
+                                  📞 {item.driver.phone} • Base: ₹{item.baseSalary.toLocaleString("en-IN")}/mo (₹{item.dailyRate}/day)
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Working Days & Bonus Adjusters */}
+                            <div className="flex flex-wrap items-center gap-3 text-xs">
+                              {/* Days Worked */}
+                              <div className="flex items-center gap-1.5 bg-neutral-50 dark:bg-slate-900/60 p-1.5 rounded-xl border border-neutral-200/70 dark:border-slate-800">
+                                <span className="text-neutral-500 font-medium pl-1">Days:</span>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="31"
+                                  value={item.daysWorked}
+                                  onChange={(e) => {
+                                    const val = Math.min(31, Math.max(0, parseInt(e.target.value) || 0));
+                                    setDriverDaysWorkedMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                                  }}
+                                  className="w-12 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 rounded-md py-0.5 outline-none"
+                                />
+                                <span className="text-[10px] text-slate-400 pr-1">(= ₹{item.earnedSalary.toLocaleString("en-IN")})</span>
+                              </div>
+
+                              {/* Bonus */}
+                              <div className="flex items-center gap-1 bg-emerald-500/5 p-1.5 rounded-xl border border-emerald-500/20">
+                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold pl-1">+Bonus:</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="0"
+                                  value={item.bonus || ""}
+                                  onChange={(e) => {
+                                    const val = Math.max(0, parseFloat(e.target.value) || 0);
+                                    setDriverBonusMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                                  }}
+                                  className="w-16 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-emerald-500/30 rounded-md py-0.5 outline-none text-emerald-600 dark:text-emerald-400"
+                                />
+                              </div>
+
+                              {/* Un-deducted Advances */}
+                              <div className="flex items-center gap-1.5 bg-rose-500/5 p-1.5 rounded-xl border border-rose-500/20">
+                                <span className="text-rose-500 font-semibold pl-1">Advances:</span>
+                                <button
+                                  type="button"
+                                  onClick={() => setViewingDriverAdvances(item)}
+                                  className="font-bold font-mono text-rose-500 hover:underline cursor-pointer flex items-center gap-1"
+                                  title="Click to view all advances"
+                                >
+                                  <span>-₹{item.totalAdvances.toLocaleString("en-IN")}</span>
+                                  <span className="text-[9px] bg-rose-500/20 px-1 py-0.2 rounded font-mono">
+                                    {item.unSettledAdvances.length} slips 👁️
+                                  </span>
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Payout Calculation Bar & Actions */}
+                          <div className="pt-3 border-t border-neutral-100 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">
+                                Net Payable Payout:
+                              </span>
+                              <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                                ₹{item.netPayable.toLocaleString("en-IN")}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              {/* WhatsApp Slip Button */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedSlipData(item);
+                                  setCopiedSlipText(false);
+                                }}
+                                className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                              >
+                                <span>📱</span>
+                                <span>WhatsApp Slip</span>
+                              </button>
+
+                              {/* Settle & Pay Button */}
+                              <button
+                                type="button"
+                                onClick={() => setSettlingDriver(item)}
+                                className="px-3.5 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                              >
+                                <span>💸</span>
+                                <span>Settle & Pay Salary</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Past Settlements History */}
+                  {salarySettlements.length > 0 && (
+                    <div className="space-y-3 pt-6 border-t border-neutral-200 dark:border-slate-800">
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300 flex items-center gap-2">
+                        <span>📜</span>
+                        <span>Recent Salary Settlement Vouchers ({salarySettlements.length})</span>
+                      </h3>
+
+                      <div className="rounded-2xl border border-neutral-200/80 dark:border-slate-800 bg-white dark:bg-[#1e293b] overflow-hidden shadow-sm">
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead className="bg-neutral-50 dark:bg-slate-800/80 text-neutral-500 uppercase tracking-wider border-b border-neutral-200/80 dark:border-slate-800 font-mono">
+                              <tr>
+                                <th className="p-3">Date</th>
+                                <th className="p-3">Month</th>
+                                <th className="p-3">Driver Name</th>
+                                <th className="p-3">Days Worked</th>
+                                <th className="p-3">Advances Deducted</th>
+                                <th className="p-3">Net Paid</th>
+                                <th className="p-3">Mode</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-neutral-100 dark:divide-slate-800/60 font-medium text-neutral-700 dark:text-neutral-300">
+                              {salarySettlements.map((s: any) => (
+                                <tr key={s.id} className="hover:bg-neutral-50/50 dark:hover:bg-slate-800/40">
+                                  <td className="p-3 font-mono text-neutral-400">
+                                    {new Date(s.paymentDate).toLocaleDateString()}
+                                  </td>
+                                  <td className="p-3 font-mono font-bold text-[#5D87FF]">{s.monthYear}</td>
+                                  <td className="p-3 font-bold text-neutral-900 dark:text-white">{s.driverName}</td>
+                                  <td className="p-3 font-mono">{s.daysWorked} days</td>
+                                  <td className="p-3 font-mono text-rose-500">-₹{s.advancesDeducted.toLocaleString("en-IN")}</td>
+                                  <td className="p-3 font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                                    ₹{s.netPaidAmount.toLocaleString("en-IN")}
+                                  </td>
+                                  <td className="p-3 font-mono text-[10px] uppercase font-bold text-slate-400">{s.paymentMode}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
         </div>
+
+        {/* ========================================================================= */}
+        {/* MODAL: ADD PENDING DUE / INVOICE */}
+        {/* ========================================================================= */}
+        {showAddPendingModal && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setShowAddPendingModal(false)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <h3 className="text-base font-bold flex items-center gap-2">
+                  <span>🟡</span>
+                  <span>Add Pending Due / Receivable</span>
+                </h3>
+                <button type="button" onClick={() => setShowAddPendingModal(false)} className="text-neutral-400 hover:text-neutral-600">✕</button>
+              </div>
+
+              <Form method="post" onSubmit={() => setShowAddPendingModal(false)} className="space-y-3.5 text-xs">
+                <input type="hidden" name="_action" value="create_pending_payment" />
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Invoice / Due Title</label>
+                  <input
+                    type="text"
+                    name="title"
+                    required
+                    placeholder="e.g. Factory Logistics August Billing"
+                    className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Client / Factory / Vendor Name</label>
+                  <input
+                    type="text"
+                    name="clientName"
+                    required
+                    placeholder="e.g. Factory A / Shadowfax Vendor"
+                    className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="font-semibold text-neutral-500">Total Billed (₹)</label>
+                    <input
+                      type="number"
+                      name="totalAmount"
+                      required
+                      min="1"
+                      step="any"
+                      placeholder="50000"
+                      className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-sm"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="font-semibold text-neutral-500">Received Today (₹)</label>
+                    <input
+                      type="number"
+                      name="receivedAmount"
+                      min="0"
+                      step="any"
+                      placeholder="0"
+                      className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-sm text-emerald-600"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Due Date (Optional Reminder)</label>
+                  <input
+                    type="date"
+                    name="dueDate"
+                    className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Notes / Remarks</label>
+                  <textarea
+                    name="notes"
+                    rows={2}
+                    placeholder="Invoice breakdown or payment terms..."
+                    className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none"
+                  />
+                </div>
+
+                <div className="pt-3 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddPendingModal(false)}
+                    className="flex-1 py-2 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2 rounded-xl bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold shadow-sm"
+                  >
+                    Save Pending Due
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL: COLLECT PAYMENT */}
+        {/* ========================================================================= */}
+        {collectingPayment && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setCollectingPayment(null)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-sm p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <h3 className="text-base font-bold flex items-center gap-2">
+                  <span>💵</span>
+                  <span>Collect Payment</span>
+                </h3>
+                <button type="button" onClick={() => setCollectingPayment(null)} className="text-neutral-400 hover:text-neutral-600">✕</button>
+              </div>
+
+              <div className="p-3 bg-neutral-50 dark:bg-slate-900/50 rounded-xl space-y-1 text-xs">
+                <div className="font-bold text-neutral-900 dark:text-white">{collectingPayment.title}</div>
+                <div className="text-slate-400">Client: {collectingPayment.clientName}</div>
+                <div className="text-amber-600 dark:text-amber-400 font-mono font-bold">
+                  Remaining Due: ₹{(collectingPayment.totalAmount - collectingPayment.receivedAmount).toLocaleString("en-IN")}
+                </div>
+              </div>
+
+              <Form method="post" onSubmit={() => setCollectingPayment(null)} className="space-y-3 text-xs">
+                <input type="hidden" name="_action" value="collect_pending_payment" />
+                <input type="hidden" name="id" value={collectingPayment.id} />
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Amount to Collect (₹)</label>
+                  <input
+                    type="number"
+                    name="amountToCollect"
+                    required
+                    min="1"
+                    step="any"
+                    value={collectAmount}
+                    onChange={(e) => setCollectAmount(e.target.value)}
+                    className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-emerald-600 font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Collection Notes (Optional)</label>
+                  <input
+                    type="text"
+                    name="notes"
+                    value={collectNotes}
+                    onChange={(e) => setCollectNotes(e.target.value)}
+                    placeholder="e.g. Paid via UPI / Bank Transfer"
+                    className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none"
+                  />
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCollectingPayment(null)}
+                    className="flex-1 py-2 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm"
+                  >
+                    Confirm Collection
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL: VIEW DRIVER ADVANCE SLIPS */}
+        {/* ========================================================================= */}
+        {viewingDriverAdvances && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setViewingDriverAdvances(null)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <div>
+                  <h3 className="text-base font-bold flex items-center gap-2 text-rose-500">
+                    <span>⚠️</span>
+                    <span>Advance Slips: {viewingDriverAdvances.driver.name}</span>
+                  </h3>
+                  <span className="text-xs text-neutral-400 font-mono">
+                    Total: ₹{viewingDriverAdvances.totalAdvances.toLocaleString("en-IN")} ({viewingDriverAdvances.unSettledAdvances.length} entries)
+                  </span>
+                </div>
+                <button type="button" onClick={() => setViewingDriverAdvances(null)} className="text-neutral-400 hover:text-neutral-600">✕</button>
+              </div>
+
+              <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                {viewingDriverAdvances.unSettledAdvances.map((adv: any) => (
+                  <div key={adv.id} className="p-3 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 flex justify-between items-center text-xs">
+                    <div>
+                      <div className="font-bold text-neutral-900 dark:text-white">
+                        ₹{adv.amount.toLocaleString("en-IN")}
+                      </div>
+                      <div className="text-neutral-400 text-[11px] font-sans">
+                        {adv.notes || "Advance payment"}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {new Date(adv.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => setViewingDriverAdvances(null)}
+                  className="w-full py-2 bg-neutral-100 dark:bg-slate-800 font-bold rounded-xl text-xs"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL: CONFIRM SALARY SETTLEMENT */}
+        {/* ========================================================================= */}
+        {settlingDriver && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setSettlingDriver(null)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <div>
+                  <h3 className="text-base font-bold flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                    <span>💸</span>
+                    <span>Confirm Salary Payout</span>
+                  </h3>
+                  <span className="text-xs text-neutral-400">
+                    {settlingDriver.driver.name} • {salaryMonthYear}
+                  </span>
+                </div>
+                <button type="button" onClick={() => setSettlingDriver(null)} className="text-neutral-400 hover:text-neutral-600">✕</button>
+              </div>
+
+              {/* Breakdown */}
+              <div className="p-4 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Days Worked:</span>
+                  <span className="font-mono font-bold">{settlingDriver.daysWorked} days</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Earned Base Pay:</span>
+                  <span className="font-mono font-bold">₹{settlingDriver.earnedSalary.toLocaleString("en-IN")}</span>
+                </div>
+                {settlingDriver.bonus > 0 && (
+                  <div className="flex justify-between text-emerald-500 font-bold">
+                    <span>Bonus:</span>
+                    <span className="font-mono">+₹{settlingDriver.bonus.toLocaleString("en-IN")}</span>
+                  </div>
+                )}
+                {settlingDriver.totalAdvances > 0 && (
+                  <div className="flex justify-between text-rose-500 font-bold">
+                    <span>Less Advances ({settlingDriver.unSettledAdvances.length} slips):</span>
+                    <span className="font-mono">-₹{settlingDriver.totalAdvances.toLocaleString("en-IN")}</span>
+                  </div>
+                )}
+                <div className="pt-2 border-t border-neutral-200 dark:border-slate-700 flex justify-between text-sm font-extrabold">
+                  <span>Net Payable:</span>
+                  <span className="text-emerald-600 dark:text-emerald-400 font-mono">₹{settlingDriver.netPayable.toLocaleString("en-IN")}</span>
+                </div>
+              </div>
+
+              <Form method="post" onSubmit={() => setSettlingDriver(null)} className="space-y-3 text-xs">
+                <input type="hidden" name="_action" value="settle_driver_salary" />
+                <input type="hidden" name="driverName" value={settlingDriver.driver.name} />
+                <input type="hidden" name="driverPhone" value={settlingDriver.driver.phone || ""} />
+                <input type="hidden" name="monthYear" value={salaryMonthYear} />
+                <input type="hidden" name="baseSalary" value={settlingDriver.baseSalary} />
+                <input type="hidden" name="daysWorked" value={settlingDriver.daysWorked} />
+                <input type="hidden" name="earnedSalary" value={settlingDriver.earnedSalary} />
+                <input type="hidden" name="advancesDeducted" value={settlingDriver.totalAdvances} />
+                <input type="hidden" name="bonusAmount" value={settlingDriver.bonus} />
+                <input type="hidden" name="otherDeductions" value={settlingDriver.customDeductions} />
+                <input type="hidden" name="netPaidAmount" value={settlingDriver.netPayable} />
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Payment Mode</label>
+                  <select name="paymentMode" className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold">
+                    <option value="CASH">💵 Cash</option>
+                    <option value="UPI">📱 UPI / PhonePe / GPay</option>
+                    <option value="BANK_TRANSFER">🏦 Bank Transfer</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-500">Notes (Optional)</label>
+                  <input type="text" name="notes" placeholder="e.g. Cleared full month salary" className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none" />
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button type="button" onClick={() => setSettlingDriver(null)} className="flex-1 py-2 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold">Cancel</button>
+                  <button type="submit" className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm">Confirm & Settle</button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL: WHATSAPP SALARY SLIP SHARE */}
+        {/* ========================================================================= */}
+        {selectedSlipData && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setSelectedSlipData(null)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <h3 className="text-base font-bold flex items-center gap-2 text-emerald-600">
+                  <span>📱</span>
+                  <span>WhatsApp Salary Slip</span>
+                </h3>
+                <button type="button" onClick={() => setSelectedSlipData(null)} className="text-neutral-400 hover:text-neutral-600">✕</button>
+              </div>
+
+              <div className="p-4 rounded-xl bg-neutral-900 text-emerald-400 font-mono text-xs whitespace-pre-wrap leading-relaxed shadow-inner max-h-72 overflow-y-auto">
+                {generateWhatsAppSlipText(selectedSlipData)}
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(generateWhatsAppSlipText(selectedSlipData));
+                    setCopiedSlipText(true);
+                    setTimeout(() => setCopiedSlipText(false), 3000);
+                  }}
+                  className="flex-1 py-2.5 bg-neutral-100 dark:bg-slate-800 font-bold rounded-xl text-xs hover:bg-neutral-200 transition-all cursor-pointer"
+                >
+                  {copiedSlipText ? "✅ Copied to Clipboard!" : "📋 Copy Slip Text"}
+                </button>
+
+                <a
+                  href={`https://wa.me/?text=${encodeURIComponent(generateWhatsAppSlipText(selectedSlipData))}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs transition-all text-center flex items-center justify-center gap-1 shadow-sm"
+                >
+                  <span>💬</span>
+                  <span>Send on WhatsApp</span>
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
 
 
         {/* Active Driver Profile Modal Overlay */}
