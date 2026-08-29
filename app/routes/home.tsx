@@ -271,7 +271,7 @@ export async function action({ request }: ActionFunctionArgs) {
     "create_expense", "delete_expense", "create_user", "delete_user",
     "update_user_password", "create_auto", "delete_auto", "create_temp_pass",
     "revoke_temp_pass", "create_pending_payment", "collect_pending_payment",
-    "delete_pending_payment", "settle_driver_salary"
+    "mark_pending_received", "delete_pending_payment", "settle_driver_salary"
   ].includes(actionType || "");
 
   if (isViewOnly && isMutation) {
@@ -911,45 +911,63 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (actionType === "create_pending_payment") {
     const title = formData.get("title")?.toString()?.trim() || "Pending Payment";
-    const clientName = formData.get("clientName")?.toString()?.trim() || "General Client";
-    const totalAmount = parseFloat(formData.get("totalAmount")?.toString() || "0") || 0;
-    const receivedAmount = parseFloat(formData.get("receivedAmount")?.toString() || "0") || 0;
-    const dueDateRaw = formData.get("dueDate")?.toString();
+    const clientName = formData.get("clientName")?.toString()?.trim() || title;
+    const totalAmount = parseFloat(formData.get("amount")?.toString() || formData.get("totalAmount")?.toString() || "0") || 0;
     const notes = formData.get("notes")?.toString()?.trim() || "";
 
     if (totalAmount <= 0) {
-      return { error: "Total amount must be greater than 0." };
+      return { error: "Pending amount must be greater than 0." };
     }
-
-    const status = receivedAmount >= totalAmount ? "PAID" : receivedAmount > 0 ? "PARTIAL" : "PENDING";
-    const dueDate = dueDateRaw ? new Date(dueDateRaw) : null;
 
     const payment = await (prisma as any).pendingPayment.create({
       data: {
         title,
         clientName,
         totalAmount,
-        receivedAmount,
-        dueDate,
-        status,
+        receivedAmount: 0,
+        status: "PENDING",
         notes,
       }
     });
 
-    if (receivedAmount > 0) {
+    return { success: true, action: "create_pending_payment", payment };
+  }
+
+  if (actionType === "mark_pending_received") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    if (id <= 0) {
+      return { error: "Invalid pending payment ID." };
+    }
+
+    const current = await (prisma as any).pendingPayment.findUnique({ where: { id } });
+    if (!current) {
+      return { error: "Pending payment record not found." };
+    }
+
+    const remainingToCollect = Math.max(0, current.totalAmount - current.receivedAmount);
+
+    const updated = await (prisma as any).pendingPayment.update({
+      where: { id },
+      data: {
+        receivedAmount: current.totalAmount,
+        status: "PAID",
+      }
+    });
+
+    if (remainingToCollect > 0) {
       await prisma.expense.create({
         data: {
-          amount: receivedAmount,
+          amount: remainingToCollect,
           category: "other_income",
-          notes: `Initial collection for invoice: ${title} (${clientName})`,
-          senderName: clientName,
+          notes: `Received pending payment: ${current.title}${current.notes ? ` (${current.notes})` : ''}`,
+          senderName: current.clientName || current.title,
           type: "INCOME",
           approved: true,
         }
       });
     }
 
-    return { success: true, action: "create_pending_payment", payment };
+    return { success: true, action: "mark_pending_received", payment: updated };
   }
 
   if (actionType === "collect_pending_payment") {
@@ -4954,10 +4972,10 @@ export default function Home() {
                     <div>
                       <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
                         <span>🟡</span>
-                        <span>Pending Dues & Receivables</span>
+                        <span>Pending Dues Tracker</span>
                       </h1>
                       <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                        Track customer/factory partial payments, due invoices, and collection reminders.
+                        Track pending client/vendor payments. Click <strong>"Mark as Received"</strong> to automatically record them into your Income Ledger.
                       </p>
                     </div>
 
@@ -4965,59 +4983,52 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => setShowAddPendingModal(true)}
-                        className="notion-btn text-xs px-3.5 py-2 font-semibold flex items-center gap-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md shadow-sm transition-all cursor-pointer"
+                        className="notion-btn text-xs px-4 py-2.5 font-bold flex items-center gap-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-xl shadow-sm transition-all cursor-pointer"
                       >
                         <span>➕</span>
-                        <span>Add Pending Due / Invoice</span>
+                        <span>Add Pending Due</span>
                       </button>
                     </div>
                   </div>
 
                   {/* Summary Metric Cards */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Total Invoiced</span>
-                      <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                        ₹{pendingDuesSummary.totalBilled.toLocaleString("en-IN")}
-                      </span>
-                    </div>
-
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Collected So Far</span>
-                      <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
-                        ₹{pendingDuesSummary.totalCollected.toLocaleString("en-IN")}
-                      </span>
-                    </div>
-
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-amber-200/80 dark:border-amber-500/20 bg-amber-50/20 dark:bg-amber-500/5 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">Total Outstanding Pending</span>
-                      <span className="text-xl font-extrabold font-mono text-amber-600 dark:text-amber-400">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-amber-200/80 dark:border-amber-500/20 bg-amber-50/20 dark:bg-amber-500/5 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">🟡 Total Pending Amount</span>
+                      <span className="text-2xl font-extrabold font-mono text-amber-600 dark:text-amber-400">
                         ₹{pendingDuesSummary.totalPending.toLocaleString("en-IN")}
                       </span>
                     </div>
 
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-rose-500 uppercase tracking-wider block">Overdue Invoices</span>
-                      <span className="text-xl font-extrabold font-mono text-rose-500">
-                        {pendingDuesSummary.overdueCount}
+                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-emerald-200/80 dark:border-emerald-500/20 bg-emerald-50/20 dark:bg-emerald-500/5 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">✅ Total Received & Cleared</span>
+                      <span className="text-2xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                        ₹{pendingDuesSummary.totalCollected.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">📋 Total Records</span>
+                      <span className="text-2xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                        {pendingPayments.length}
                       </span>
                     </div>
                   </div>
 
                   {/* Status Filter Tabs */}
-                  <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-lg w-fit border border-neutral-200/60 dark:border-slate-700/50">
-                    {(["ALL", "PENDING", "PARTIAL", "PAID"] as const).map((st) => (
+                  <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl w-fit border border-neutral-200/60 dark:border-slate-700/50">
+                    {(["ALL", "PENDING", "PAID"] as const).map((st) => (
                       <button
                         key={st}
                         type="button"
                         onClick={() => setPendingFilterStatus(st)}
-                        className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
+                        className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
                           pendingFilterStatus === st
                             ? "bg-white dark:bg-[#1e293b] text-neutral-900 dark:text-white shadow-sm"
                             : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
                         }`}
                       >
-                        {st === "ALL" ? "All Dues" : st.charAt(0) + st.slice(1).toLowerCase()}
+                        {st === "ALL" ? "All Records" : st === "PENDING" ? "🟡 Pending Only" : "✅ Cleared / Done"}
                       </button>
                     ))}
                   </div>
@@ -5025,110 +5036,117 @@ export default function Home() {
                   {/* Invoices List / Table */}
                   {filteredPendingPayments.length === 0 ? (
                     <div className="p-12 text-center border border-dashed border-neutral-200 dark:border-slate-800 rounded-2xl bg-white/40 dark:bg-slate-900/20 space-y-3">
-                      <span className="text-3xl block">🎉</span>
+                      <span className="text-3xl block">✨</span>
                       <p className="text-sm font-semibold text-neutral-600 dark:text-neutral-300">
-                        No pending dues found in this category!
+                        No records found in this view!
                       </p>
                       <p className="text-xs text-neutral-400">
-                        Click "Add Pending Due / Invoice" above to record any client receivable or partial payment.
+                        Click "Add Pending Due" above to add any money owed.
                       </p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {filteredPendingPayments.map((p: any) => {
-                        const remaining = Math.max(0, p.totalAmount - p.receivedAmount);
-                        const percent = Math.min(100, Math.round((p.receivedAmount / p.totalAmount) * 100));
-                        const isOverdue = p.dueDate && new Date(p.dueDate) < new Date() && p.status !== "PAID";
+                        const isPaid = p.status === "PAID";
 
                         return (
                           <div
                             key={p.id}
-                            className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 hover:shadow-md transition-all flex flex-col justify-between"
+                            className={`p-5 rounded-2xl bg-white dark:bg-[#1e293b] border shadow-sm space-y-4 hover:shadow-md transition-all flex flex-col justify-between ${
+                              isPaid
+                                ? "border-emerald-500/30 bg-emerald-50/5 dark:bg-emerald-950/10"
+                                : "border-amber-500/30 hover:border-amber-500/60"
+                            }`}
                           >
-                            <div className="space-y-2.5">
+                            <div className="space-y-3">
                               <div className="flex justify-between items-start gap-2">
-                                <div>
-                                  <span className="text-[10px] font-bold uppercase tracking-wider font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-2 py-0.5 rounded">
-                                    {p.clientName}
-                                  </span>
-                                  <h3 className="text-base font-bold text-neutral-900 dark:text-white mt-1">
+                                <div className="space-y-1">
+                                  <h3 className="text-base font-bold text-neutral-900 dark:text-white">
                                     {p.title}
                                   </h3>
+                                  {p.notes && p.notes !== p.title && (
+                                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                                      {p.notes}
+                                    </p>
+                                  )}
+                                  <span className="text-[11px] font-mono text-neutral-400 block">
+                                    📅 Added on {new Date(p.createdAt).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}
+                                  </span>
                                 </div>
+
                                 <span
-                                  className={`text-[10px] font-extrabold uppercase font-mono px-2.5 py-1 rounded-full border ${
-                                    p.status === "PAID"
+                                  className={`text-[10px] font-extrabold uppercase font-mono px-2.5 py-1 rounded-full border shrink-0 ${
+                                    isPaid
                                       ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                                      : p.status === "PARTIAL"
-                                      ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20"
                                       : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
                                   }`}
                                 >
-                                  {p.status}
+                                  {isPaid ? "✅ Cleared / Done" : "🟡 Pending"}
                                 </span>
                               </div>
 
-                              {p.notes && (
-                                <p className="text-xs text-neutral-500 dark:text-neutral-400 line-clamp-2">
-                                  {p.notes}
-                                </p>
-                              )}
-
-                              {/* Progress bar */}
-                              <div className="space-y-1.5 pt-1">
-                                <div className="flex justify-between text-xs font-mono">
-                                  <span className="text-slate-400">
-                                    Received: <strong className="text-emerald-600 dark:text-emerald-400">₹{p.receivedAmount.toLocaleString("en-IN")}</strong>
-                                  </span>
-                                  <span className="text-slate-400">
-                                    Total: <strong>₹{p.totalAmount.toLocaleString("en-IN")}</strong>
-                                  </span>
-                                </div>
-                                <div className="w-full h-2 rounded-full bg-neutral-100 dark:bg-slate-800 overflow-hidden">
-                                  <div
-                                    className={`h-full rounded-full transition-all ${
-                                      p.status === "PAID" ? "bg-emerald-500" : "bg-[#5D87FF]"
-                                    }`}
-                                    style={{ width: `${percent}%` }}
-                                  />
-                                </div>
+                              {/* Amount Display */}
+                              <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 flex justify-between items-center">
+                                <span className="text-xs font-semibold text-neutral-500">
+                                  {isPaid ? "Received Amount" : "Pending Due Amount"}
+                                </span>
+                                <span className={`text-xl font-extrabold font-mono ${isPaid ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
+                                  ₹{p.totalAmount.toLocaleString("en-IN")}
+                                </span>
                               </div>
                             </div>
 
-                            {/* Card Footer: Due Date & Actions */}
+                            {/* Card Footer: 1-Click Action & Delete */}
                             <div className="pt-3 border-t border-neutral-100 dark:border-slate-800/80 flex justify-between items-center text-xs">
-                              <div className="flex items-center gap-1.5">
-                                {p.dueDate ? (
-                                  <span
-                                    className={`text-[11px] font-medium font-mono ${
-                                      isOverdue
-                                        ? "text-rose-500 font-bold"
-                                        : "text-neutral-500 dark:text-neutral-400"
-                                    }`}
-                                  >
-                                    📅 Due: {new Date(p.dueDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
-                                    {isOverdue && " ⚠️ Overdue"}
+                              <div>
+                                {isPaid ? (
+                                  <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                                    <span>✨</span>
+                                    <span>Added to Income Ledger</span>
                                   </span>
                                 ) : (
-                                  <span className="text-[11px] text-neutral-400 italic">No Due Date</span>
+                                  <Form method="post">
+                                    <input type="hidden" name="_action" value="mark_pending_received" />
+                                    <input type="hidden" name="id" value={p.id} />
+                                    <button
+                                      type="submit"
+                                      disabled={isSubmitting}
+                                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                    >
+                                      <span>✅</span>
+                                      <span>Mark as Received & Add to Income</span>
+                                    </button>
+                                  </Form>
                                 )}
                               </div>
 
-                              <div className="flex items-center gap-2">
-                                {p.status !== "PAID" && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setCollectingPayment(p);
-                                      setCollectAmount(remaining.toString());
-                                      setCollectNotes("");
-                                    }}
-                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1"
-                                  >
-                                    <span>💵</span>
-                                    <span>Collect (₹{remaining.toLocaleString("en-IN")})</span>
-                                  </button>
-                                )}
+                              <Form
+                                method="post"
+                                onSubmit={(e) => {
+                                  if (!confirm(`Are you sure you want to delete "${p.title}"?`)) {
+                                    e.preventDefault();
+                                  }
+                                }}
+                              >
+                                <input type="hidden" name="_action" value="delete_pending_payment" />
+                                <input type="hidden" name="id" value={p.id} />
+                                <button
+                                  type="submit"
+                                  disabled={isSubmitting}
+                                  className="p-2 text-rose-500 hover:bg-rose-500/10 rounded-lg transition-all cursor-pointer disabled:opacity-40"
+                                  title="Delete record"
+                                >
+                                  🗑️
+                                </button>
+                              </Form>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
                                 <Form
                                   method="post"
@@ -5395,7 +5413,7 @@ export default function Home() {
         </div>
 
         {/* ========================================================================= */}
-        {/* MODAL: ADD PENDING DUE / INVOICE */}
+        {/* MODAL: ADD PENDING DUE */}
         {/* ========================================================================= */}
         {showAddPendingModal && (
           <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
@@ -5404,173 +5422,76 @@ export default function Home() {
               <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
                 <h3 className="text-base font-bold flex items-center gap-2">
                   <span>🟡</span>
-                  <span>Add Pending Due / Receivable</span>
+                  <span>Add Pending Due</span>
                 </h3>
                 <button type="button" onClick={() => setShowAddPendingModal(false)} className="text-neutral-400 hover:text-neutral-600">✕</button>
               </div>
 
-              <Form method="post" onSubmit={() => setShowAddPendingModal(false)} className="space-y-3.5 text-xs">
+              <Form method="post" onSubmit={() => setShowAddPendingModal(false)} className="space-y-4 text-xs">
                 <input type="hidden" name="_action" value="create_pending_payment" />
 
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Invoice / Due Title</label>
+                <div className="space-y-1.5">
+                  <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                    💰 Pending Amount (₹) <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    name="amount"
+                    required
+                    min="1"
+                    step="any"
+                    autoFocus
+                    placeholder="e.g. 15000"
+                    className="notion-input w-full p-3 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-amber-600 dark:text-amber-400"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                    📝 Note / Title <span className="text-rose-500">*</span>
+                  </label>
                   <input
                     type="text"
                     name="title"
                     required
-                    placeholder="e.g. Factory Logistics August Billing"
-                    className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
+                    placeholder="e.g. Factory A remaining payment"
+                    className="notion-input w-full p-3 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
                   />
                 </div>
 
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Client / Factory / Vendor Name</label>
-                  <input
-                    type="text"
-                    name="clientName"
-                    required
-                    placeholder="e.g. Factory A / Shadowfax Vendor"
-                    className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <label className="font-semibold text-neutral-500">Total Billed (₹)</label>
-                    <input
-                      type="number"
-                      name="totalAmount"
-                      required
-                      min="1"
-                      step="any"
-                      placeholder="50000"
-                      className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-sm"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="font-semibold text-neutral-500">Received Today (₹)</label>
-                    <input
-                      type="number"
-                      name="receivedAmount"
-                      min="0"
-                      step="any"
-                      placeholder="0"
-                      className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-sm text-emerald-600"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Due Date (Optional Reminder)</label>
-                  <input
-                    type="date"
-                    name="dueDate"
-                    className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-mono"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Notes / Remarks</label>
+                <div className="space-y-1.5">
+                  <label className="font-medium text-neutral-400">
+                    Additional Details (Optional)
+                  </label>
                   <textarea
                     name="notes"
                     rows={2}
-                    placeholder="Invoice breakdown or payment terms..."
-                    className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none"
-                  />
-                </div>
-
-                <div className="pt-3 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowAddPendingModal(false)}
-                    className="flex-1 py-2 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 py-2 rounded-xl bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold shadow-sm"
-                  >
-                    Save Pending Due
-                  </button>
-                </div>
-              </Form>
-            </div>
-          </div>
-        )}
-
-        {/* ========================================================================= */}
-        {/* MODAL: COLLECT PAYMENT */}
-        {/* ========================================================================= */}
-        {collectingPayment && (
-          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
-            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setCollectingPayment(null)} />
-            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-sm p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
-              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
-                <h3 className="text-base font-bold flex items-center gap-2">
-                  <span>💵</span>
-                  <span>Collect Payment</span>
-                </h3>
-                <button type="button" onClick={() => setCollectingPayment(null)} className="text-neutral-400 hover:text-neutral-600">✕</button>
-              </div>
-
-              <div className="p-3 bg-neutral-50 dark:bg-slate-900/50 rounded-xl space-y-1 text-xs">
-                <div className="font-bold text-neutral-900 dark:text-white">{collectingPayment.title}</div>
-                <div className="text-slate-400">Client: {collectingPayment.clientName}</div>
-                <div className="text-amber-600 dark:text-amber-400 font-mono font-bold">
-                  Remaining Due: ₹{(collectingPayment.totalAmount - collectingPayment.receivedAmount).toLocaleString("en-IN")}
-                </div>
-              </div>
-
-              <Form method="post" onSubmit={() => setCollectingPayment(null)} className="space-y-3 text-xs">
-                <input type="hidden" name="_action" value="collect_pending_payment" />
-                <input type="hidden" name="id" value={collectingPayment.id} />
-
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Amount to Collect (₹)</label>
-                  <input
-                    type="number"
-                    name="amountToCollect"
-                    required
-                    min="1"
-                    step="any"
-                    value={collectAmount}
-                    onChange={(e) => setCollectAmount(e.target.value)}
-                    className="notion-input w-full p-2.5 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-emerald-600 font-mono"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Collection Notes (Optional)</label>
-                  <input
-                    type="text"
-                    name="notes"
-                    value={collectNotes}
-                    onChange={(e) => setCollectNotes(e.target.value)}
-                    placeholder="e.g. Paid via UPI / Bank Transfer"
-                    className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none"
+                    placeholder="Any extra details or contact info..."
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none text-xs"
                   />
                 </div>
 
                 <div className="pt-2 flex gap-2">
                   <button
                     type="button"
-                    onClick={() => setCollectingPayment(null)}
-                    className="flex-1 py-2 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold"
+                    onClick={() => setShowAddPendingModal(false)}
+                    className="flex-1 py-2.5 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold hover:bg-neutral-200 transition-all cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm"
+                    className="flex-1 py-2.5 rounded-xl bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold shadow-sm transition-all cursor-pointer"
                   >
-                    Confirm Collection
+                    ➕ Save Pending Due
                   </button>
                 </div>
               </Form>
             </div>
           </div>
         )}
+
+
 
         {/* ========================================================================= */}
         {/* MODAL: VIEW DRIVER ADVANCE SLIPS */}
