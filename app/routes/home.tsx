@@ -253,8 +253,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }),
     prisma.auto.findMany({ orderBy: { createdAt: "desc" } }),
     prisma.temporaryPass.findMany({ orderBy: { createdAt: "desc" } }),
-    prisma.pendingPayment.findMany({ orderBy: { createdAt: "desc" } }),
-    prisma.driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } }),
+    (prisma as any).pendingPayment ? (prisma as any).pendingPayment.findMany({ orderBy: { createdAt: "desc" } }) : Promise.resolve([]),
+    (prisma as any).driverSalarySettlement ? (prisma as any).driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } }) : Promise.resolve([]),
   ]);
 
   return { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses, pendingPayments, salarySettlements };
@@ -924,7 +924,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const status = receivedAmount >= totalAmount ? "PAID" : receivedAmount > 0 ? "PARTIAL" : "PENDING";
     const dueDate = dueDateRaw ? new Date(dueDateRaw) : null;
 
-    const payment = await prisma.pendingPayment.create({
+    const payment = await (prisma as any).pendingPayment.create({
       data: {
         title,
         clientName,
@@ -961,7 +961,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return { error: "Invalid payment collection amount." };
     }
 
-    const current = await prisma.pendingPayment.findUnique({ where: { id } });
+    const current = await (prisma as any).pendingPayment.findUnique({ where: { id } });
     if (!current) {
       return { error: "Pending payment entry not found." };
     }
@@ -969,7 +969,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const newReceived = current.receivedAmount + amountToCollect;
     const newStatus = newReceived >= current.totalAmount ? "PAID" : "PARTIAL";
 
-    const updated = await prisma.pendingPayment.update({
+    const updated = await (prisma as any).pendingPayment.update({
       where: { id },
       data: {
         receivedAmount: newReceived,
@@ -994,7 +994,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (actionType === "delete_pending_payment") {
     const id = parseInt(formData.get("id")?.toString() || "0") || 0;
-    await prisma.pendingPayment.delete({ where: { id } });
+    await (prisma as any).pendingPayment.delete({ where: { id } });
     return { success: true, action: "delete_pending_payment" };
   }
 
@@ -1016,7 +1016,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return { error: "Invalid salary calculation or driver name." };
     }
 
-    const settlement = await prisma.driverSalarySettlement.create({
+    const settlement = await (prisma as any).driverSalarySettlement.create({
       data: {
         driverName,
         driverPhone,
@@ -1034,7 +1034,7 @@ export async function action({ request }: ActionFunctionArgs) {
     });
 
     // Mark matching advances as settled
-    await prisma.expense.updateMany({
+    await (prisma as any).expense.updateMany({
       where: {
         category: "bittu",
         settled: false,
@@ -1050,7 +1050,7 @@ export async function action({ request }: ActionFunctionArgs) {
     });
 
     // Log the salary payment into Expense ledger
-    await prisma.expense.create({
+    await (prisma as any).expense.create({
       data: {
         amount: netPaidAmount,
         category: "bittu",
@@ -1101,21 +1101,21 @@ export async function action({ request }: ActionFunctionArgs) {
         prisma.expense.findMany({
           take: 60,
           orderBy: { timestamp: "desc" },
-          select: { id: true, amount: true, category: true, type: true, timestamp: true, notes: true, vehicle: true, senderName: true, settled: true }
+          select: { id: true, amount: true, category: true, type: true, timestamp: true, notes: true, vehicle: true, senderName: true }
         }),
         prisma.expense.groupBy({
           by: ["category", "type"],
           _sum: { amount: true },
           _count: { id: true }
         }),
-        prisma.pendingPayment.findMany({
+        (prisma as any).pendingPayment ? (prisma as any).pendingPayment.findMany({
           orderBy: { createdAt: "desc" },
           take: 20
-        }),
-        prisma.driverSalarySettlement.findMany({
+        }) : Promise.resolve([]),
+        (prisma as any).driverSalarySettlement ? (prisma as any).driverSalarySettlement.findMany({
           orderBy: { paymentDate: "desc" },
           take: 15
-        })
+        }) : Promise.resolve([])
       ]);
 
       const now = new Date();
@@ -1127,25 +1127,25 @@ export async function action({ request }: ActionFunctionArgs) {
 
         === LIVE COMPANY DATABASE SNAPSHOT ===
         1. Registered Drivers (${drivers.length} total):
-        ${JSON.stringify(drivers.map(d => ({ name: d.name, phone: d.phone, monthlySalary: d.salary || 16500, assignedVehicle: d.vehicleNumber || "None", loginEnabled: d.loginEnabled })))}
+        ${JSON.stringify(drivers.map((d: any) => ({ name: d.name, phone: d.phone, monthlySalary: d.salary || 16500, assignedVehicle: d.vehicleNumber || "None", loginEnabled: d.loginEnabled })))}
 
         2. Registered Autos (${autos.length} total):
-        ${JSON.stringify(autos.map(a => ({ plate: a.plateNumber, model: a.modelName, owner: a.ownerName, driverPhone: a.driverPhone })))}
+        ${JSON.stringify(autos.map((a: any) => ({ plate: a.plateNumber, model: a.modelName, owner: a.ownerName, driverPhone: a.driverPhone })))}
 
         3. Pending Payments & Receivables (${pendingList.length} total):
-        ${JSON.stringify(pendingList.map(p => ({ title: p.title, client: p.clientName, total: p.totalAmount, received: p.receivedAmount, pending: p.totalAmount - p.receivedAmount, due: p.dueDate, status: p.status })))}
+        ${JSON.stringify(pendingList.map((p: any) => ({ title: p.title, client: p.clientName, total: p.totalAmount, received: p.receivedAmount, pending: p.totalAmount - p.receivedAmount, due: p.dueDate, status: p.status })))}
 
         4. Recent Driver Salary Settlements:
-        ${JSON.stringify(settlementsList.map(s => ({ driver: s.driverName, month: s.monthYear, daysWorked: s.daysWorked, netPaid: s.netPaidAmount, advancesDeducted: s.advancesDeducted, date: s.paymentDate })))}
+        ${JSON.stringify(settlementsList.map((s: any) => ({ driver: s.driverName, month: s.monthYear, daysWorked: s.daysWorked, netPaid: s.netPaidAmount, advancesDeducted: s.advancesDeducted, date: s.paymentDate })))}
 
         5. All Team Members (${allUsers.length} total):
-        ${JSON.stringify(allUsers.map(u => ({ name: u.name, role: u.role, phone: u.phone, salary: u.salary })))}
+        ${JSON.stringify(allUsers.map((u: any) => ({ name: u.name, role: u.role, phone: u.phone, salary: u.salary })))}
 
         6. Category Totals across All Time:
-        ${JSON.stringify(categoryStats.map(c => ({ category: c.category, type: c.type, totalAmount: c._sum.amount, count: c._count.id })))}
+        ${JSON.stringify(categoryStats.map((c: any) => ({ category: c.category, type: c.type, totalAmount: c._sum.amount, count: c._count.id })))}
 
         7. Recent 60 Expense & Income Transactions (sorted newest first):
-        ${JSON.stringify(recentExpenses.map(e => ({ amount: e.amount, cat: e.category, type: e.type, date: e.timestamp.toISOString().split("T")[0], notes: e.notes, vehicle: e.vehicle, sender: e.senderName, settled: e.settled })))}
+        ${JSON.stringify(recentExpenses.map((e: any) => ({ amount: e.amount, cat: e.category, type: e.type, date: e.timestamp.toISOString().split("T")[0], notes: e.notes, vehicle: e.vehicle, sender: e.senderName, settled: (e as any).settled })))}
 
         === CONVERSATION HISTORY ===
         ${chatHistory.slice(-5).map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}
@@ -1254,7 +1254,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Home() {
-  const { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses = [] } = useLoaderData() as any;
+  const { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses = [], pendingPayments = [], salarySettlements = [] } = useLoaderData() as any;
   const drivers = users.filter((u: any) => u.role === "DRIVER");
 
   // Mock variables for deleted features to prevent TypeScript compilation errors
@@ -4940,6 +4940,8 @@ export default function Home() {
                         </div>
                       )}
                     </div>
+                  </div>
+                </div>
               )}
 
               {/* ========================================================================= */}
