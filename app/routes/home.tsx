@@ -920,64 +920,84 @@ export async function action({ request }: ActionFunctionArgs) {
         throw new Error("GEMINI_API_KEY not configured in backend .env");
       }
 
-      // Fetch distinct vehicles and drivers with their registered salaries
-      const [autos, drivers] = await Promise.all([
-        prisma.auto.findMany({ select: { plateNumber: true, modelName: true, ownerName: true, driverPhone: true } }),
-        prisma.user.findMany({ where: { role: "DRIVER" }, select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true } }),
+      // Fetch live company database context in parallel
+      const [drivers, autos, allUsers, recentExpenses, categoryStats] = await Promise.all([
+        prisma.user.findMany({
+          where: { role: "DRIVER" },
+          select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true, active: true },
+          orderBy: { name: "asc" }
+        }),
+        prisma.auto.findMany({
+          select: { id: true, plateNumber: true, modelName: true, ownerName: true, driverPhone: true, status: true },
+          orderBy: { plateNumber: "asc" }
+        }),
+        prisma.user.findMany({
+          select: { name: true, phone: true, role: true, salary: true }
+        }),
+        prisma.expense.findMany({
+          take: 60,
+          orderBy: { timestamp: "desc" },
+          select: { id: true, amount: true, category: true, type: true, timestamp: true, notes: true, vehicle: true, senderName: true }
+        }),
+        prisma.expense.groupBy({
+          by: ["category", "type"],
+          _sum: { amount: true },
+          _count: { id: true }
+        })
       ]);
 
       const now = new Date();
       const prompt = `
-        You are a smart financial & operations intelligence assistant for Dreamline Logistics.
-        Reference Current Date: ${now.toISOString()} (${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}).
+        You are Dreamline AI, the high-intelligence conversational assistant for Dreamline Logistics Atelier (answering with the brilliance and warmth of Claude, ChatGPT, and Gemini).
+        You have FULL live access to the company's real-time operations and financial database.
 
-        Database Entities:
-        - Categories: "fuel", "bittu", "service", "shadowfax", "rate_change", "factory", "other_income", "other".
-        - Registered Drivers (with base monthly salary in INR): ${JSON.stringify(drivers.map((d: any) => ({ name: d.name, phone: d.phone, salary: d.salary || 16500, vehicle: d.vehicleNumber })))}
-        - Registered Autos: ${JSON.stringify(autos.map((a: any) => ({ plate: a.plateNumber, model: a.modelName, driverPhone: a.driverPhone })))}
+        Reference Date/Time: ${now.toISOString()} (${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}).
 
-        Chat History / Prior Context:
-        ${chatHistory.slice(-4).map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}
+        === LIVE COMPANY DATABASE SNAPSHOT ===
+        1. Registered Drivers (${drivers.length} total):
+        ${JSON.stringify(drivers.map(d => ({ name: d.name, phone: d.phone, monthlySalary: d.salary || 16500, assignedVehicle: d.vehicleNumber || "None", active: d.active })))}
 
-        Current User Question: "${query}"
+        2. Registered Autos (${autos.length} total):
+        ${JSON.stringify(autos.map(a => ({ plate: a.plateNumber, model: a.modelName, owner: a.ownerName, driverPhone: a.driverPhone })))}
 
-        Determine the user's intent:
-        1. If the question is about calculating a driver's salary, daily earnings, attendance/working days, or deducting advances (e.g. "Bittu worked 28 days what salary to pay", "calculate salary for Suresh for 25 days", "how much to pay driver Amit after advance"):
-           Set "intent": "SALARY_CALCULATION"
-           Extract:
-           - "driverName": string (e.g. "Bittu", "Suresh", etc.)
-           - "daysWorked": number (e.g. 28, default 30 if full month)
-           - "month": string (e.g. "2026-08", default current month)
-           - "customDeductions": number (if any extra deduction mentioned, otherwise 0)
-           - "customBonus": number (if bonus mentioned, otherwise 0)
-           - "querySummary": concise title (e.g. "Salary calculation for Bittu (28 days)")
+        3. All Team Members (${allUsers.length} total):
+        ${JSON.stringify(allUsers.map(u => ({ name: u.name, role: u.role, phone: u.phone, salary: u.salary })))}
 
-        2. Otherwise (expenses, income, fuel, bittu cash advances, vendor payouts, general queries):
-           Set "intent": "EXPENSE_QUERY"
-           Extract:
-           - "startDate": string ISO or null
-           - "endDate": string ISO or null
-           - "categories": array of category strings from known categories, or [] for all
-           - "type": "EXPENSE" | "INCOME" | "ALL"
-           - "vehicle": string plate or null
-           - "senderName": string or null
-           - "querySummary": concise title (e.g. "Fuel expenses for July 2026")
+        4. Category Totals across All Time:
+        ${JSON.stringify(categoryStats.map(c => ({ category: c.category, type: c.type, totalAmount: c._sum.amount, count: c._count.id })))}
 
-        Return STRICT JSON only:
+        5. Recent 60 Expense & Income Transactions (sorted newest first):
+        ${JSON.stringify(recentExpenses.map(e => ({ amount: e.amount, cat: e.category, type: e.type, date: e.timestamp.toISOString().split("T")[0], notes: e.notes, vehicle: e.vehicle, sender: e.senderName })))}
+
+        === CONVERSATION HISTORY ===
+        ${chatHistory.slice(-5).map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}
+
+        === USER QUESTION ===
+        "${query}"
+
+        === INSTRUCTIONS ===
+        Answer the user's question directly, intelligently, and warmly like Claude / ChatGPT.
+        - If the user asks for a list (e.g. "list of delivery boys and their salary", "show all autos", "list of drivers"):
+          Provide a clear, formatted markdown response or table showing driver names, assigned auto plates, phone numbers, and monthly salaries.
+        - If the user asks for a salary calculation (e.g. "Bittu worked 28 days what salary to pay"):
+          Look up their base monthly salary, compute daily rate, compute pay for days worked, check and deduct advances, and give a step-by-step breakdown.
+        - If the user asks an expense / income query (e.g. "how much spent on fuel 5 months ago", "total cash given to bittu"):
+          Calculate and summarize the exact amounts accurately based on the database snapshot.
+        - If the user asks operational or comparison questions (e.g. "who is driving MH-12", "who has highest salary", "how many drivers"):
+          Answer factually with live data from the database snapshot.
+
+        Return a JSON object in this format:
         {
-          "intent": "SALARY_CALCULATION" | "EXPENSE_QUERY",
-          "driverName": string or null,
-          "daysWorked": number or null,
-          "month": string or null,
-          "customDeductions": number,
-          "customBonus": number,
-          "startDate": string or null,
-          "endDate": string or null,
-          "categories": string[],
-          "type": "EXPENSE" | "INCOME" | "ALL",
-          "vehicle": string or null,
-          "senderName": string or null,
-          "querySummary": string
+          "answer": string,
+          "highlightStat": { "label": string, "value": string } or null,
+          "ledgerFilters": {
+            "startDate": string ISO or null,
+            "endDate": string ISO or null,
+            "categories": string[],
+            "type": "EXPENSE" | "INCOME" | "ALL",
+            "vehicle": string or null,
+            "driverName": string or null
+          } or null
         }
       `;
 
@@ -1001,7 +1021,7 @@ export async function action({ request }: ActionFunctionArgs) {
             body: JSON.stringify({
               contents: [{ parts: [{ text: prompt }] }],
               generationConfig: {
-                temperature: 0.1,
+                temperature: 0.2,
                 responseMimeType: "application/json",
                 thinkingConfig: { thinkingBudget: 0 }
               }
@@ -1026,164 +1046,22 @@ export async function action({ request }: ActionFunctionArgs) {
       const resData = await response.json();
       const rawText = resData.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
       const cleaned = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
-      const parsedFilters = JSON.parse(cleaned);
-
-      // Handle Intent 1: SALARY_CALCULATION
-      if (parsedFilters.intent === "SALARY_CALCULATION" && parsedFilters.driverName) {
-        const searchName = parsedFilters.driverName.toLowerCase();
-        const matchedDriver = drivers.find((d: any) => 
-          d.name.toLowerCase().includes(searchName) || 
-          searchName.includes(d.name.toLowerCase())
-        ) || {
-          name: parsedFilters.driverName,
-          salary: 16500,
-          phone: "Unknown"
-        };
-
-        const baseMonthlySalary = matchedDriver.salary || 16500;
-        const daysWorked = parsedFilters.daysWorked || 30;
-        const daysInMonth = 30;
-        const dailyRate = Math.round(baseMonthlySalary / daysInMonth);
-        const earnedSalary = Math.round((baseMonthlySalary / daysInMonth) * Math.min(31, daysWorked));
-
-        // Query advances given to this driver (category 'bittu' or notes/sender matching driver)
-        const advancesList = await prisma.expense.findMany({
-          where: {
-            category: "bittu",
-            OR: [
-              { senderName: { contains: matchedDriver.name } },
-              { notes: { contains: matchedDriver.name } }
-            ]
-          },
-          orderBy: { timestamp: "desc" },
-          take: 10,
-        });
-
-        const totalAdvances = advancesList.reduce((sum: number, a: any) => sum + a.amount, 0);
-        const bonus = parsedFilters.customBonus || 0;
-        const deductions = (parsedFilters.customDeductions || 0) + totalAdvances;
-        const netPayable = Math.max(0, earnedSalary + bonus - deductions);
-
-        const humanAnswer = `Here is the salary breakdown for **${matchedDriver.name}** (${daysWorked} days worked):\n\n` +
-          `• **Base Monthly Salary**: ₹${baseMonthlySalary.toLocaleString("en-IN")}\n` +
-          `• **Daily Rate**: ₹${dailyRate.toLocaleString("en-IN")}/day\n` +
-          `• **Earned for ${daysWorked} Days**: ₹${earnedSalary.toLocaleString("en-IN")}\n` +
-          (totalAdvances > 0 ? `• **Advances Taken**: -₹${totalAdvances.toLocaleString("en-IN")} (${advancesList.length} advance entry)\n` : `• **Advances Taken**: ₹0\n`) +
-          (bonus > 0 ? `• **Bonus Added**: +₹${bonus.toLocaleString("en-IN")}\n` : '') +
-          `\n**💰 Net Payable Salary: ₹${netPayable.toLocaleString("en-IN")}**`;
-
-        return {
-          success: true,
-          action: "ask_ai_financial_query",
-          intent: "SALARY_CALCULATION",
-          originalQuery: query,
-          parsedFilters,
-          totalAmount: netPayable,
-          transactionCount: advancesList.length,
-          salaryBreakdown: {
-            driverName: matchedDriver.name,
-            baseMonthlySalary,
-            daysWorked,
-            earnedSalary,
-            totalAdvances,
-            bonus,
-            deductions,
-            netPayable,
-            advances: advancesList,
-          },
-          categoryBreakdown: [
-            { category: "Earned Salary", _sum: { amount: earnedSalary }, _count: { id: daysWorked } },
-            { category: "Advance Deduction", _sum: { amount: totalAdvances }, _count: { id: advancesList.length } }
-          ],
-          sampleTransactions: advancesList,
-          humanAnswer,
-        };
+      let parsedOutput: any = {};
+      try {
+        parsedOutput = JSON.parse(cleaned);
+      } catch (e) {
+        parsedOutput = { answer: cleaned, highlightStat: null, ledgerFilters: null };
       }
 
-      // Handle Intent 2: EXPENSE_QUERY
-      const where: any = {
-        NOT: { category: "shared_temp" }
-      };
-
-      if (parsedFilters.startDate || parsedFilters.endDate) {
-        where.timestamp = {};
-        if (parsedFilters.startDate) where.timestamp.gte = new Date(parsedFilters.startDate);
-        if (parsedFilters.endDate) where.timestamp.lte = new Date(parsedFilters.endDate);
-      }
-
-      if (parsedFilters.type && parsedFilters.type !== "ALL") {
-        where.type = parsedFilters.type;
-      }
-
-      if (parsedFilters.categories && parsedFilters.categories.length > 0) {
-        where.category = { in: parsedFilters.categories };
-      }
-
-      if (parsedFilters.vehicle) {
-        where.vehicle = { contains: parsedFilters.vehicle };
-      }
-
-      if (parsedFilters.senderName) {
-        where.senderName = { contains: parsedFilters.senderName };
-      }
-
-      // Execute exact database calculations
-      const [aggregates, categoryBreakdown, sampleTransactions] = await Promise.all([
-        prisma.expense.aggregate({
-          _sum: { amount: true },
-          _count: { id: true },
-          where,
-        }),
-        prisma.expense.groupBy({
-          by: ["category", "type"],
-          _sum: { amount: true },
-          _count: { id: true },
-          where,
-          orderBy: {
-            _sum: {
-              amount: "desc"
-            }
-          }
-        }),
-        prisma.expense.findMany({
-          where,
-          orderBy: { timestamp: "desc" },
-          take: 5,
-          select: {
-            id: true,
-            amount: true,
-            category: true,
-            notes: true,
-            timestamp: true,
-            vehicle: true,
-            senderName: true,
-            type: true,
-          }
-        })
-      ]);
-
-      const totalAmount = aggregates._sum.amount || 0;
-      const count = aggregates._count.id || 0;
-
-      let humanAnswer = "";
-      if (count === 0) {
-        humanAnswer = `I checked your records for **${parsedFilters.querySummary || query}**, and found 0 matching transactions (₹0 total).`;
-      } else {
-        const typeLabel = parsedFilters.type === "INCOME" ? "income" : parsedFilters.type === "EXPENSE" ? "expenses" : "transactions";
-        humanAnswer = `For **${parsedFilters.querySummary || query}**, you recorded a total of **₹${totalAmount.toLocaleString("en-IN")}** across **${count} ${typeLabel}**.`;
-      }
+      const humanAnswer = parsedOutput.answer || "I checked your request against our records.";
 
       return {
         success: true,
         action: "ask_ai_financial_query",
-        intent: "EXPENSE_QUERY",
         originalQuery: query,
-        parsedFilters,
-        totalAmount,
-        transactionCount: count,
-        categoryBreakdown,
-        sampleTransactions,
         humanAnswer,
+        highlightStat: parsedOutput.highlightStat || null,
+        ledgerFilters: parsedOutput.ledgerFilters || null,
       };
     } catch (err: any) {
       console.error("AI Financial Query Error:", err);
@@ -6464,76 +6342,39 @@ export default function Home() {
 
                     {/* Rich Assistant Interactive Card */}
                     {msg.role === "assistant" && msg.data && (
-                      <div className="space-y-3 pt-2 border-t border-neutral-200 dark:border-white/10">
-                        {/* High Impact Stat (Salary or Total Expense) */}
-                        <div className="flex items-baseline justify-between p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-500/10 border border-indigo-200/80 dark:border-indigo-500/20">
-                          <div>
-                            <span className="text-[10px] font-mono uppercase font-bold text-indigo-600 dark:text-indigo-400 block">
-                              {msg.data.intent === "SALARY_CALCULATION" ? "Net Payable Salary" : "Verified Total"}
+                    {/* Rich Assistant Interactive Elements */}
+                    {msg.role === "assistant" && msg.data && (
+                      <div className="space-y-2 pt-1 border-t border-neutral-200 dark:border-white/10">
+                        {/* High Impact Stat (Optional) */}
+                        {msg.data.highlightStat && (
+                          <div className="flex items-baseline justify-between p-2.5 rounded-xl bg-indigo-50/60 dark:bg-indigo-500/10 border border-indigo-200/80 dark:border-indigo-500/20">
+                            <div>
+                              <span className="text-[10px] font-mono uppercase font-bold text-indigo-600 dark:text-indigo-400 block">
+                                {msg.data.highlightStat.label}
+                              </span>
+                              <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                                {msg.data.highlightStat.value}
+                              </span>
+                            </div>
+                            <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                              ✓ Live Verified
                             </span>
-                            <span className="text-2xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                              ₹{msg.data.totalAmount.toLocaleString("en-IN")}
-                            </span>
-                          </div>
-                          <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
-                            ✓ Calculated
-                          </span>
-                        </div>
-
-                        {/* Salary Breakdown Specific Card */}
-                        {msg.data.salaryBreakdown && (
-                          <div className="p-3 rounded-xl bg-neutral-50 dark:bg-white/[0.02] border border-neutral-200/80 dark:border-white/5 space-y-1.5 text-[11px]">
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Driver Name:</span>
-                              <span className="font-bold text-neutral-900 dark:text-white">{msg.data.salaryBreakdown.driverName}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Base Monthly Salary:</span>
-                              <span className="font-mono font-bold">₹{msg.data.salaryBreakdown.baseMonthlySalary.toLocaleString("en-IN")}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Days Worked:</span>
-                              <span className="font-mono font-bold">{msg.data.salaryBreakdown.daysWorked} days</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Earned Salary:</span>
-                              <span className="font-mono font-bold text-emerald-500">₹{msg.data.salaryBreakdown.earnedSalary.toLocaleString("en-IN")}</span>
-                            </div>
-                            {msg.data.salaryBreakdown.totalAdvances > 0 && (
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">Less Cash Advances:</span>
-                                <span className="font-mono font-bold text-rose-500">-₹{msg.data.salaryBreakdown.totalAdvances.toLocaleString("en-IN")}</span>
-                              </div>
-                            )}
                           </div>
                         )}
 
-                        {/* Category Breakdown Chips */}
-                        {msg.data.categoryBreakdown && msg.data.categoryBreakdown.length > 0 && (
-                          <div className="grid grid-cols-2 gap-1.5">
-                            {msg.data.categoryBreakdown.map((cat: any) => (
-                              <div
-                                key={cat.category}
-                                className="p-2 rounded-lg bg-neutral-50 dark:bg-white/[0.02] border border-neutral-200/60 dark:border-white/5 flex justify-between items-center"
-                              >
-                                <span className="text-[10px] font-mono text-slate-400 uppercase">{cat.category}</span>
-                                <span className="font-mono font-bold text-xs">₹{(cat._sum?.amount || 0).toLocaleString("en-IN")}</span>
-                              </div>
-                            ))}
+                        {/* Deep-link to Ledger (Optional) */}
+                        {msg.data.ledgerFilters && (
+                          <div className="flex justify-end pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handleViewInLedger(msg.data.ledgerFilters)}
+                              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1 active:scale-95"
+                            >
+                              <span>🔍</span>
+                              <span>View in Ledger</span>
+                            </button>
                           </div>
                         )}
-
-                        {/* Deep-link to Ledger */}
-                        <div className="flex justify-end pt-1">
-                          <button
-                            type="button"
-                            onClick={() => handleViewInLedger(msg.data.parsedFilters)}
-                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1 active:scale-95"
-                          >
-                            <span>🔍</span>
-                            <span>View in Ledger ({msg.data.transactionCount})</span>
-                          </button>
-                        </div>
                       </div>
                     )}
                   </div>
