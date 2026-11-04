@@ -6,22 +6,25 @@
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
 }
 
-/* Notion Design Tokens and Custom Classes */
+/* Modern Fintech Design Tokens */
 :root {
-  --notion-bg-light: #f4f6f9;
-  --notion-bg-dark: #0f172a;
+  --notion-bg-light: #f8fafc;
+  --notion-bg-dark: #0b0f19;
   --notion-sidebar-light: #ffffff;
-  --notion-sidebar-dark: #1e293b;
-  --notion-text-light: #2a3547;
-  --notion-text-dark: #dfe5ef;
-  --notion-border-light: #edece9;
+  --notion-sidebar-dark: #111827;
+  --notion-card-light: #ffffff;
+  --notion-card-dark: #1e293b;
+  --notion-text-light: #0f172a;
+  --notion-text-dark: #f8fafc;
+  --notion-border-light: #e2e8f0;
   --notion-border-dark: #334155;
-  --notion-accent: #5d87ff;
-  --notion-accent-hover: #4570ea;
-  --notion-red: #fa896b;
-  --notion-green: #13deb9;
-  --notion-orange: #ffae1f;
-  --notion-gray: #5a6a85;
+  --notion-accent: #4f46e5;
+  --notion-accent-hover: #4338ca;
+  --notion-accent-light: #eef2ff;
+  --notion-red: #f43f5e;
+  --notion-green: #10b981;
+  --notion-orange: #f59e0b;
+  --notion-gray: #64748b;
 }
 
 /* Base Styles */
@@ -110,29 +113,31 @@ html.dark, .dark body, .dark {
   background-color: rgba(240, 240, 240, 0.08);
 }
 
-/* Glassmorphic Cards & Tables */
+/* Modern Fintech Cards & Panels */
 .notion-card {
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.05);
-  border-radius: 7px;
+  background: var(--notion-card-light);
+  border: 1px solid var(--notion-border-light);
+  border-radius: 14px;
   padding: 18px;
-  box-shadow: rgba(145, 158, 171, 0.3) 0px 0px 2px 0px, rgba(145, 158, 171, 0.12) 0px 12px 24px -4px;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.04), 0 1px 2px -1px rgba(0, 0, 0, 0.04);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .dark .notion-card {
-  background: #1e293b;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  box-shadow: rgba(0, 0, 0, 0.4) 0px 12px 24px -4px;
+  background: var(--notion-card-dark);
+  border: 1px solid var(--notion-border-dark);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
 }
 
 .notion-card:hover {
   transform: translateY(-2px);
-  box-shadow: rgba(145, 158, 171, 0.35) 0px 4px 6px 0px, rgba(145, 158, 171, 0.15) 0px 12px 24px -4px;
+  border-color: #cbd5e1;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.06), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
 }
 
 .dark .notion-card:hover {
-  box-shadow: rgba(0, 0, 0, 0.5) 0px 12px 28px -4px;
+  border-color: #475569;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
 }
 
 /* Notion-style Input Fields */

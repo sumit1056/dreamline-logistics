@@ -1,8 +1,30 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useLoaderData, Form, useNavigation, useActionData, useSubmit } from "react-router";
 import type { Route } from "./+types/home";
-import { prisma } from "../db.server";
+import { prisma, withDbRetry } from "../db.server";
 import { parseExpenseText, scanReceiptImage } from "../services/ai.server";
+import {
+  parseKAmount,
+  parseWhatsAppChat,
+  detectTransactions,
+  SAMPLE_WHATSAPP_CHAT,
+  type DetectedTransaction,
+} from "../utils/whatsappParser";
+
+const FAST_EXPENSE_PILLS = [
+  { label: "Manager Commission", value: "manager_commission", icon: "👔", defaultNotes: "Manager commission payout" },
+  { label: "Police Commission", value: "police_commission", icon: "👮", defaultNotes: "Police commission entry" },
+  { label: "Credit Card CNG", value: "credit_card_cng", icon: "💳", defaultNotes: "Credit card CNG fuel refill" },
+  { label: "Cash CNG", value: "fuel", icon: "⛽", defaultNotes: "Cash CNG fuel refill" },
+  { label: "Auto Service/Repair", value: "service", icon: "🔧", defaultNotes: "Auto repair & servicing" },
+  { label: "Bittu Advance", value: "bittu", icon: "👤", defaultNotes: "Bittu advance", defaultSender: "Bittu" },
+  { label: "Gaurav Advance", value: "gaurav_advance", icon: "👤", defaultNotes: "Gaurav advance", defaultSender: "Gaurav" },
+  { label: "Parking", value: "parking", icon: "🅿️", defaultNotes: "Parking charges" },
+  { label: "Auto Engine Oil", value: "engine_oil", icon: "🛢️", defaultNotes: "Auto engine oil replacement" },
+  { label: "Challan / Fine", value: "challan", icon: "⚖️", defaultNotes: "Traffic challan / fine payment" },
+  { label: "Spare Parts", value: "spare_parts", icon: "🔩", defaultNotes: "Auto spare parts" },
+  { label: "General Kharcha", value: "other", icon: "📦", defaultNotes: "General kharcha" },
+];
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
@@ -242,21 +264,44 @@ export async function loader({ request }: LoaderFunctionArgs) {
     expiresAt,
   };
 
-  const [users, expenses, adminCredentials, autos, temporaryPasses, pendingPayments, salarySettlements] = await Promise.all([
-    prisma.user.findMany({ orderBy: { createdAt: "desc" } }),
-    prisma.expense.findMany({
-      where: { NOT: { category: "shared_temp" } },
-      orderBy: { timestamp: "desc" },
-      take: 500,
-    }),
-    prisma.adminCredential.findMany({
+  // Batch 1: Primary financial ledgers (Expenses, Pending Bills, Driver Salaries)
+  const [expenses, pendingPayments, salarySettlements] = await Promise.all([
+    withDbRetry(() => prisma.$queryRaw<Array<{
+      id: number;
+      amount: number;
+      currency: string;
+      category: string;
+      notes: string;
+      vehicle: string | null;
+      senderName: string;
+      timestamp: Date;
+      approved: boolean;
+      type: string;
+      settled: boolean;
+      settledAt: Date | null;
+      hasImage: boolean;
+    }>>`
+      SELECT 
+        id, amount, currency, category, notes, vehicle, "senderName", timestamp, approved, type, settled, "settledAt",
+        CASE WHEN "imageUrl" IS NOT NULL AND LENGTH("imageUrl") > 10 THEN true ELSE false END AS "hasImage"
+      FROM "Expense"
+      WHERE category != 'shared_temp'
+      ORDER BY timestamp DESC
+      LIMIT 500
+    `),
+    (prisma as any).pendingPayment ? withDbRetry(() => (prisma as any).pendingPayment.findMany({ orderBy: { createdAt: "desc" } })) : Promise.resolve([]),
+    (prisma as any).driverSalarySettlement ? withDbRetry(() => (prisma as any).driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } })) : Promise.resolve([]),
+  ]);
+
+  // Batch 2: User profiles, credentials, fleet, passes (lightweight metadata)
+  const [users, adminCredentials, autos, temporaryPasses] = await Promise.all([
+    withDbRetry(() => prisma.user.findMany({ orderBy: { createdAt: "desc" } })),
+    withDbRetry(() => prisma.adminCredential.findMany({
       select: { id: true, username: true, createdAt: true },
       orderBy: { createdAt: "desc" }
-    }),
-    prisma.auto.findMany({ orderBy: { createdAt: "desc" } }),
-    prisma.temporaryPass.findMany({ orderBy: { createdAt: "desc" } }),
-    (prisma as any).pendingPayment ? (prisma as any).pendingPayment.findMany({ orderBy: { createdAt: "desc" } }) : Promise.resolve([]),
-    (prisma as any).driverSalarySettlement ? (prisma as any).driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } }) : Promise.resolve([]),
+    })),
+    withDbRetry(() => prisma.auto.findMany({ orderBy: { createdAt: "desc" } })),
+    withDbRetry(() => prisma.temporaryPass.findMany({ orderBy: { createdAt: "desc" } })),
   ]);
 
   return { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses, pendingPayments, salarySettlements };
@@ -273,7 +318,8 @@ export async function action({ request }: ActionFunctionArgs) {
     "create_expense", "delete_expense", "create_user", "delete_user",
     "update_user_password", "create_auto", "delete_auto", "create_temp_pass",
     "revoke_temp_pass", "create_pending_payment", "collect_pending_payment",
-    "mark_pending_received", "delete_pending_payment", "settle_driver_salary"
+    "mark_pending_received", "delete_pending_payment", "settle_driver_salary",
+    "create_weekly_earning", "import_whatsapp_transactions"
   ].includes(actionType || "");
 
   if (isViewOnly && isMutation) {
@@ -341,7 +387,7 @@ export async function action({ request }: ActionFunctionArgs) {
         for (const item of parsed) {
           const entryDate = item.date ? new Date(item.date) : new Date();
 
-          const amount = Math.round(parseFloat(item.amount) || 0);
+          const amount = Math.round(parseFloat(String(item.amount)) || 0);
           const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
           let category = item.category || "other";
           const notes = item.notes || rawText;
@@ -398,10 +444,10 @@ export async function action({ request }: ActionFunctionArgs) {
       // Manual entry
       const amount = Math.round(parseFloat(formData.get("amount")?.toString() || "0") || 0);
       const type = formData.get("type")?.toString() || "EXPENSE";
-      const category = formData.get("category")?.toString() || "other";
+      let category = formData.get("category")?.toString() || "other";
       const notes = formData.get("notes")?.toString() || "";
       const vehicle = formData.get("vehicle")?.toString() || null;
-      const senderName = formData.get("senderName")?.toString() || "Founder";
+      let senderName = formData.get("senderName")?.toString() || "Founder";
       const imageUrlsStr = formData.get("imageUrls")?.toString() || "[]";
       let imageUrl = null;
       try {
@@ -413,6 +459,15 @@ export async function action({ request }: ActionFunctionArgs) {
       const customDateStr = formData.get("date")?.toString() || null;
       const entryDate = customDateStr ? new Date(customDateStr) : new Date();
 
+      // Guarantee Bittu / Gaurav advances link directly to Driver profile
+      if (category === "bittu" || category === "bittu_advance" || /bittu/i.test(notes)) {
+        category = "bittu";
+        senderName = "Bittu";
+      } else if (category === "gaurav_advance" || /gaurav/i.test(notes)) {
+        category = "gaurav_advance";
+        senderName = "Gaurav";
+      }
+
       await prisma.expense.create({
         data: {
           amount,
@@ -420,14 +475,311 @@ export async function action({ request }: ActionFunctionArgs) {
           notes,
           vehicle,
           senderName,
-          approved: false,
+          approved: true,
+          settled: false,
           imageUrl,
           type,
           timestamp: entryDate,
         },
       });
-      return { success: true, action: "create_expense" };
+
+      const pillObj = FAST_EXPENSE_PILLS.find(p => p.value === category);
+      const catLabel = pillObj ? pillObj.label : category.replace(/_/g, " ").toUpperCase();
+      const noteSuffix = notes && notes.trim() && notes.trim() !== pillObj?.defaultNotes ? ` (${notes.trim()})` : "";
+
+      const waText = type === "INCOME"
+        ? `INCOME\n• ${catLabel}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💰 TOTAL: ₹${amount.toLocaleString("en-IN")}`
+        : `EXPENSES\n• ${catLabel}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💸 TOTAL: ₹${amount.toLocaleString("en-IN")}`;
+
+      return {
+        success: true,
+        action: "create_expense",
+        whatsappText: waText,
+        whatsappTitle: type === "INCOME" ? "Income Logged" : "Expense Logged",
+      };
     }
+  }
+
+  if (actionType === "create_weekly_earning") {
+    const v1 = parseKAmount(formData.get("vendor1")?.toString() || formData.get("vendor1Gross")?.toString() || "0");
+    const v2 = parseKAmount(formData.get("vendor2")?.toString() || "0");
+    const perOrder = parseKAmount(formData.get("perOrder")?.toString() || "0");
+    const extra = parseKAmount(formData.get("extra")?.toString() || "0");
+    const senderName = formData.get("senderName")?.toString() || "Sumit Morya";
+    const customDateStr = formData.get("date")?.toString() || null;
+    const entryDate = customDateStr ? new Date(customDateStr) : new Date();
+
+    if (v1 > 0) {
+      await prisma.expense.create({
+        data: {
+          amount: v1,
+          category: "shadowfax",
+          notes: "Vendor 1 Payout",
+          senderName,
+          type: "INCOME",
+          approved: true,
+          timestamp: entryDate,
+        },
+      });
+    }
+
+    if (v2 > 0) {
+      await prisma.expense.create({
+        data: {
+          amount: v2,
+          category: "shadowfax",
+          notes: "Vendor 2 Payout",
+          senderName,
+          type: "INCOME",
+          approved: true,
+          timestamp: entryDate,
+        },
+      });
+    }
+
+    if (perOrder > 0) {
+      await prisma.expense.create({
+        data: {
+          amount: perOrder,
+          category: "shadowfax",
+          notes: "Per Order Payout",
+          senderName,
+          type: "INCOME",
+          approved: true,
+          timestamp: entryDate,
+        },
+      });
+    }
+
+    if (extra > 0) {
+      await prisma.expense.create({
+        data: {
+          amount: extra,
+          category: "other_income",
+          notes: "Extra Delivery Payout",
+          senderName,
+          type: "INCOME",
+          approved: true,
+          timestamp: entryDate,
+        },
+      });
+    }
+
+    const total = v1 + v2 + perOrder + extra;
+
+    const waLines = [
+      "WEEKLY EARNING",
+      `• Vendor 1: ₹${v1.toLocaleString("en-IN")}`,
+      `• Vendor 2: ₹${v2.toLocaleString("en-IN")}`,
+      `• Per Order: ₹${perOrder.toLocaleString("en-IN")}`,
+    ];
+    if (extra > 0) {
+      waLines.push(`• Extra: ₹${extra.toLocaleString("en-IN")}`);
+    }
+    waLines.push(`💵 TOTAL EARNED: ₹${total.toLocaleString("en-IN")}`);
+    const waText = waLines.join("\n");
+
+    return {
+      success: true,
+      action: "create_weekly_earning",
+      total,
+      whatsappText: waText,
+      whatsappTitle: "Weekly Payout Confirmation",
+    };
+  }
+
+  // Action: 45-Day Bill Payment Direct Logging
+  if (actionType === "create_bill_payment") {
+    const amount = parseKAmount(formData.get("amount")?.toString() || "0");
+    const clientName = formData.get("clientName")?.toString()?.trim() || "Client";
+    const billNote = formData.get("billNote")?.toString()?.trim() || "";
+    const pendingPaymentId = parseInt(formData.get("pendingPaymentId")?.toString() || "0") || 0;
+    const senderName = formData.get("senderName")?.toString() || clientName;
+    const customDateStr = formData.get("date")?.toString() || null;
+    const entryDate = customDateStr ? new Date(customDateStr) : new Date();
+
+    if (amount <= 0) {
+      return { error: "Please enter a valid bill payment amount." };
+    }
+
+    const note = billNote ? `45-Day Bill: ${clientName} (${billNote})` : `45-Day Bill: ${clientName}`;
+
+    await prisma.expense.create({
+      data: {
+        amount,
+        category: "vendor_income",
+        notes: note,
+        senderName,
+        type: "INCOME",
+        approved: true,
+        timestamp: entryDate,
+      },
+    });
+
+    if (pendingPaymentId > 0 && (prisma as any).pendingPayment) {
+      try {
+        const cur = await (prisma as any).pendingPayment.findUnique({ where: { id: pendingPaymentId } });
+        if (cur) {
+          const newReceived = cur.receivedAmount + amount;
+          const newStatus = newReceived >= cur.totalAmount ? "PAID" : "PARTIAL";
+          await (prisma as any).pendingPayment.update({
+            where: { id: pendingPaymentId },
+            data: {
+              receivedAmount: newReceived,
+              status: newStatus,
+            },
+          });
+        }
+      } catch (e) {
+        console.error("Failed to link pending payment:", e);
+      }
+    }
+
+    const noteSuffix = billNote ? ` (${billNote})` : "";
+    const waText = `INCOME\n• 45-Day Bill - ${clientName}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💰 TOTAL: ₹${amount.toLocaleString("en-IN")}`;
+
+    return {
+      success: true,
+      action: "create_bill_payment",
+      amount,
+      whatsappText: waText,
+      whatsappTitle: "Bill Payment Received",
+    };
+  }
+
+  if (actionType === "import_whatsapp_transactions") {
+    const transactionsJson = formData.get("transactions")?.toString() || "[]";
+    let transactions: any[] = [];
+    try {
+      transactions = JSON.parse(transactionsJson);
+    } catch (e) {
+      return { error: "Failed to parse transactions payload." };
+    }
+
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      return { error: "No transactions selected for import." };
+    }
+
+    let savedCount = 0;
+    let savedTotal = 0;
+    const summaryLines: string[] = [];
+
+    for (const tx of transactions) {
+      const txDate = tx.date ? new Date(tx.date) : new Date();
+      const sender = tx.sender || "WhatsApp Group";
+
+      if (tx.type === "earning" && tx.earningDetails) {
+        const d = tx.earningDetails;
+        if (d.vendor1Net > 0) {
+          await prisma.expense.create({
+            data: {
+              amount: d.vendor1Net,
+              category: "shadowfax",
+              notes: `Vendor 1 Payout${d.vendor1TDS > 0 ? ` (Gross: ₹${d.vendor1Gross} - TDS: ₹${d.vendor1TDS})` : ""}`,
+              senderName: sender,
+              type: "INCOME",
+              approved: true,
+              timestamp: txDate,
+            },
+          });
+          savedCount++;
+        }
+        if (d.vendor2 > 0) {
+          await prisma.expense.create({
+            data: {
+              amount: d.vendor2,
+              category: "shadowfax",
+              notes: "Vendor 2 Payout",
+              senderName: sender,
+              type: "INCOME",
+              approved: true,
+              timestamp: txDate,
+            },
+          });
+          savedCount++;
+        }
+        if (d.perOrder > 0) {
+          await prisma.expense.create({
+            data: {
+              amount: d.perOrder,
+              category: "shadowfax",
+              notes: "Per Order Payout",
+              senderName: sender,
+              type: "INCOME",
+              approved: true,
+              timestamp: txDate,
+            },
+          });
+          savedCount++;
+        }
+        if (d.extra > 0) {
+          await prisma.expense.create({
+            data: {
+              amount: d.extra,
+              category: "other_income",
+              notes: "Extra Delivery Payout",
+              senderName: sender,
+              type: "INCOME",
+              approved: true,
+              timestamp: txDate,
+            },
+          });
+          savedCount++;
+        }
+        savedTotal += (tx.totalAmount || 0);
+        summaryLines.push(`• Earning: ₹${(tx.totalAmount || 0).toLocaleString("en-IN")}`);
+      } else if (tx.type === "expense" && tx.expenseDetails) {
+        for (const row of tx.expenseDetails.rows) {
+          await prisma.expense.create({
+            data: {
+              amount: row.amount,
+              category: row.category,
+              notes: row.note || row.category,
+              senderName: sender,
+              type: "EXPENSE",
+              approved: true,
+              timestamp: txDate,
+            },
+          });
+          savedCount++;
+          savedTotal += row.amount;
+          summaryLines.push(`• ${row.note || row.category}: ₹${row.amount.toLocaleString("en-IN")}`);
+        }
+      } else if (tx.type === "staff_advance" && tx.advanceDetails) {
+        const ad = tx.advanceDetails;
+        const cat = (ad.staffName || "").toLowerCase().includes("gaurav") ? "gaurav_advance" : "bittu";
+        await prisma.expense.create({
+          data: {
+            amount: ad.amount,
+            category: cat,
+            notes: `${ad.staffName} Advance (${ad.tag}): ${ad.note}`,
+            senderName: ad.staffName,
+            type: "EXPENSE",
+            approved: true,
+            timestamp: txDate,
+          },
+        });
+        savedCount++;
+        savedTotal += ad.amount;
+        summaryLines.push(`• ${ad.staffName} Advance: ₹${ad.amount.toLocaleString("en-IN")}`);
+      }
+    }
+
+    const waText = [
+      "WHATSAPP IMPORT",
+      ...summaryLines.slice(0, 15),
+      (summaryLines.length > 15 ? `...and ${summaryLines.length - 15} more` : null),
+      `💸 TOTAL: ₹${savedTotal.toLocaleString("en-IN")}`,
+    ].filter(Boolean).join("\n");
+
+    return {
+      success: true,
+      action: "import_whatsapp_transactions",
+      count: savedCount,
+      total: savedTotal,
+      whatsappText: waText,
+      whatsappTitle: "WhatsApp Import Complete",
+    };
   }
 
   if (actionType === "scan_and_save_receipt") {
@@ -966,191 +1318,24 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     });
 
-    return { success: true, action: "settle_driver_salary", settlement };
-  }
+    const waSalarySlip = [
+      "SALARY SETTLEMENT",
+      `• Driver: ${driverName}`,
+      `• Days Worked: ${daysWorked} days`,
+      `• Earned Salary: ₹${earnedSalary.toLocaleString("en-IN")}`,
+      (advancesDeducted > 0 ? `• Advances Deducted: -₹${advancesDeducted.toLocaleString("en-IN")}` : null),
+      (otherDeductions > 0 ? `• Other Deductions: -₹${otherDeductions.toLocaleString("en-IN")}` : null),
+      (bonusAmount > 0 ? `• Bonus: +₹${bonusAmount.toLocaleString("en-IN")}` : null),
+      `💸 NET PAID: ₹${netPaidAmount.toLocaleString("en-IN")}`,
+    ].filter(Boolean).join("\n");
 
-  if (actionType === "ask_ai_financial_query") {
-    const query = formData.get("query")?.toString()?.trim() || "";
-    const historyRaw = formData.get("chatHistory")?.toString() || "[]";
-    let chatHistory: Array<{ role: string; content: string }> = [];
-    try {
-      chatHistory = JSON.parse(historyRaw);
-    } catch (e) {}
-
-    if (!query) {
-      return { error: "Please enter a question to ask AI." };
-    }
-
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("GEMINI_API_KEY not configured in backend .env");
-      }
-
-      // Fetch live company database context in parallel
-      const [drivers, autos, allUsers, recentExpenses, categoryStats, pendingList, settlementsList] = await Promise.all([
-        prisma.user.findMany({
-          where: { role: "DRIVER" },
-          select: { id: true, name: true, phone: true, salary: true, vehicleNumber: true, loginEnabled: true },
-          orderBy: { name: "asc" }
-        }),
-        prisma.auto.findMany({
-          select: { id: true, plateNumber: true, modelName: true, ownerName: true, driverPhone: true },
-          orderBy: { plateNumber: "asc" }
-        }),
-        prisma.user.findMany({
-          select: { name: true, phone: true, role: true, salary: true }
-        }),
-        prisma.expense.findMany({
-          take: 60,
-          orderBy: { timestamp: "desc" },
-          select: { id: true, amount: true, category: true, type: true, timestamp: true, notes: true, vehicle: true, senderName: true }
-        }),
-        prisma.expense.groupBy({
-          by: ["category", "type"],
-          _sum: { amount: true },
-          _count: { id: true }
-        }),
-        (prisma as any).pendingPayment ? (prisma as any).pendingPayment.findMany({
-          orderBy: { createdAt: "desc" },
-          take: 20
-        }) : Promise.resolve([]),
-        (prisma as any).driverSalarySettlement ? (prisma as any).driverSalarySettlement.findMany({
-          orderBy: { paymentDate: "desc" },
-          take: 15
-        }) : Promise.resolve([])
-      ]);
-
-      const now = new Date();
-      const prompt = `
-        You are Dreamline AI, the high-intelligence conversational assistant for Dreamline Logistics Atelier (answering with the brilliance and warmth of Claude, ChatGPT, and Gemini).
-        You have FULL live access to the company's real-time operations and financial database.
-
-        Reference Date/Time: ${now.toISOString()} (${MONTH_NAMES[now.getMonth()]} ${now.getFullYear()}).
-
-        === LIVE COMPANY DATABASE SNAPSHOT ===
-        1. Registered Drivers (${drivers.length} total):
-        ${JSON.stringify(drivers.map((d: any) => ({ name: d.name, phone: d.phone, monthlySalary: d.salary || 16500, assignedVehicle: d.vehicleNumber || "None", loginEnabled: d.loginEnabled })))}
-
-        2. Registered Autos (${autos.length} total):
-        ${JSON.stringify(autos.map((a: any) => ({ plate: a.plateNumber, model: a.modelName, owner: a.ownerName, driverPhone: a.driverPhone })))}
-
-        3. Pending Payments & Receivables (${pendingList.length} total):
-        ${JSON.stringify(pendingList.map((p: any) => ({ title: p.title, client: p.clientName, total: p.totalAmount, received: p.receivedAmount, pending: p.totalAmount - p.receivedAmount, due: p.dueDate, status: p.status })))}
-
-        4. Recent Driver Salary Settlements:
-        ${JSON.stringify(settlementsList.map((s: any) => ({ driver: s.driverName, month: s.monthYear, daysWorked: s.daysWorked, netPaid: s.netPaidAmount, advancesDeducted: s.advancesDeducted, date: s.paymentDate })))}
-
-        5. All Team Members (${allUsers.length} total):
-        ${JSON.stringify(allUsers.map((u: any) => ({ name: u.name, role: u.role, phone: u.phone, salary: u.salary })))}
-
-        6. Category Totals across All Time:
-        ${JSON.stringify(categoryStats.map((c: any) => ({ category: c.category, type: c.type, totalAmount: c._sum.amount, count: c._count.id })))}
-
-        7. Recent 60 Expense & Income Transactions (sorted newest first):
-        ${JSON.stringify(recentExpenses.map((e: any) => ({ amount: e.amount, cat: e.category, type: e.type, date: e.timestamp.toISOString().split("T")[0], notes: e.notes, vehicle: e.vehicle, sender: e.senderName, settled: (e as any).settled })))}
-
-        === CONVERSATION HISTORY ===
-        ${chatHistory.slice(-5).map(m => `${m.role.toUpperCase()}: ${m.content}`).join("\n")}
-
-        === USER QUESTION ===
-        "${query}"
-
-        === INSTRUCTIONS ===
-        Answer the user's question directly, intelligently, and warmly like Claude / ChatGPT.
-        - If the user asks for a list (e.g. "list of delivery boys and their salary", "show all autos", "list of drivers"):
-          Provide a clear, formatted markdown response or table showing driver names, assigned auto plates, phone numbers, and monthly salaries.
-        - If the user asks for a salary calculation (e.g. "Bittu worked 28 days what salary to pay"):
-          Look up their base monthly salary, compute daily rate, compute pay for days worked, check and deduct advances, and give a step-by-step breakdown.
-        - If the user asks an expense / income query (e.g. "how much spent on fuel 5 months ago", "total cash given to bittu"):
-          Calculate and summarize the exact amounts accurately based on the database snapshot.
-        - If the user asks operational or comparison questions (e.g. "who is driving MH-12", "who has highest salary", "how many drivers"):
-          Answer factually with live data from the database snapshot.
-
-        Return a JSON object in this format:
-        {
-          "answer": string,
-          "highlightStat": { "label": string, "value": string } or null,
-          "ledgerFilters": {
-            "startDate": string ISO or null,
-            "endDate": string ISO or null,
-            "categories": string[],
-            "type": "EXPENSE" | "INCOME" | "ALL",
-            "vehicle": string or null,
-            "driverName": string or null
-          } or null
-        }
-      `;
-
-      // Ultra low-latency Flash model chain
-      const MODEL_CHAIN = [
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash",
-      ];
-
-      let response: Response | null = null;
-      let lastError = "";
-
-      for (const model of MODEL_CHAIN) {
-        try {
-          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-          const res = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: {
-                temperature: 0.2,
-                responseMimeType: "application/json",
-                thinkingConfig: { thinkingBudget: 0 }
-              }
-            })
-          });
-
-          if (res.ok) {
-            response = res;
-            break;
-          }
-          const errText = await res.text();
-          lastError = errText;
-        } catch (e: any) {
-          lastError = e.message || String(e);
-        }
-      }
-
-      if (!response) {
-        throw new Error(`AI model busy or unavailable: ${lastError}`);
-      }
-
-      const resData = await response.json();
-      const rawText = resData.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-      const cleaned = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
-      let parsedOutput: any = {};
-      try {
-        parsedOutput = JSON.parse(cleaned);
-      } catch (e) {
-        parsedOutput = { answer: cleaned, highlightStat: null, ledgerFilters: null };
-      }
-
-      const humanAnswer = parsedOutput.answer || "I checked your request against our records.";
-
-      return {
-        success: true,
-        action: "ask_ai_financial_query",
-        originalQuery: query,
-        humanAnswer,
-        highlightStat: parsedOutput.highlightStat || null,
-        ledgerFilters: parsedOutput.ledgerFilters || null,
-      };
-    } catch (err: any) {
-      console.error("AI Financial Query Error:", err);
-      return {
-        error: err.message || "Failed to process AI query",
-        action: "ask_ai_financial_query",
-      };
-    }
+    return {
+      success: true,
+      action: "settle_driver_salary",
+      settlement,
+      whatsappText: waSalarySlip,
+      whatsappTitle: `Salary Slip: ${driverName}`,
+    };
   }
 
   return null;
@@ -1158,53 +1343,81 @@ export async function action({ request }: ActionFunctionArgs) {
 
 export default function Home() {
   const { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses = [], pendingPayments = [], salarySettlements = [] } = useLoaderData() as any;
-  const drivers = users.filter((u: any) => u.role === "DRIVER");
+  const dbDrivers = (users || []).filter((u: any) => u.role === "DRIVER");
+  const fallbackDrivers = [
+    { id: 9991, name: "Bittu", phone: "9876543210", vehicleNumber: "MH-12-RN-1234", salary: 18000, role: "DRIVER" },
+    { id: 9992, name: "Gaurav", phone: "9876543211", vehicleNumber: "MH-12-RN-5678", salary: 18000, role: "DRIVER" }
+  ];
+  const drivers = [...dbDrivers];
+  fallbackDrivers.forEach(fb => {
+    if (!drivers.some(d => (d.name || "").toLowerCase().includes(fb.name.toLowerCase()))) {
+      drivers.push(fb);
+    }
+  });
 
-  // Mock variables for deleted features to prevent TypeScript compilation errors
-  const deliveries: any[] = [];
-  const filteredDeliveries: any[] = [];
-  const paginatedDeliveries: any[] = [];
-  const activeDeliveryPage = 1;
-  const DELIVERY_PAGE_SIZE = 10;
-  const orderCounts = { totalRunsheets: 0, totalAssigned: 0, totalCompleted: 0, vendorShipOrders: 0, perOrderRateOrders: 0, vendorShipValue: 0, perOrderRateValue: 0, totalValue: 0, completionRate: 0 };
-  const weeklyPayouts: any[] = [];
-  const filteredAndSortedPayouts: any[] = [];
-  const ccFuelCycles: any[] = [];
-  const filteredAndSortedCcFuelCycles: any[] = [];
-  const ccSummaryMetrics = { unpaidCcTotal: 0, ongoingCcTotal: 0, lastPaidAmount: 0, totalFuelAllTime: 0 };
-  const systemSettings = { rateVendorShip: 70, ratePerOrderWeekly: 35, ratePerOrderMonthlyBase: 53000, ccFuelCycleEndDay: 4 };
-  const runsheetFormRef = { current: null };
-  const availableDeliveryYears: string[] = [];
-  const totalDeliveryPages = 1;
-  const getOrdinal = (day: number) => "";
+  // ─── Entry Console Modes & States ─── //
+  const [consoleTab, setConsoleTab] = useState<"expense" | "earning">("expense");
+  const [earningSubTab, setEarningSubTab] = useState<"weekly" | "bill45" | "other">("weekly");
 
-  const [deliveryDriverFilter, setDeliveryDriverFilter] = useState<any>("ALL");
-  const [deliveryCategoryFilter, setDeliveryCategoryFilter] = useState<any>("ALL");
-  const [deliveryFilter, setDeliveryFilter] = useState<any>("ALL");
-  const [ordersViewMode, setOrdersViewMode] = useState<any>("form");
-  const [payoutStatusFilter, setPayoutStatusFilter] = useState<any>("ALL");
-  const [payoutSortOrder, setPayoutSortOrder] = useState<any>("date_desc");
-  const [payoutSubTab, setPayoutSubTab] = useState<any>("payouts");
-  const [runsheetDate, setRunsheetDate] = useState<any>("");
-  const [runsheetSuccessVisible, setRunsheetSuccessVisible] = useState<any>(false);
-  const [formCategory, setFormCategory] = useState<any>("vendor_ship");
-  const [formCompletedOrders, setFormCompletedOrders] = useState<any>("");
-  const [deliveryPage, setDeliveryPage] = useState<any>(1);
-  const [payoutSuccessVisible, setPayoutSuccessVisible] = useState<any>(false);
-  const [ccSuccessVisible, setCcSuccessVisible] = useState<any>(false);
-  const [settingsSuccessVisible, setSettingsSuccessVisible] = useState<any>(false);
-  const [payoutToPay, setPayoutToPay] = useState<any>(null);
-  const [weeklyOrdersToEdit, setWeeklyOrdersToEdit] = useState<any>(null);
-  const [ccBillToPay, setCcBillToPay] = useState<any>(null);
-  const [editingDelivery, setEditingDelivery] = useState<any>(null);
-  const [payAmountInput, setPayAmountInput] = useState<any>("");
-  const [payDateInput, setPayDateInput] = useState<any>("");
-  const [payNotesInput, setPayNotesInput] = useState<any>("");
-  const [selectedDeliveryYear, setSelectedDeliveryYear] = useState<any>("ALL");
-  const [selectedDeliveryMonth, setSelectedDeliveryMonth] = useState<any>("ALL");
-  const [customDeliveryStartDate, setCustomDeliveryStartDate] = useState<any>("");
-  const [customDeliveryEndDate, setCustomDeliveryEndDate] = useState<any>("");
-  const [showDeliveryDashboard, setShowDeliveryDashboard] = useState<any>(false);
+  // Mode A: Expense Entry
+  const [selectedExpenseCategory, setSelectedExpenseCategory] = useState<string>("fuel");
+  const [activeFastPill, setActiveFastPill] = useState<string>("Cash CNG");
+  const [fastAmountInput, setFastAmountInput] = useState<string>("");
+  const [manualNotes, setManualNotes] = useState<string>("Cash CNG fuel refill");
+  const [expenseDate, setExpenseDate] = useState<string>(() => new Date().toISOString().split("T")[0]);
+
+  // Mode B1: Fast Weekly Earning (3 IDs) State
+  const [weeklyV1, setWeeklyV1] = useState<string>("");
+  const [weeklyV2, setWeeklyV2] = useState<string>("");
+  const [weeklyPerOrder, setWeeklyPerOrder] = useState<string>("");
+  const [weeklyExtra, setWeeklyExtra] = useState<string>("");
+  const [weeklyPayoutDate, setWeeklyPayoutDate] = useState<string>(() => new Date().toISOString().split("T")[0]);
+  const [weeklyNotes, setWeeklyNotes] = useState<string>("Wednesday Payout");
+
+  // Mode B2: 45-Day Bill Payment State
+  const [billAmount, setBillAmount] = useState<string>("");
+  const [billClient, setBillClient] = useState<string>("");
+  const [billNote, setBillNote] = useState<string>("");
+  const [billDate, setBillDate] = useState<string>(() => new Date().toISOString().split("T")[0]);
+  const [linkedPendingId, setLinkedPendingId] = useState<string>("");
+
+  // Mode B3: Other Income State
+  const [otherIncomeAmount, setOtherIncomeAmount] = useState<string>("");
+  const [otherIncomeNote, setOtherIncomeNote] = useState<string>("");
+  const [otherIncomeDate, setOtherIncomeDate] = useState<string>(() => new Date().toISOString().split("T")[0]);
+
+  // WhatsApp Chat Importer State
+  const [showWhatsAppImporter, setShowWhatsAppImporter] = useState<boolean>(false);
+  const [rawWhatsAppChat, setRawWhatsAppChat] = useState<string>("");
+  const [detectedWhatsAppTxs, setDetectedWhatsAppTxs] = useState<DetectedTransaction[]>([]);
+
+  // 2-Button WhatsApp Share Modal State
+  const [whatsappShareModal, setWhatsappShareModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    text: string;
+  }>({
+    isOpen: false,
+    title: "",
+    text: "",
+  });
+  const [copiedShareText, setCopiedShareText] = useState<boolean>(false);
+
+
+
+  const handleCopyShareText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedShareText(true);
+      setTimeout(() => setCopiedShareText(false), 2500);
+    } catch (err) {
+      triggerAlert("Clipboard Error", "Please manually select and copy the text.");
+    }
+  };
+
+  const handleOpenWhatsApp = (text: string) => {
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+  };
 
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
@@ -1244,7 +1457,7 @@ export default function Home() {
   };
 
   // Tab state & Dashboard workflow controls
-  const [activeTab, setActiveTab] = useState<"expenses" | "users" | "pending_dues" | "driver_salaries" | "orders">("expenses");
+  const [activeTab, setActiveTab] = useState<"expenses" | "pending_dues" | "driver_salaries">("expenses");
   const [userSubTab, setUserSubTab] = useState<"drivers" | "autos" | "admins">("drivers");
   const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger">("entry");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
@@ -1354,7 +1567,7 @@ export default function Home() {
 
   // AI manual feedback state
   const [aiRawInput, setAiRawInput] = useState("");
-  const [expenseFormMode, setExpenseFormMode] = useState<"ai" | "manual">("ai");
+  // [expenseFormMode removed, replaced by consoleTab]
 
   const parseLocalDate = (d: Date | string): Date => {
     if (d instanceof Date) {
@@ -1419,14 +1632,9 @@ export default function Home() {
   const EXPENSE_PAGE_SIZE = 10;
   const [expensePage, setExpensePage] = useState(1);
 
-  const [manualType, setManualType] = useState<"EXPENSE" | "INCOME">("EXPENSE");
-  const [selectedCategory, setSelectedCategory] = useState("fuel");
-  const [skipReceiptRequired, setSkipReceiptRequired] = useState(false);
-  const [fuelSlipsBase64, setFuelSlipsBase64] = useState<string[]>([]);
-  const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
-  const [showPendingModal, setShowPendingModal] = useState(false);
-  const [selectedSlipImage, setSelectedSlipImage] = useState<string | null>(null);
-
+  // [manualType and selectedCategory replaced by consoleTab and selectedExpenseCategory]
+      const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
+    
   // Local edit states
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
 
@@ -1478,60 +1686,13 @@ export default function Home() {
         window.history.replaceState({}, document.title, "/?tab=expenses");
       }
 
-      if (sharedFromSW === "true" && "caches" in navigator) {
-        (async () => {
-          try {
-            const cache = await caches.open("shared-receipt-cache");
-            const cachedResponse = await cache.match("/shared-image-temp");
-            if (cachedResponse) {
-              const dataUrl = await cachedResponse.text();
-              await cache.delete("/shared-image-temp");
-              
-              setFuelSlipsBase64(prev => [...prev, dataUrl]);
-              setActiveTab("expenses");
-              setShowExpenseDashboard(false);
-            }
-          } catch (e) {
-            console.error("Failed to read cached image from SW:", e);
-          }
-          window.history.replaceState({}, document.title, "/?tab=expenses");
-        })();
-      }
+
     }
   }, []);
 
-  // Redirect away from disabled tabs if they try to access them
-  useEffect(() => {
-    if (activeTab === "orders") {
-      setActiveTab("expenses");
-    }
-  }, [activeTab]);
 
-  // Global Clipboard paste listener for images/receipts
-  useEffect(() => {
-    const handlePaste = async (event: ClipboardEvent) => {
-      const items = event.clipboardData?.items;
-      if (!items) return;
 
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (item.type.indexOf("image") !== -1) {
-          const file = item.getAsFile();
-          if (file) {
-            event.preventDefault();
-            const compressed = await compressImage(file);
-            setFuelSlipsBase64(prev => [...prev, compressed]);
-            break;
-          }
-        }
-      }
-    };
 
-    window.addEventListener("paste", handlePaste);
-    return () => {
-      window.removeEventListener("paste", handlePaste);
-    };
-  }, []);
 
   // PWA Install Prompt & Compatibility Logic
   useEffect(() => {
@@ -1621,15 +1782,13 @@ export default function Home() {
   };
 
   // Automated state resets upon switching tabs
-  const switchTab = (tab: "expenses" | "orders" | "users" | "pending_dues" | "driver_salaries") => {
+  const switchTab = (tab: "expenses" | "pending_dues" | "driver_salaries") => {
     setActiveTab(tab);
     setShowExpenseDashboard(false);
-    setShowDeliveryDashboard(false);
     setSidebarOpen(false);
-    setManualType("EXPENSE");
-    setSelectedCategory("fuel");
-    setFuelSlipsBase64([]);
-    setSelectedSlipImage(null);
+    setConsoleTab("expense");
+    setSelectedExpenseCategory("fuel");
+    setActiveFastPill("Cash CNG");
     setExpenseCategoryFilter("ALL");
     setEntityFilter("ALL");
   };
@@ -1674,26 +1833,35 @@ export default function Home() {
       const unSettledAdvances = expenses.filter((e: any) => {
         if (e.settled) return false;
 
-        const isAdvanceCategory = e.category === "bittu" || 
+        const isAdvanceCategory = 
+          e.category === "bittu" || 
+          e.category === "bittu_advance" ||
+          e.category === "gaurav_advance" ||
           /advance|salary|kharcha|loan|uthav/i.test(e.notes || "") ||
           /advance|salary/i.test(e.category || "");
 
         if (!isAdvanceCategory) return false;
 
         const driverFullName = (d.name || "").toLowerCase().trim();
-        const driverFirstName = driverFullName.split(/\s+/)[0]; // e.g. "rahul" from "rahul kumar"
+        const driverFirstName = driverFullName.split(/\s+/)[0]; // e.g. "bittu", "gaurav", "rahul"
         const notesLower = (e.notes || "").toLowerCase();
         const senderLower = (e.senderName || "").toLowerCase();
         const vehiclePlate = (d.vehicleNumber || "").toLowerCase().replace(/[^a-z0-9]/g, "");
         const expVehicle = (e.vehicle || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+        const isBittuDriver = driverFullName.includes("bittu") || driverFullName.includes("betu");
+        const isGauravDriver = driverFullName.includes("gaurav");
+
+        const categoryMatch = 
+          (isBittuDriver && (e.category === "bittu" || e.category === "bittu_advance")) ||
+          (isGauravDriver && (e.category === "gaurav_advance" || notesLower.includes("gaurav")));
+
         const nameMatch = 
           (driverFullName && (notesLower.includes(driverFullName) || senderLower.includes(driverFullName))) ||
           (driverFirstName && driverFirstName.length >= 3 && (notesLower.includes(driverFirstName) || senderLower.includes(driverFirstName)));
-
         const vehicleMatch = Boolean(vehiclePlate && expVehicle && (vehiclePlate.includes(expVehicle) || expVehicle.includes(vehiclePlate)));
 
-        return nameMatch || vehicleMatch;
+        return categoryMatch || nameMatch || vehicleMatch;
       });
 
       const totalAdvances = unSettledAdvances.reduce((sum: number, a: any) => sum + (a.amount || 0), 0);
@@ -1715,23 +1883,16 @@ export default function Home() {
   }, [drivers, expenses, driverDaysWorkedMap, driverBonusMap, driverDeductionMap]);
 
   const generateWhatsAppSlipText = (item: any) => {
-    return `🧾 *SALARY SLIP - DREAMLINE LOGISTICS* 🧾\n` +
-      `---------------------------------\n` +
-      `👤 *Driver Name:* ${item.driver.name}\n` +
-      `📅 *Month:* ${salaryMonthYear}\n` +
-      `🚗 *Vehicle:* ${item.driver.vehicleNumber || 'General'}\n` +
-      `---------------------------------\n` +
-      `💵 *Base Monthly Salary:* ₹${item.baseSalary.toLocaleString('en-IN')}\n` +
-      `⏱️ *Days Worked:* ${item.daysWorked} days (₹${item.dailyRate}/day)\n` +
-      `📈 *Earned Salary:* ₹${item.earnedSalary.toLocaleString('en-IN')}\n` +
-      (item.bonus > 0 ? `✨ *Bonus Added:* +₹${item.bonus.toLocaleString('en-IN')}\n` : '') +
-      (item.totalAdvances > 0 ? `⚠️ *Advances Deducted:* -₹${item.totalAdvances.toLocaleString('en-IN')} (${item.unSettledAdvances.length} entries)\n` : '') +
-      (item.customDeductions > 0 ? `📉 *Other Deductions:* -₹${item.customDeductions.toLocaleString('en-IN')}\n` : '') +
-      `---------------------------------\n` +
-      `💰 *NET PAYABLE SALARY:* *₹${item.netPayable.toLocaleString('en-IN')}*\n` +
-      `---------------------------------\n` +
-      `Status: ✅ Settled & Approved\n` +
-      `Thank you for your dedicated service! 🚚`;
+    return [
+      "SALARY SETTLEMENT",
+      `• Driver: ${item.driver.name}`,
+      `• Days Worked: ${item.daysWorked} days (₹${item.dailyRate}/day)`,
+      `• Earned Salary: ₹${item.earnedSalary.toLocaleString('en-IN')}`,
+      (item.totalAdvances > 0 ? `• Advances Deducted: -₹${item.totalAdvances.toLocaleString('en-IN')} (${item.unSettledAdvances.length} slips)` : null),
+      (item.customDeductions > 0 ? `• Other Deductions: -₹${item.customDeductions.toLocaleString('en-IN')}` : null),
+      (item.bonus > 0 ? `• Bonus: +₹${item.bonus.toLocaleString('en-IN')}` : null),
+      `💸 NET PAID: ₹${item.netPayable.toLocaleString('en-IN')}`,
+    ].filter(Boolean).join("\n");
   };
 
   // AI Spotlight Multi-Turn Chat State
@@ -1977,17 +2138,55 @@ export default function Home() {
 
       // Always clear the text inputs and primary fuel slip (non-pending)
       setAiRawInput("");
-      setFuelSlipsBase64([]);
+      setFastAmountInput("");
+      setManualNotes("Cash CNG fuel refill");
+      setActiveFastPill("Cash CNG");
+      setSelectedExpenseCategory("fuel");
       
       // Native browser form reset for all input text fields
       aiFormRef.current?.reset();
       manualExpenseFormRef.current?.reset();
 
+      // Trigger 2-button WhatsApp Sync Modal if formatted text is present
+      if (actionData.whatsappText) {
+        setWhatsappShareModal({
+          isOpen: true,
+          title: actionData.whatsappTitle || "WhatsApp Sync",
+          text: actionData.whatsappText,
+        });
+      }
+
+      if (actionData.action === "create_expense") {
+        setFastAmountInput("");
+        setOtherIncomeAmount("");
+        setOtherIncomeNote("");
+      }
+
+      if (actionData.action === "create_weekly_earning") {
+        setWeeklyV1("");
+        setWeeklyV2("");
+        setWeeklyPerOrder("");
+        setWeeklyExtra("");
+      }
+
+      if (actionData.action === "create_bill_payment") {
+        setBillAmount("");
+        setBillClient("");
+        setBillNote("");
+        setLinkedPendingId("");
+      }
+
+      if (actionData.action === "import_whatsapp_transactions") {
+        setShowWhatsAppImporter(false);
+        setRawWhatsAppChat("");
+        setDetectedWhatsAppTxs([]);
+      }
+
       // Only clear pending slip and show success if there is NO pending fuel entry
       if (!hasPendingSlip) {
         setPendingSlipBase64(null);
 
-        if (actionData.action === "create_expense" || actionData.action === "scan_and_save_receipt") {
+        if (actionData.action === "create_expense" || actionData.action === "scan_and_save_receipt" || actionData.action === "create_weekly_earning" || actionData.action === "import_whatsapp_transactions") {
           setExpenseSuccessVisible(true);
           const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
@@ -2027,20 +2226,7 @@ export default function Home() {
     }
   }, [actionData]);
 
-  // Synchronize needsFuelSlip action validation to automatically open the step-by-step modal
-  useEffect(() => {
-    if (actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip) {
-      setShowPendingModal(true);
-    } else {
-      setShowPendingModal(false);
-    }
-  }, [actionData]);
 
-  // Live Payout Preview for Runsheet Console
-  const parsedCompleted = parseInt(formCompletedOrders) || 0;
-  const previewPayout = formCategory === "vendor_ship"
-    ? parsedCompleted * 70
-    : parsedCompleted * 35;
 
   const isSubmitting = navigation.state === "submitting";
 
@@ -2057,12 +2243,19 @@ export default function Home() {
       {/* Notion Sidebar Navigation */}
       <aside className="notion-sidebar border-r border-neutral-200/60 dark:border-slate-800 bg-white dark:bg-[#1E293B] w-[260px] flex-shrink-0 flex flex-col h-screen fixed md:sticky top-0 z-50 transition-transform duration-300 md:transform-none">
         {/* Workspace Title */}
-        <div className="p-4 border-b border-neutral-200/60 dark:border-slate-800 flex justify-between items-center">
-          <div className="flex items-center gap-2.5">
-            <img src="/logo.png" alt="Logo" className="w-5 h-5 object-contain rounded shrink-0" />
-            <span className="font-bold text-sm tracking-tight text-neutral-850 dark:text-neutral-100">
-              Dreamline Logistics
-            </span>
+        <div className="p-4 border-b border-slate-200/80 dark:border-slate-800 flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-white p-1 shadow-sm border border-slate-200 dark:border-white/10 flex items-center justify-center shrink-0">
+              <img src="/logo.png" alt="Logo" className="w-7 h-7 object-contain" />
+            </div>
+            <div>
+              <span className="font-bold text-sm tracking-tight text-slate-900 dark:text-slate-100 block">
+                Dreamline Logistics
+              </span>
+              <span className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase block">
+                Financial Atelier
+              </span>
+            </div>
           </div>
           <button
             onClick={() => setSidebarOpen(false)}
@@ -2128,21 +2321,7 @@ export default function Home() {
             </button>
           )}
 
-          {loggedInUser?.role !== "DRIVER" && (
-            <button
-              onClick={() => switchTab("users")}
-              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
-                activeTab === "users"
-                  ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
-                  : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
-              }`}
-            >
-              <svg className={`w-4 h-4 transition-colors ${activeTab === 'users' ? 'text-[#5D87FF]' : 'text-purple-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-              <span>Delivery Boys & Autos</span>
-            </button>
-          )}
+          
         </nav>
 
         {/* Persistent Install App Button (Hidden when already standalone) */}
@@ -2200,17 +2379,20 @@ export default function Home() {
 
           {/* Header Action Items (Theme Toggle & Share Pass) */}
           <div className="flex items-center gap-3.5">
-            {/* Generate Share Access Pass Button */}
+            {/* 💬 Instant WhatsApp Bulk Importer Button */}
             {loggedInUser?.permission !== "VIEW_ONLY" && (
               <button
-                onClick={() => setShowPassModal(true)}
-                className="px-3 py-1.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 border border-blue-500/30 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
-                title="Generate Temporary Share Access Pass"
+                type="button"
+                onClick={() => setShowWhatsAppImporter(true)}
+                className="px-3 py-1.5 bg-[#13DEB9]/15 hover:bg-[#13DEB9]/25 text-[#13DEB9] border border-[#13DEB9]/30 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                title="Instant WhatsApp Bulk Importer (0ms Regex)"
               >
-                <span>🔑</span>
-                <span className="hidden sm:inline">Share Access Pass</span>
+                <span>💬</span>
+                <span className="hidden sm:inline">WA Import</span>
               </button>
             )}
+
+            
 
             {/* Light / Dark Mode Toggle */}
             <button
@@ -2351,410 +2533,575 @@ export default function Home() {
                   <div className="lg:col-span-2 space-y-6">
                     <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg p-6 bg-white dark:bg-[#1e1e1e] shadow-sm space-y-6">
                       
-                      {/* Interactive Tonal Segmented Pill Control */}
+                      {/* Interactive Tonal Segmented Pill Control: Mode A (Add Expense) vs Mode B (Add Earning) */}
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                         <div className="flex items-center gap-2">
-                          <span className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
-                            Entry Console
+                          <span className="text-sm font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
+                            Cashflow Entry Console
                           </span>
                         </div>
                         <div className="inline-flex p-0.5 bg-[#f5f5f4] dark:bg-[#2c2c2c] rounded-lg gap-0.5 select-none self-start sm:self-auto border border-neutral-200/50 dark:border-neutral-800/30">
                           <button
                             type="button"
-                            onClick={() => setExpenseFormMode("ai")}
-                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
-                              expenseFormMode === "ai"
+                            onClick={() => setConsoleTab("expense")}
+                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+                              consoleTab === "expense"
                                 ? "bg-[#5D87FF] text-white shadow-sm"
                                 : "text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
                             }`}
                           >
-                            🤖 AI Assistant
+                            <span>💸</span>
+                            <span>Add Expense</span>
                           </button>
                           <button
                             type="button"
-                            onClick={() => setExpenseFormMode("manual")}
-                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
-                              expenseFormMode === "manual"
-                                ? "bg-[#5D87FF] text-white shadow-sm"
+                            onClick={() => setConsoleTab("earning")}
+                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
+                              consoleTab === "earning"
+                                ? "bg-[#13DEB9] text-white shadow-sm"
                                 : "text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
                             }`}
                           >
-                            ✍️ Manual Form
+                            <span>💰</span>
+                            <span>Add Earning</span>
                           </button>
                         </div>
                       </div>
 
-                      {/* Dynamic Form Content */}
-                      {expenseFormMode === "ai" ? (
+                      {/* MODE A: 💸 ADD EXPENSE (DEFAULT) */}
+                      {consoleTab === "expense" && (
                         <div className="space-y-4 animate-fade-in">
-                          <div className="space-y-1">
-                            <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">
-                              Smart AI Logistics Parser (Expenses & Orders)
-                            </h3>
+                          {/* 1-Tap Category Pills */}
+                          <div className="space-y-2.5 p-3.5 bg-neutral-50 dark:bg-neutral-900/40 rounded-xl border border-neutral-200/60 dark:border-neutral-800/60">
+                            <div className="flex justify-between items-center">
+                              <label className="text-xs font-bold text-neutral-700 dark:text-neutral-300 flex items-center gap-1.5">
+                                <span>⚡ 1-Tap Category Pills</span>
+                              </label>
+                              <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[#5D87FF]/10 text-[#5D87FF] dark:text-[#7ba1ff] border border-[#5D87FF]/20">
+                                Selected: {activeFastPill}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {FAST_EXPENSE_PILLS.map((pill) => {
+                                const isSelected = activeFastPill === pill.label;
+                                return (
+                                  <button
+                                    key={pill.label}
+                                    type="button"
+                                    onClick={() => {
+                                      setActiveFastPill(pill.label);
+                                      setSelectedExpenseCategory(pill.value);
+                                      if (pill.defaultNotes) setManualNotes(pill.defaultNotes);
+                                    }}
+                                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
+                                      isSelected
+                                        ? "bg-[#5D87FF] text-white border-[#5D87FF] shadow-sm scale-105"
+                                        : "bg-white hover:bg-neutral-100 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 border-neutral-200/80 dark:border-neutral-700/80"
+                                    }`}
+                                  >
+                                    <span>{pill.icon}</span>
+                                    <span>{pill.label}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
                           </div>
 
-                          <Form ref={aiFormRef} method="post" className="space-y-4">
-                            <input type="hidden" name="isAi" value="true" />
-                            <textarea
-                              name="rawText"
-                              rows={3}
-                              value={aiRawInput}
-                              onChange={(e) => setAiRawInput(e.target.value)}
-                              placeholder="Example: diesel bill ₹4500 for MH-12-AB-1234 by sam today + John completed runsheet with 42 orders"
-                              className="notion-textarea text-sm w-full border border-neutral-200 dark:border-neutral-800 rounded-md px-3.5 py-2.5 bg-transparent focus:ring-1 focus:ring-[#5D87FF] outline-none min-h-[80px] text-neutral-800 dark:text-neutral-100"
-                            />
-
-                            {/* AI Camera Receipt Slip Capture */}
-                            <div className="p-3.5 bg-orange-50/30 dark:bg-orange-950/10 border border-orange-200/40 dark:border-orange-900/40 rounded-lg space-y-2.5">
-                              <div className="flex justify-between items-center">
-                                <div>
-                                  <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
-                                    <span>⛽ Petrol Pump Slip Receipt</span>
-                                  </h4>
-                                </div>
-                                <div className="flex gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => document.getElementById("ai-slip-input-camera")?.click()}
-                                    title="Take Photo using Camera"
-                                    className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                                    </svg>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => document.getElementById("ai-slip-input-gallery")?.click()}
-                                    title="Select from Gallery"
-                                    className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                  >
-                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                    </svg>
-                                  </button>
-                                </div>
-                              </div>
-
-                              <input
-                                type="file"
-                                id="ai-slip-input-camera"
-                                accept="image/*"
-                                capture="environment"
-                                className="hidden"
-                                onChange={async (e) => {
-                                  const file = e.target.files?.[0];
-                                  if (file) {
-                                    const compressed = await compressImage(file);
-                                    setFuelSlipsBase64(prev => [...prev, compressed]);
-                                  }
-                                }}
-                              />
-                              <input
-                                type="file"
-                                id="ai-slip-input-gallery"
-                                accept="image/*"
-                                className="hidden"
-                                onChange={async (e) => {
-                                  const file = e.target.files?.[0];
-                                  if (file) {
-                                    const compressed = await compressImage(file);
-                                    setFuelSlipsBase64(prev => [...prev, compressed]);
-                                  }
-                                }}
-                              />
-                              <input type="hidden" name="imageUrls" value={JSON.stringify(fuelSlipsBase64)} />
-
-                              {fuelSlipsBase64.length > 0 ? (
-                                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 pt-1">
-                                  {fuelSlipsBase64.map((slip, index) => (
-                                    <div key={index} className="relative w-full aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                      <img src={slip} className="w-full h-full object-cover" alt={`AI Fuel Slip Preview ${index + 1}`} />
-                                      <button
-                                        type="button"
-                                        onClick={() => setFuelSlipsBase64(prev => prev.filter((_, i) => i !== index))}
-                                        className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
-                                      >
-                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                        </svg>
-                                      </button>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : null}
-                            </div>
-
-                            <div className="flex flex-col sm:flex-row justify-end sm:items-center gap-3 pt-2">
-                              {fuelSlipsBase64.length > 0 && (
-                                <button
-                                  type="submit"
-                                  name="_action"
-                                  value="scan_and_save_receipt"
-                                  disabled={isSubmitting}
-                                  className="py-2.5 px-4 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded-md text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 border border-transparent self-end sm:self-auto"
-                                >
-                                  {isSubmitting ? "Scanning..." : "🤖 Scan & Save Receipt (AI)"}
-                                </button>
-                              )}
-                              <button
-                                type="submit"
-                                name="_action"
-                                value="create_expense"
-                                disabled={isSubmitting || !aiRawInput.trim()}
-                                className="notion-btn text-xs px-4 py-2.5 bg-[#5D87FF] hover:bg-[#4570EA] font-bold text-white rounded-md disabled:opacity-50 cursor-pointer shadow-sm self-end sm:self-auto transition-all"
-                              >
-                                {isSubmitting ? "Parsing..." : "AI Parse & Save"}
-                              </button>
-                            </div>
-                          </Form>
-
-                        </div>
-                      ) : (
-                        <div className="space-y-4 animate-fade-in">
-                          <div className="space-y-1">
-                            <h3 className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">
-                              Manual Log Entry
-                            </h3>
-                          </div>
-
+                          {/* Mode A Form: NO redundant category dropdown */}
                           <Form ref={manualExpenseFormRef} method="post" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            <input type="hidden" name="isAi" value="false" />
+                            <input type="hidden" name="_action" value="create_expense" />
+                            <input type="hidden" name="type" value="EXPENSE" />
+                            <input type="hidden" name="category" value={selectedExpenseCategory} />
+                            <input
+                              type="hidden"
+                              name="senderName"
+                              value={
+                                activeFastPill.includes("Bittu")
+                                  ? "Bittu"
+                                  : activeFastPill.includes("Gaurav")
+                                  ? "Gaurav"
+                                  : (loggedInUser?.name || "Founder")
+                              }
+                            />
+                            <input type="hidden" name="vehicle" value="" />
 
-                            {/* Transaction Type Segmented Toggle */}
-                            <div className="sm:col-span-2">
-                              <label className="text-xs font-semibold text-neutral-500 block mb-1">Transaction Type</label>
-                              <div className="inline-flex p-0.5 bg-[#f5f5f4] dark:bg-[#2c2c2c] rounded-lg gap-0.5 select-none w-full border border-neutral-200/50 dark:border-neutral-800/30">
+                            {/* Smart Amount Input with 'k' Shorthand and +000 button */}
+                            <div className="space-y-1">
+                              <div className="flex justify-between items-center">
+                                <label className="text-xs font-semibold text-neutral-500">Amount (₹ INR)</label>
+                                <span className="text-[10px] text-neutral-400 font-medium">Type "2k" or "+000"</span>
+                              </div>
+                              <div className="relative flex items-center">
+                                <span className="absolute left-3 text-neutral-400 font-bold text-sm pointer-events-none select-none">₹</span>
+                                <input
+                                  type="text"
+                                  name="amount"
+                                  required
+                                  placeholder="e.g. 2,000 or 2k"
+                                  value={fastAmountInput}
+                                  onChange={(e) => setFastAmountInput(e.target.value)}
+                                  onBlur={() => {
+                                    const parsed = parseKAmount(fastAmountInput);
+                                    if (parsed > 0) setFastAmountInput(parsed.toString());
+                                  }}
+                                  style={{ paddingLeft: "34px", paddingRight: "64px" }}
+                                  className="notion-input w-full pl-8 pr-16 text-sm font-bold border border-neutral-200 dark:border-neutral-800 rounded-md py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                                />
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    setManualType("EXPENSE");
-                                    setSelectedCategory("fuel");
+                                    const curr = parseKAmount(fastAmountInput);
+                                    if (curr > 0) {
+                                      setFastAmountInput((curr * 1000).toString());
+                                    } else if (fastAmountInput && !isNaN(Number(fastAmountInput))) {
+                                      setFastAmountInput(fastAmountInput + "000");
+                                    }
                                   }}
-                                  className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer text-center ${
-                                    manualType === "EXPENSE"
-                                      ? "bg-[#5D87FF] text-white shadow-sm"
-                                      : "text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
-                                  }`}
+                                  className="absolute right-1.5 px-2 py-1 text-[10px] font-extrabold rounded bg-[#5D87FF]/15 hover:bg-[#5D87FF]/25 text-[#5D87FF] dark:text-[#7ba1ff] border border-[#5D87FF]/30 transition-all cursor-pointer"
+                                  title="Multiply by 1,000"
                                 >
-                                  💸 Expense
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setManualType("INCOME");
-                                    setSelectedCategory("shadowfax");
-                                  }}
-                                  className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer text-center ${
-                                    manualType === "INCOME"
-                                      ? "bg-[#5D87FF] text-white shadow-sm"
-                                      : "text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
-                                  }`}
-                                >
-                                  📈 Income
+                                  +000
                                 </button>
                               </div>
-                              <input type="hidden" name="type" value={manualType} />
                             </div>
 
+                            {/* Expense Date */}
                             <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Amount (₹ INR)</label>
+                              <label className="text-xs font-semibold text-neutral-500">Expense Date</label>
                               <input
-                                type="number"
-                                name="amount"
-                                required
-                                step="1"
-                                min="0"
-                                placeholder="0"
-                                onKeyDown={(e) => {
-                                  if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
-                                }}
-                                onPaste={(e) => {
-                                  const text = e.clipboardData.getData("text");
-                                  if (/[.,\-+eE]/.test(text)) e.preventDefault();
-                                }}
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
+                                type="date"
+                                name="date"
+                                value={expenseDate}
+                                onChange={(e) => setExpenseDate(e.target.value)}
+                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none font-semibold cursor-pointer"
                               />
                             </div>
 
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Category</label>
-                              <select
-                                name="category"
-                                value={selectedCategory}
-                                onChange={(e) => setSelectedCategory(e.target.value)}
-                                className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#5D87FF] outline-none cursor-pointer"
-                              >
-                                {manualType === "EXPENSE" ? (
-                                  <>
-                                    <option value="fuel">⛽ Fuel</option>
-                                    <option value="bittu">👤 Driver Advance / Salary (Bittu, Rahul, etc.)</option>
-                                    <option value="service">🔧 Service / Auto-related</option>
-                                    <option value="other">📦 Other Expenses</option>
-                                  </>
-                                ) : (
-                                  <>
-                                    <option value="shadowfax">🚚 70 Per Order Income</option>
-                                    <option value="factory">🚚 Vendor Per Order Income</option>
-                                    <option value="vendor_income">🚚 Vendor Income</option>
-                                    <option value="other_income">💰 Other Income</option>
-                                  </>
-                                )}
-                              </select>
-                            </div>
-
-                            <input type="hidden" name="vehicle" value="" />
-                            <input type="hidden" name="senderName" value="Founder" />
-
+                            {/* Optional Note (prefilled with pill default, editable) */}
                             <div className="sm:col-span-2 space-y-1">
                               <label className="text-xs font-semibold text-neutral-500">Notes / Remarks</label>
                               <input
                                 type="text"
                                 name="notes"
-                                placeholder={manualType === "EXPENSE" ? "What was this expense for?" : "70 per order payout, vendor weekly order pay, vendor base pay details"}
+                                value={manualNotes}
+                                onChange={(e) => setManualNotes(e.target.value)}
+                                placeholder="What was this expense for?"
                                 className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
                               />
                             </div>
 
-                            {/* Petrol Pump Slip Camera Capture */}
-                            {manualType === "EXPENSE" && selectedCategory === "fuel" && (
-                              <div className="sm:col-span-2 space-y-3">
-                                <div className="flex items-center gap-2 p-1">
-                                  <input
-                                    type="checkbox"
-                                    id="skip-receipt-toggle"
-                                    checked={skipReceiptRequired}
-                                    onChange={(e) => {
-                                      setSkipReceiptRequired(e.target.checked);
-                                      if (e.target.checked) {
-                                        setFuelSlipsBase64([]); // Clear images if skipping
-                                      }
-                                    }}
-                                    className="w-4 h-4 rounded text-[#5D87FF] border-neutral-305 focus:ring-[#5D87FF] cursor-pointer"
-                                  />
-                                  <label htmlFor="skip-receipt-toggle" className="text-xs text-neutral-600 dark:text-neutral-400 font-bold cursor-pointer select-none">
-                                    Skip Petrol Slip Receipt (e.g. for past month entries)
-                                  </label>
-                                </div>
-
-                                {!skipReceiptRequired && (
-                                  <div className="p-4 bg-orange-50/50 dark:bg-orange-950/10 border border-orange-200/50 dark:border-orange-900/30 rounded-lg space-y-3">
-                                    <div className="flex justify-between items-center">
-                                      <div>
-                                        <h4 className="text-xs font-bold text-orange-800 dark:text-orange-300 flex items-center gap-1">
-                                          <span>⛽ Petrol Pump Slip Required</span>
-                                        </h4>
-                                        <p className="text-[10px] text-neutral-400 mt-0.5">Attach a photo (or paste Ctrl+V directly) to log fuel expense.</p>
-                                      </div>
-                                      <div className="flex gap-2">
-                                        <button
-                                          type="button"
-                                          onClick={() => document.getElementById("fuel-slip-input-camera")?.click()}
-                                          title="Take Photo using Camera"
-                                          className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                        >
-                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                                          </svg>
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => document.getElementById("fuel-slip-input-gallery")?.click()}
-                                          title="Select from Gallery"
-                                          className="p-2 rounded-full bg-orange-100 hover:bg-orange-200 dark:bg-orange-950 dark:hover:bg-orange-900 text-orange-700 dark:text-orange-300 transition-all flex items-center justify-center cursor-pointer shadow-sm"
-                                        >
-                                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                          </svg>
-                                        </button>
-                                      </div>
-                                    </div>
-
-                                    <input
-                                      type="file"
-                                      id="fuel-slip-input-camera"
-                                      accept="image/*"
-                                      capture="environment"
-                                      className="hidden"
-                                      onChange={async (e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) {
-                                          const compressed = await compressImage(file);
-                                          setFuelSlipsBase64(prev => [...prev, compressed]);
-                                        }
-                                      }}
-                                    />
-                                    <input
-                                      type="file"
-                                      id="fuel-slip-input-gallery"
-                                      accept="image/*"
-                                      className="hidden"
-                                      onChange={async (e) => {
-                                        const file = e.target.files?.[0];
-                                        if (file) {
-                                          const compressed = await compressImage(file);
-                                          setFuelSlipsBase64(prev => [...prev, compressed]);
-                                        }
-                                      }}
-                                    />
-                                    <input type="hidden" name="imageUrls" value={JSON.stringify(fuelSlipsBase64)} />
-
-                                    {fuelSlipsBase64.length > 0 ? (
-                                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 pt-1">
-                                        {fuelSlipsBase64.map((slip, index) => (
-                                          <div key={index} className="relative w-full aspect-[3/4] rounded-md border border-neutral-200 dark:border-neutral-800 overflow-hidden shadow-md">
-                                            <img src={slip} className="w-full h-full object-cover" alt={`Fuel Slip Preview ${index + 1}`} />
-                                            <button
-                                              type="button"
-                                              onClick={() => setFuelSlipsBase64(prev => prev.filter((_, i) => i !== index))}
-                                              className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/80 transition-all cursor-pointer"
-                                            >
-                                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                              </svg>
-                                            </button>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <p className="text-[10px] text-orange-600/80 dark:text-orange-400/80 italic font-semibold">⚠️ No slip image captured. Snap physical receipt using the camera button to proceed.</p>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-
-                            <div className="sm:col-span-2 pt-2 flex flex-col sm:flex-row gap-3">
-                              {manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipsBase64.length > 0 && (
-                                <button
-                                  type="submit"
-                                  name="_action"
-                                  value="scan_and_save_receipt"
-                                  disabled={isSubmitting}
-                                  className="flex-1 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded-md text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5 border border-transparent"
-                                >
-                                  {isSubmitting ? "Scanning..." : "🤖 Scan & Save Receipt (AI)"}
-                                </button>
-                              )}
+                            {/* Save Expense Button */}
+                            <div className="sm:col-span-2 pt-2">
                               <button
                                 type="submit"
-                                name="_action"
-                                value="create_expense"
-                                disabled={isSubmitting || (manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipsBase64.length === 0 && !skipReceiptRequired)}
-                                className={`py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-md cursor-pointer transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed ${
-                                  manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipsBase64.length > 0 ? "flex-1" : "w-full"
-                                }`}
+                                disabled={isSubmitting}
+                                className="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-[#5D87FF] dark:hover:bg-[#4d75e6] text-white font-bold rounded-lg cursor-pointer transition-all shadow-sm disabled:opacity-50 flex items-center justify-center gap-2"
                               >
-                                {isSubmitting
-                                  ? "Saving log..."
-                                  : manualType === "EXPENSE" && selectedCategory === "fuel" && fuelSlipsBase64.length === 0 && !skipReceiptRequired
-                                  ? "⚠️ Snap Receipt Slip Image First"
-                                  : "Save Log Entry"}
+                                <span>💾</span>
+                                <span>{isSubmitting ? "Saving Expense..." : `Save Expense (${activeFastPill})`}</span>
                               </button>
                             </div>
                           </Form>
+                        </div>
+                      )}
+
+                      {/* MODE B: 💰 ADD EARNING (INCOME) */}
+                      {consoleTab === "earning" && (
+                        <div className="space-y-4 animate-fade-in">
+                          {/* 3 Sub-Toggles */}
+                          <div className="inline-flex p-1 bg-neutral-100 dark:bg-[#252525] rounded-xl gap-1 w-full border border-neutral-200/60 dark:border-neutral-800/60">
+                            <button
+                              type="button"
+                              onClick={() => setEarningSubTab("weekly")}
+                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
+                                earningSubTab === "weekly"
+                                  ? "bg-[#13DEB9] text-white shadow-sm"
+                                  : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                              }`}
+                            >
+                              💰 Weekly Payout (3 IDs)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEarningSubTab("bill45")}
+                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
+                                earningSubTab === "bill45"
+                                  ? "bg-[#13DEB9] text-white shadow-sm"
+                                  : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                              }`}
+                            >
+                              📑 45-Day Bill Payment
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEarningSubTab("other")}
+                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
+                                earningSubTab === "other"
+                                  ? "bg-[#13DEB9] text-white shadow-sm"
+                                  : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                              }`}
+                            >
+                              💵 Other Income
+                            </button>
+                          </div>
+
+                          {/* SUB-TAB 1: WEEKLY PAYOUT (3 IDs) - NO TDS */}
+                          {earningSubTab === "weekly" && (
+                            <div className="space-y-4">
+                              <div className="p-3 bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-between">
+                                <div>
+                                  <h3 className="text-sm font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
+                                    <span>💰 Weekly 3-ID Payout Console</span>
+                                  </h3>
+                                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
+                                    Log Vendor 1, Vendor 2, and Per Order in one go.
+                                  </p>
+                                </div>
+                                <div className="text-right">
+                                  <div className="text-[10px] uppercase font-bold text-neutral-400">Total Earned</div>
+                                  <div className="text-lg font-extrabold text-emerald-600 dark:text-emerald-400">
+                                    ₹{(
+                                      (parseKAmount(weeklyV1) || 0) +
+                                      (parseKAmount(weeklyV2) || 0) +
+                                      (parseKAmount(weeklyPerOrder) || 0) +
+                                      (parseKAmount(weeklyExtra) || 0)
+                                    ).toLocaleString("en-IN")}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <Form method="post" className="space-y-4">
+                                <input type="hidden" name="_action" value="create_weekly_earning" />
+                                <input type="hidden" name="senderName" value={loggedInUser?.name || "Sumit Morya"} />
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                  <div className="space-y-1">
+                                    <label className="text-xs font-semibold text-neutral-500">Payout Date</label>
+                                    <input
+                                      type="date"
+                                      name="date"
+                                      value={weeklyPayoutDate}
+                                      onChange={(e) => setWeeklyPayoutDate(e.target.value)}
+                                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none font-semibold cursor-pointer"
+                                    />
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <label className="text-xs font-semibold text-neutral-500">Notes / Cycle</label>
+                                    <input
+                                      type="text"
+                                      name="notes"
+                                      value={weeklyNotes}
+                                      onChange={(e) => setWeeklyNotes(e.target.value)}
+                                      placeholder="Wednesday Payout / Cycle"
+                                      className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* 3 Amount Inputs: Vendor 1, Vendor 2, Per Order */}
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                  <div className="space-y-1 p-3 rounded-xl bg-neutral-50 dark:bg-neutral-900/60 border border-neutral-200/80 dark:border-neutral-800">
+                                    <label className="text-xs font-bold text-neutral-800 dark:text-neutral-200 block mb-1">
+                                      🚚 Vendor 1
+                                    </label>
+                                    <input
+                                      type="text"
+                                      name="vendor1"
+                                      placeholder="e.g. 1401 or 1.4k"
+                                      value={weeklyV1}
+                                      onChange={(e) => setWeeklyV1(e.target.value)}
+                                      onBlur={() => {
+                                        const parsed = parseKAmount(weeklyV1);
+                                        if (parsed > 0) setWeeklyV1(parsed.toString());
+                                      }}
+                                      className="notion-input w-full text-sm font-bold border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-1.5 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                    />
+                                  </div>
+
+                                  <div className="space-y-1 p-3 rounded-xl bg-neutral-50 dark:bg-neutral-900/60 border border-neutral-200/80 dark:border-neutral-800">
+                                    <label className="text-xs font-bold text-neutral-800 dark:text-neutral-200 block mb-1">
+                                      🚚 Vendor 2
+                                    </label>
+                                    <input
+                                      type="text"
+                                      name="vendor2"
+                                      placeholder="e.g. 15 or 1500"
+                                      value={weeklyV2}
+                                      onChange={(e) => setWeeklyV2(e.target.value)}
+                                      onBlur={() => {
+                                        const parsed = parseKAmount(weeklyV2);
+                                        if (parsed > 0) setWeeklyV2(parsed.toString());
+                                      }}
+                                      className="notion-input w-full text-sm font-bold border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-1.5 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                    />
+                                  </div>
+
+                                  <div className="space-y-1 p-3 rounded-xl bg-neutral-50 dark:bg-neutral-900/60 border border-neutral-200/80 dark:border-neutral-800">
+                                    <label className="text-xs font-bold text-neutral-800 dark:text-neutral-200 block mb-1">
+                                      📦 Per Order
+                                    </label>
+                                    <input
+                                      type="text"
+                                      name="perOrder"
+                                      placeholder="e.g. 1564644"
+                                      value={weeklyPerOrder}
+                                      onChange={(e) => setWeeklyPerOrder(e.target.value)}
+                                      onBlur={() => {
+                                        const parsed = parseKAmount(weeklyPerOrder);
+                                        if (parsed > 0) setWeeklyPerOrder(parsed.toString());
+                                      }}
+                                      className="notion-input w-full text-sm font-bold border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-1.5 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Extra / Bonus (Optional) */}
+                                <div className="space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500">Extra / Incentive / Bonus (Optional)</label>
+                                  <input
+                                    type="text"
+                                    name="extra"
+                                    placeholder="0"
+                                    value={weeklyExtra}
+                                    onChange={(e) => setWeeklyExtra(e.target.value)}
+                                    onBlur={() => {
+                                      const parsed = parseKAmount(weeklyExtra);
+                                      if (parsed > 0) setWeeklyExtra(parsed.toString());
+                                    }}
+                                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                  />
+                                </div>
+
+                                <button
+                                  type="submit"
+                                  disabled={isSubmitting}
+                                  className="w-full py-3 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white font-bold rounded-xl shadow-lg transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                                >
+                                  <span>💾</span>
+                                  <span>Log Weekly Payout & Share to WhatsApp</span>
+                                </button>
+                              </Form>
+                            </div>
+                          )}
+
+                          {/* SUB-TAB 2: 45-DAY BILL PAYMENT */}
+                          {earningSubTab === "bill45" && (
+                            <Form method="post" className="space-y-4">
+                              <input type="hidden" name="_action" value="create_bill_payment" />
+                              <input type="hidden" name="senderName" value={loggedInUser?.name || "Client"} />
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                {/* Amount Input */}
+                                <div className="space-y-1">
+                                  <div className="flex justify-between items-center">
+                                    <label className="text-xs font-semibold text-neutral-500">Bill Amount (₹ INR)</label>
+                                    <span className="text-[10px] text-neutral-400 font-medium">Type "45k" or "+000"</span>
+                                  </div>
+                                  <div className="relative flex items-center">
+                                    <span className="absolute left-3 text-neutral-400 font-bold text-sm pointer-events-none select-none">₹</span>
+                                    <input
+                                      type="text"
+                                      name="amount"
+                                      required
+                                      placeholder="e.g. 45,000 or 45k"
+                                      value={billAmount}
+                                      onChange={(e) => setBillAmount(e.target.value)}
+                                      onBlur={() => {
+                                        const parsed = parseKAmount(billAmount);
+                                        if (parsed > 0) setBillAmount(parsed.toString());
+                                      }}
+                                      style={{ paddingLeft: "34px", paddingRight: "64px" }}
+                                      className="notion-input w-full pl-8 pr-16 text-sm font-bold border border-neutral-200 dark:border-neutral-800 rounded-md py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const curr = parseKAmount(billAmount);
+                                        if (curr > 0) {
+                                          setBillAmount((curr * 1000).toString());
+                                        } else if (billAmount && !isNaN(Number(billAmount))) {
+                                          setBillAmount(billAmount + "000");
+                                        }
+                                      }}
+                                      className="absolute right-1.5 px-2 py-1 text-[10px] font-extrabold rounded bg-[#13DEB9]/15 hover:bg-[#13DEB9]/25 text-[#13DEB9] border border-[#13DEB9]/30 transition-all cursor-pointer"
+                                      title="Multiply by 1,000"
+                                    >
+                                      +000
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Bill Date */}
+                                <div className="space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500">Payment Date</label>
+                                  <input
+                                    type="date"
+                                    name="date"
+                                    value={billDate}
+                                    onChange={(e) => setBillDate(e.target.value)}
+                                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none font-semibold cursor-pointer"
+                                  />
+                                </div>
+
+                                {/* Client Name */}
+                                <div className="space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500">Client / Company Name</label>
+                                  <input
+                                    type="text"
+                                    name="clientName"
+                                    required
+                                    placeholder="e.g. Shadowfax, Flipkart, Ecom Express"
+                                    value={billClient}
+                                    onChange={(e) => setBillClient(e.target.value)}
+                                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none font-semibold"
+                                  />
+                                </div>
+
+                                {/* Bill Month / Note */}
+                                <div className="space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500">Bill Month / Note</label>
+                                  <input
+                                    type="text"
+                                    name="billNote"
+                                    placeholder="e.g. September Bill Payment / Invoice #102"
+                                    value={billNote}
+                                    onChange={(e) => setBillNote(e.target.value)}
+                                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                  />
+                                </div>
+
+                                {/* Link to Pending Due */}
+                                <div className="sm:col-span-2 space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500 flex items-center justify-between">
+                                    <span>Link to Pending Due (Optional)</span>
+                                    <span className="text-[10px] text-neutral-400">Auto-marks pending bill as collected</span>
+                                  </label>
+                                  <select
+                                    name="pendingPaymentId"
+                                    value={linkedPendingId}
+                                    onChange={(e) => {
+                                      setLinkedPendingId(e.target.value);
+                                      const pId = parseInt(e.target.value);
+                                      const sel = pendingPayments.find((p: any) => p.id === pId);
+                                      if (sel) {
+                                        if (!billClient) setBillClient(sel.clientName || "");
+                                        if (!billAmount) setBillAmount((sel.totalAmount - sel.receivedAmount).toString());
+                                        if (!billNote) setBillNote(sel.title || "");
+                                      }
+                                    }}
+                                    className="notion-select w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#13DEB9] outline-none cursor-pointer"
+                                  >
+                                    <option value="">None (Standalone Bill Payment)</option>
+                                    {pendingPayments
+                                      .filter((p: any) => p.status !== "PAID")
+                                      .map((p: any) => (
+                                        <option key={p.id} value={p.id}>
+                                          {p.clientName} - {p.title} (₹{(p.totalAmount - p.receivedAmount).toLocaleString("en-IN")} pending)
+                                        </option>
+                                      ))}
+                                  </select>
+                                </div>
+                              </div>
+
+                              <button
+                                type="submit"
+                                disabled={isSubmitting}
+                                className="w-full py-3 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white font-bold rounded-xl shadow-lg transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                              >
+                                <span>💾</span>
+                                <span>Save 45-Day Bill Payment & Share to WhatsApp</span>
+                              </button>
+                            </Form>
+                          )}
+
+                          {/* SUB-TAB 3: OTHER INCOME */}
+                          {earningSubTab === "other" && (
+                            <Form method="post" className="space-y-4">
+                              <input type="hidden" name="_action" value="create_expense" />
+                              <input type="hidden" name="type" value="INCOME" />
+                              <input type="hidden" name="category" value="other_income" />
+                              <input type="hidden" name="senderName" value={loggedInUser?.name || "Founder"} />
+                              <input type="hidden" name="vehicle" value="" />
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                {/* Amount Input */}
+                                <div className="space-y-1">
+                                  <div className="flex justify-between items-center">
+                                    <label className="text-xs font-semibold text-neutral-500">Amount (₹ INR)</label>
+                                    <span className="text-[10px] text-neutral-400 font-medium">Type "5k" or "+000"</span>
+                                  </div>
+                                  <div className="relative flex items-center">
+                                    <span className="absolute left-3 text-neutral-400 font-bold text-sm pointer-events-none select-none">₹</span>
+                                    <input
+                                      type="text"
+                                      name="amount"
+                                      required
+                                      placeholder="e.g. 5,000 or 5k"
+                                      value={otherIncomeAmount}
+                                      onChange={(e) => setOtherIncomeAmount(e.target.value)}
+                                      onBlur={() => {
+                                        const parsed = parseKAmount(otherIncomeAmount);
+                                        if (parsed > 0) setOtherIncomeAmount(parsed.toString());
+                                      }}
+                                      style={{ paddingLeft: "34px", paddingRight: "64px" }}
+                                      className="notion-input w-full pl-8 pr-16 text-sm font-bold border border-neutral-200 dark:border-neutral-800 rounded-md py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const curr = parseKAmount(otherIncomeAmount);
+                                        if (curr > 0) {
+                                          setOtherIncomeAmount((curr * 1000).toString());
+                                        } else if (otherIncomeAmount && !isNaN(Number(otherIncomeAmount))) {
+                                          setOtherIncomeAmount(otherIncomeAmount + "000");
+                                        }
+                                      }}
+                                      className="absolute right-1.5 px-2 py-1 text-[10px] font-extrabold rounded bg-[#13DEB9]/15 hover:bg-[#13DEB9]/25 text-[#13DEB9] border border-[#13DEB9]/30 transition-all cursor-pointer"
+                                      title="Multiply by 1,000"
+                                    >
+                                      +000
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {/* Date Input */}
+                                <div className="space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500">Income Date</label>
+                                  <input
+                                    type="date"
+                                    name="date"
+                                    value={otherIncomeDate}
+                                    onChange={(e) => setOtherIncomeDate(e.target.value)}
+                                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none font-semibold cursor-pointer"
+                                  />
+                                </div>
+
+                                {/* Description / Notes */}
+                                <div className="sm:col-span-2 space-y-1">
+                                  <label className="text-xs font-semibold text-neutral-500">Description / Notes</label>
+                                  <input
+                                    type="text"
+                                    name="notes"
+                                    required
+                                    placeholder="e.g. Extra delivery payout, scrap sale, incentive"
+                                    value={otherIncomeNote}
+                                    onChange={(e) => setOtherIncomeNote(e.target.value)}
+                                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#13DEB9] outline-none"
+                                  />
+                                </div>
+                              </div>
+
+                              <button
+                                type="submit"
+                                disabled={isSubmitting}
+                                className="w-full py-3 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white font-bold rounded-xl shadow-lg transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+                              >
+                                <span>💾</span>
+                                <span>Save Other Income & Share to WhatsApp</span>
+                              </button>
+                            </Form>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2785,19 +3132,7 @@ export default function Home() {
                               {exp.category === "vendor_income" && "🚚"}
                               {exp.category === "other_income" && "💰"}
                               {exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}
-                              {exp.imageUrl && (
-                                <button
-                                  type="button"
-                                  onClick={() => setSelectedSlipImage(exp.imageUrl)}
-                                  className="p-0.5 rounded-full bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-600 dark:text-neutral-300 transition-all hover:scale-105 cursor-pointer inline-flex items-center justify-center border border-neutral-200/60 dark:border-neutral-700/60"
-                                  title="Click to view receipt slip"
-                                >
-                                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                                  </svg>
-                                </button>
-                              )}
+                              
                             </span>
                             <span className={`text-xs font-bold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-neutral-100"}`}>
                               {exp.type === "INCOME" ? "+" : ""} ₹{exp.amount}
@@ -2988,37 +3323,7 @@ export default function Home() {
                       </div>
                     </div>
 
-                    {/* Entity Filter Dropdown */}
-                    <div className="flex items-center gap-2 lg:ml-auto">
-                      <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Driver/Auto:</span>
-                      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
-                        <select
-                          value={entityFilter}
-                          onChange={(e) => setEntityFilter(e.target.value)}
-                          className="bg-transparent text-[11px] font-bold text-neutral-700 dark:text-neutral-350 outline-none cursor-pointer border-none py-0.5"
-                        >
-                          <option value="ALL" className="bg-white dark:bg-[#1a1a1a]">All Drivers & Autos</option>
-                          <option value="ANY_AUTO" className="bg-white dark:bg-[#1a1a1a]">Any Auto</option>
-                          <option value="ANY_DRIVER" className="bg-white dark:bg-[#1a1a1a]">Any Delivery Boy</option>
-                          
-                          <optgroup label="Registered Delivery Boys" className="bg-white dark:bg-[#1a1a1a] text-neutral-500 font-semibold">
-                            {drivers.map((d: any) => (
-                              <option key={d.id} value={`DRIVER:${d.name}`} className="bg-white dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200">
-                                👤 {d.name}
-                              </option>
-                            ))}
-                          </optgroup>
-
-                          <optgroup label="Registered Vehicles (Autos)" className="bg-white dark:bg-[#1a1a1a] text-neutral-500 font-semibold">
-                            {autos?.map((a: any) => (
-                              <option key={a.id} value={`AUTO:${a.plateNumber}`} className="bg-white dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200">
-                                🛺 {a.plateNumber}
-                              </option>
-                            ))}
-                          </optgroup>
-                        </select>
-                      </div>
-                    </div>
+                    
                   </div>
 
                   {/* Interactive full ledger grid/table */}
@@ -3056,19 +3361,7 @@ export default function Home() {
                                   {exp.category === "vendor_income" && "🚚"}
                                   {exp.category === "other_income" && "💰"}
                                   <span>{exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}</span>
-                                  {exp.imageUrl && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setSelectedSlipImage(exp.imageUrl)}
-                                      className="p-1 rounded-full bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-600 dark:text-neutral-300 transition-all hover:scale-105 cursor-pointer inline-flex items-center justify-center border border-neutral-200/60 dark:border-neutral-700/60 shadow-sm"
-                                      title="View fuel slip image"
-                                    >
-                                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                                      </svg>
-                                    </button>
-                                  )}
+                                  
                                 </td>
                                 <td className="p-3.5 max-w-[200px] truncate">{exp.notes}</td>
                                 <td className={`p-3.5 font-bold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-white"}`}>
@@ -3132,19 +3425,7 @@ export default function Home() {
                                 {exp.category === "vendor_income" && "🚚"}
                                 {exp.category === "other_income" && "💰"}
                                 <span>{exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}</span>
-                                {exp.imageUrl && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setSelectedSlipImage(exp.imageUrl)}
-                                    className="p-1 rounded-full bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-600 dark:text-neutral-300 transition-all hover:scale-105 cursor-pointer inline-flex items-center justify-center border border-neutral-200/60 dark:border-neutral-700/60 shadow-sm"
-                                    title="View receipt image"
-                                  >
-                                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                                    </svg>
-                                  </button>
-                                )}
+                                
                               </div>
                             </div>
 
@@ -3261,1613 +3542,7 @@ export default function Home() {
             </div>
           )}
 
-          {/* ORDER TRACKING TAB VIEW */}
-          {activeTab === "orders" && (
-            <div className="animate-fade-in space-y-6">
-              {/* Category Header with Toggle Dashboard */}
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
-                <div>
-                  <h1 className="text-2xl font-bold tracking-tight">Settlement & Cycle Tracker</h1>
-                  {/* Small subheader description removed */}
-                </div>
-
-                <div className="flex gap-1.5 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg shrink-0 w-full sm:w-auto overflow-x-auto">
-                  <button
-                    type="button"
-                    onClick={() => setOrdersViewMode("form")}
-                    className={`flex-1 sm:flex-none px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                      ordersViewMode === "form"
-                        ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
-                        : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
-                    }`}
-                  >
-                    📝 Log Runsheet
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOrdersViewMode("dashboard")}
-                    className={`flex-1 sm:flex-none px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                      ordersViewMode === "dashboard"
-                        ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
-                        : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
-                    }`}
-                  >
-                    📊 Runsheets History
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOrdersViewMode("payouts")}
-                    className={`flex-1 sm:flex-none px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                      ordersViewMode === "payouts"
-                        ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
-                        : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
-                    }`}
-                  >
-                    💰 Weekly Payouts
-                  </button>
-                </div>
-              </div>
-
-              {/* ACTION NOTIFICATIONS */}
-              {actionData && "error" in actionData && actionErrorVisible && (
-                <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                  ⚠️ {actionData.error}
-                </div>
-              )}
-              {runsheetSuccessVisible && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                  ✅ Daily runsheet status logged successfully!
-                </div>
-              )}
-              {payoutSuccessVisible && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                  ✅ Payout recorded and logged in ledger successfully!
-                </div>
-              )}
-              {ccSuccessVisible && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                  ✅ Credit card fuel billing cycle paid and expensed successfully!
-                </div>
-              )}
-
-              {/* FORM MODE */}
-              {ordersViewMode === "form" && (
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                  {/* Unified Dispatch Console */}
-                  <div className="lg:col-span-2 space-y-6">
-                    <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg p-6 bg-white dark:bg-[#1e1e1e] shadow-sm space-y-6">
-                      
-                      <div className="pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
-                        <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
-                          Daily Runsheet Console
-                        </h3>
-                      </div>
-
-                      <Form ref={runsheetFormRef} method="post" className="space-y-4">
-                        <input type="hidden" name="_action" value="create_delivery" />
-
-                        <input type="hidden" name="title" value="Daily Runsheet Summary" />
-                        <input type="hidden" name="totalOrders" value={formCompletedOrders} />
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                          <div className="space-y-1 flex flex-col">
-                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Field Operator</label>
-                            <select
-                              name="driverName"
-                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
-                            >
-                              {drivers.length > 0 ? (
-                                drivers.map((d: any) => (
-                                  <option key={d.id} value={d.name}>
-                                    👤 {d.name}
-                                  </option>
-                                ))
-                              ) : (
-                                <option value="John Driver">👤 John Driver</option>
-                              )}
-                            </select>
-                          </div>
-
-                          <div className="space-y-1 flex flex-col">
-                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Order Category</label>
-                            <select
-                              name="category"
-                              value={formCategory}
-                              onChange={(e) => setFormCategory(e.target.value as "vendor_ship" | "per_order_rate")}
-                              className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
-                            >
-                              <option value="vendor_ship">🚚 Vendor Ship (₹70/order Weekly)</option>
-                              <option value="per_order_rate">🚚 Split Plan (₹35/order Weekly + ₹53k Base)</option>
-                            </select>
-                          </div>
-
-                          <div className="space-y-1 flex flex-col">
-                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Completed Orders</label>
-                            <input
-                              type="number"
-                              name="completedOrders"
-                              value={formCompletedOrders}
-                              onChange={(e) => setFormCompletedOrders(e.target.value)}
-                              required
-                              step="1"
-                              min="0"
-                              placeholder="e.g. 48"
-                              onKeyDown={(e) => {
-                                if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
-                              }}
-                              onPaste={(e) => {
-                                const text = e.clipboardData.getData("text");
-                                if (/[.,\-+eE]/.test(text)) e.preventDefault();
-                              }}
-                              className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none font-semibold shadow-sm"
-                            />
-                          </div>
-
-                          <div className="space-y-1 flex flex-col">
-                            <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400">Runsheet Week Cycle</label>
-                            <div className="flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const current = parseLocalDate(runsheetDate);
-                                  current.setDate(current.getDate() - 7);
-                                  setRunsheetDate(formatLocalDate(getMonday(current)));
-                                }}
-                                className="px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded-md bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
-                                title="Previous Week"
-                              >
-                                ◀
-                              </button>
-                              <div className="relative flex-1">
-                                <input
-                                  type="date"
-                                  name="createdAt"
-                                  value={runsheetDate}
-                                  onChange={(e) => {
-                                    const val = e.target.value;
-                                    if (val) {
-                                      const mon = getMonday(val);
-                                      setRunsheetDate(formatLocalDate(mon));
-                                    }
-                                  }}
-                                  required
-                                  className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2.5 bg-white dark:bg-[#1e1e1e] text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] focus:border-[#2383e2] outline-none cursor-pointer font-semibold shadow-sm"
-                                />
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const current = parseLocalDate(runsheetDate);
-                                  current.setDate(current.getDate() + 7);
-                                  setRunsheetDate(formatLocalDate(getMonday(current)));
-                                }}
-                                className="px-3 py-2 border border-neutral-200 dark:border-neutral-800 rounded-md bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
-                                title="Next Week"
-                              >
-                                ▶
-                              </button>
-                            </div>
-                            {runsheetDate && (
-                              <div className="text-[10px] font-bold text-[#2383e2] dark:text-[#3894f2] mt-1.5 bg-[#2383e2]/5 dark:bg-[#2383e2]/15 px-2.5 py-1.5 rounded-lg border border-[#2383e2]/10 flex items-center justify-between">
-                                <span>📅 Week Cycle:</span>
-                                <span>
-                                  {formatRange(runsheetDate)}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Interactive live payout calculation preview */}
-                        {parsedCompleted > 0 && (
-                          <div className="p-3.5 rounded-lg border border-[#2383e2]/20 bg-[#2383e2]/5 dark:bg-[#2383e2]/10 space-y-1.5 animate-fadeIn">
-                            <div className="flex justify-between items-center text-xs">
-                              <span className="text-neutral-500 font-bold uppercase tracking-wider text-[10px]">
-                                {formCategory === "vendor_ship" ? "Weekly Runsheet Payout:" : "Weekly Portion Payout:"}
-                              </span>
-                              <span className="text-sm font-bold text-[#2383e2]">₹{previewPayout.toLocaleString()}</span>
-                            </div>
-                            {formCategory === "per_order_rate" && (
-                              <p className="text-[10px] text-neutral-450 dark:text-neutral-400 italic font-semibold leading-normal">
-                                Note: The monthly fixed base pay of ₹53,000 (deferred by 45 days) is tracked separately on the Payouts board.
-                              </p>
-                            )}
-                          </div>
-                        )}
-
-                        <div className="pt-2">
-                          <button
-                            type="submit"
-                            disabled={isSubmitting}
-                            className="notion-btn w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-md cursor-pointer transition-all shadow-sm"
-                          >
-                            {isSubmitting ? "Logging daily status..." : "Log Daily Runsheet"}
-                          </button>
-                        </div>
-                      </Form>
-                    </div>
-                  </div>
-
-                  {/* Elegant Borderless Recent Runsheet Feed */}
-                  <div className="lg:col-span-1 space-y-4">
-                    <div className="px-1 flex justify-between items-center border-b border-[#edece9] dark:border-[#2f2f2f] pb-1">
-                      <h3 className="text-xs font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest">
-                        Recent Daily Logs
-                      </h3>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const driverInfo = users.find((u: any) => u.role === "DRIVER") || { name: "John Driver", phone: "+91 88888 88888" };
-                          handleOpenDriverProfile(driverInfo);
-                        }}
-                        className="text-[10px] text-[#2383e2] hover:text-[#1a6ab8] font-bold transition-all cursor-pointer flex items-center gap-0.5"
-                      >
-                        👤 Active Driver
-                      </button>
-                    </div>
-
-                    <div className="space-y-1">
-                      {deliveries.slice(0, 5).map((del) => {
-                        const payout = del.category === "vendor_ship"
-                          ? del.completedOrders * 70
-                          : del.completedOrders * 35;
-                        return (
-                          <div
-                            key={del.id}
-                            onClick={() => {
-                              const driverInfo = users.find((u: any) => u.name === del.driverName && u.role === "DRIVER") || { name: del.driverName, phone: "N/A" };
-                              handleOpenDriverProfile(driverInfo);
-                            }}
-                            className="flex flex-col gap-1.5 p-3 hover:bg-[#fbfbfa] dark:hover:bg-[#202020]/40 rounded-lg transition-all border border-transparent hover:border-[#edece9] dark:hover:border-[#2f2f2f] cursor-pointer"
-                            title="Click to view driver details"
-                          >
-                            <div className="flex justify-between items-center">
-                              <span className="capitalize text-xs font-bold text-neutral-700 dark:text-neutral-300 flex items-center gap-1.5">
-                                🚚 {del.category === "vendor_ship" ? "70 Per Order" : "Vendor Per Order"}
-                              </span>
-                              <span className="text-xs font-bold text-neutral-900 dark:text-neutral-100">
-                                ₹{payout.toLocaleString()}
-                              </span>
-                            </div>
-                            
-                            <div className="text-[11px] text-neutral-500 dark:text-neutral-400 flex justify-between gap-2 text-right">
-                              <span className="truncate max-w-[140px] text-left">
-                                {del.completedOrders} completed
-                              </span>
-                              <span className="text-[10px] text-neutral-450 shrink-0 font-bold">
-                                {formatRange(del.createdAt)}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      {deliveries.length === 0 && (
-                        <p className="text-xs text-neutral-400 p-3 italic">No recent runsheets.</p>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* RUNSHEET DASHBOARD VIEW MODE */}
-              {ordersViewMode === "dashboard" && (
-                <div className="space-y-6">
-                  {/* Daily runsheet stats cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Completed Orders</div>
-                      <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">{orderCounts.totalCompleted}</div>
-                    </div>
-
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">70 Per Order Volume</div>
-                      <div className="text-2xl font-bold mt-1 text-[#2383e2]">{orderCounts.vendorShipOrders} <span className="text-xs text-neutral-400 font-normal">orders</span></div>
-                      <div className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300 mt-1">₹{orderCounts.vendorShipValue.toLocaleString()}</div>
-                    </div>
-
-                    <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                      <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Vendor Per Order Volume</div>
-                      <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">{orderCounts.perOrderRateOrders} <span className="text-xs text-neutral-400 font-normal">orders</span></div>
-                      <div className="text-[11px] font-bold text-neutral-700 dark:text-neutral-300 mt-1">₹{orderCounts.perOrderRateValue.toLocaleString()}</div>
-                    </div>
-                  </div>
-
-                  {/* Timeframe & Category selectors */}
-                  <div className="flex flex-col gap-3.5 p-3 border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-neutral-50 dark:bg-[#202020]">
-                    {/* Timeframe Selectors Row */}
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 w-full">
-                      <div className="flex flex-col md:flex-row md:items-center gap-3 w-full md:w-auto">
-                        <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Timeframe:</span>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-1 sm:pb-0 -mx-1 px-1">
-                            {(["ALL", "YEAR", "MONTH", "TODAY", "CUSTOM"] as const).map((filter) => (
-                              <button
-                                key={filter}
-                                type="button"
-                                onClick={() => {
-                                  setDeliveryFilter(filter);
-                                  if (filter === "YEAR") {
-                                    setSelectedDeliveryYear(new Date().getFullYear().toString());
-                                  } else if (filter === "MONTH") {
-                                    setSelectedDeliveryYear(new Date().getFullYear().toString());
-                                    setSelectedDeliveryMonth(new Date().getMonth().toString());
-                                  }
-                                }}
-                                className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${
-                                  deliveryFilter === filter
-                                    ? "bg-neutral-900 border-neutral-900 text-white dark:bg-white dark:border-white dark:text-neutral-900"
-                                    : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                                }`}
-                              >
-                                {filter}
-                              </button>
-                            ))}
-                          </div>
-
-                          {/* Connected Filter Options (Inline next to buttons) */}
-                          {deliveryFilter === "YEAR" && (
-                            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm animate-fadeIn flex-shrink-0">
-                              <span className="text-[9px] sm:text-[10px] text-neutral-400 font-bold uppercase tracking-wider">Year:</span>
-                              <select
-                                value={selectedDeliveryYear}
-                                onChange={(e) => setSelectedDeliveryYear(e.target.value)}
-                                className="bg-transparent text-[11px] font-bold text-neutral-700 dark:text-neutral-300 outline-none cursor-pointer"
-                              >
-                                <option value="ALL" className="bg-white dark:bg-[#1a1a1a]">All</option>
-                                {availableDeliveryYears.map((yr) => (
-                                  <option key={yr} value={yr} className="bg-white dark:bg-[#1a1a1a]">{yr}</option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
-
-                          {deliveryFilter === "MONTH" && (
-                            <div className="flex items-center gap-2 animate-fadeIn flex-shrink-0">
-                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
-                                <span className="text-[9px] sm:text-[10px] text-neutral-400 font-bold uppercase tracking-wider">Year:</span>
-                                <select
-                                  value={selectedDeliveryYear}
-                                  onChange={(e) => setSelectedDeliveryYear(e.target.value)}
-                                  className="bg-transparent text-[11px] font-bold text-neutral-700 dark:text-neutral-300 outline-none cursor-pointer"
-                                >
-                                  <option value="ALL" className="bg-white dark:bg-[#1a1a1a]">All</option>
-                                  {availableDeliveryYears.map((yr) => (
-                                    <option key={yr} value={yr} className="bg-white dark:bg-[#1a1a1a]">{yr}</option>
-                                  ))}
-                                </select>
-                              </div>
-                              
-                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
-                                <span className="text-[9px] sm:text-[10px] text-neutral-400 font-bold uppercase tracking-wider">Month:</span>
-                                <select
-                                  value={selectedDeliveryMonth}
-                                  onChange={(e) => setSelectedDeliveryMonth(e.target.value)}
-                                  className="bg-transparent text-[11px] font-bold text-neutral-700 dark:text-neutral-300 outline-none cursor-pointer"
-                                >
-                                  <option value="ALL" className="bg-white dark:bg-[#1a1a1a]">All</option>
-                                  {MONTH_NAMES.map((name, index) => (
-                                    <option key={name} value={index.toString()} className="bg-white dark:bg-[#1a1a1a]">{name}</option>
-                                  ))}
-                                </select>
-                              </div>
-                            </div>
-                          )}
-
-                          {deliveryFilter === "CUSTOM" && (
-                            <div className="flex flex-wrap items-center gap-2 animate-fadeIn flex-shrink-0">
-                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
-                                <span className="text-[9px] text-neutral-400 font-bold uppercase">From:</span>
-                                <input
-                                  type="date"
-                                  value={customDeliveryStartDate}
-                                  onChange={(e) => setCustomDeliveryStartDate(e.target.value)}
-                                  className="bg-transparent text-[10px] sm:text-[11px] font-semibold text-neutral-700 dark:text-neutral-300 outline-none cursor-pointer"
-                                />
-                              </div>
-                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
-                                <span className="text-[9px] text-neutral-400 font-bold uppercase">To:</span>
-                                <input
-                                  type="date"
-                                  value={customDeliveryEndDate}
-                                  onChange={(e) => setCustomDeliveryEndDate(e.target.value)}
-                                  placeholder="Single day"
-                                  className="bg-transparent text-[10px] sm:text-[11px] font-semibold text-neutral-700 dark:text-neutral-300 outline-none cursor-pointer"
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="text-[9px] sm:text-[10px] text-neutral-400 font-bold uppercase md:text-right flex-shrink-0">
-                        Showing {filteredDeliveries.length} of {deliveries.length} daily logs
-                      </div>
-                    </div>
-
-                    {/* Category Selector Row */}
-                    <div className="flex flex-col md:flex-row md:items-center gap-3 w-full border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30 pt-3">
-                      <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Category:</span>
-                      <div className="flex gap-1.5 overflow-x-auto scrollbar-none pb-1 sm:pb-0 -mx-1 px-1">
-                        {[
-                          { value: "ALL", label: "All Categories" },
-                          { value: "VENDOR_SHIP", label: "70 Per Order" },
-                          { value: "PER_ORDER", label: "Vendor Per Order" },
-                        ].map((cat) => (
-                          <button
-                            key={cat.value}
-                            type="button"
-                            onClick={() => setDeliveryCategoryFilter(cat.value as any)}
-                            className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${
-                              deliveryCategoryFilter === cat.value
-                                ? "bg-[#5D87FF] border-[#5D87FF] text-white"
-                                : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
-                            }`}
-                          >
-                            {cat.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Driver Selector Row */}
-                    <div className="flex flex-col md:flex-row md:items-center gap-3 w-full border-t border-[#edece9]/50 dark:border-[#2f2f2f]/30 pt-3">
-                      <span className="text-[11px] sm:text-xs text-neutral-500 font-bold uppercase tracking-wider flex-shrink-0">Filter Driver:</span>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <select
-                          value={deliveryDriverFilter}
-                          onChange={(e) => setDeliveryDriverFilter(e.target.value)}
-                          className="bg-white dark:bg-[#1a1a1a] border border-[#edece9] dark:border-neutral-800 text-xs font-semibold text-neutral-700 dark:text-neutral-300 rounded-md px-3 py-1.5 outline-none cursor-pointer"
-                        >
-                          <option value="ALL">All Field Operators / Drivers</option>
-                          {Array.from(new Set([
-                            ...drivers.map((d: any) => d.name),
-                            ...deliveries.map((del: any) => del.driverName)
-                          ])).filter(Boolean).map((name) => (
-                            <option key={name} value={name}>{name}</option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Table of Daily Runsheet Logs (Desktop Only) */}
-                  <div className="hidden md:block notion-card p-0 border border-[#edece9] dark:border-[#2f2f2f] rounded-lg overflow-hidden bg-white/70 dark:bg-[#202020]/20">
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-neutral-50 dark:bg-neutral-900/50 text-neutral-500 text-xs font-semibold border-b border-[#edece9] dark:border-[#2f2f2f]">
-                            <th className="p-3.5">Log Date</th>
-                            <th className="p-3.5">Field Operator</th>
-                            <th className="p-3.5">Category</th>
-                            <th className="p-3.5 text-center">Completed</th>
-                            <th className="p-3.5 text-center">Payout</th>
-                            <th className="p-3.5 text-right">Actions</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-[#edece9] dark:divide-[#2f2f2f] text-xs">
-                          {filteredDeliveries.length === 0 ? (
-                            <tr>
-                              <td colSpan={6} className="p-8 text-center text-neutral-400 dark:text-neutral-500 font-medium">
-                                No runsheet logs found in this timeframe.
-                              </td>
-                            </tr>
-                          ) : (
-                            paginatedDeliveries.map((del) => {
-                              const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
-                              const payout = del.category === "vendor_ship"
-                                ? del.completedOrders * (systemSettings?.rateVendorShip ?? 70)
-                                : del.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35);
-                              return (
-                                <tr key={del.id} className="hover:bg-neutral-50/50 dark:hover:bg-neutral-900/20">
-                                  <td className="p-3.5 text-neutral-500 font-semibold">
-                                    {formatRange(del.createdAt)}
-                                  </td>
-                                  <td className="p-3.5 font-bold text-neutral-800 dark:text-neutral-200">
-                                    👤 {del.driverName}
-                                  </td>
-                                  <td className="p-3.5">
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase shrink-0 ${
-                                      del.category === "vendor_ship"
-                                        ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
-                                        : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
-                                    }`}>
-                                      {del.category === "vendor_ship" ? "70 Per Order" : "Vendor Per Order"}
-                                    </span>
-                                  </td>
-                                  <td className="p-3.5 text-center font-semibold text-emerald-600 dark:text-emerald-400">
-                                    {del.completedOrders}
-                                  </td>
-                                  <td className="p-3.5 text-center font-bold text-neutral-800 dark:text-neutral-200">
-                                    ₹{payout.toLocaleString()}
-                                  </td>
-                                  <td className="p-3.5 text-right">
-                                    <div className="flex items-center justify-end gap-1.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setEditingDelivery(del)}
-                                        className="px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900 text-[10px] cursor-pointer"
-                                      >
-                                        Edit
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          triggerConfirm(
-                                            "Delete Runsheet?",
-                                            "Are you sure you want to permanently delete this runsheet?",
-                                            () => {
-                                              const fd = new FormData();
-                                              fd.append("_action", "delete_delivery");
-                                              fd.append("id", del.id.toString());
-                                              submit(fd, { method: "post" });
-                                            }
-                                          );
-                                        }}
-                                        className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
-                                      >
-                                        Delete
-                                      </button>
-                                    </div>
-                                  </td>
-                                </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* Desktop Pagination Bar for Deliveries */}
-                    {filteredDeliveries.length > 0 && (
-                      <div className="hidden md:flex items-center justify-between border-t border-[#edece9] dark:border-[#2f2f2f] bg-neutral-50/50 dark:bg-neutral-900/30 p-4">
-                        <span className="text-xs text-neutral-500 font-medium">
-                          Showing <span className="font-semibold text-neutral-800 dark:text-neutral-200">{(activeDeliveryPage - 1) * DELIVERY_PAGE_SIZE + 1}</span> to{" "}
-                          <span className="font-semibold text-neutral-800 dark:text-neutral-200">
-                            {Math.min(activeDeliveryPage * DELIVERY_PAGE_SIZE, filteredDeliveries.length)}
-                          </span> of <span className="font-semibold text-neutral-800 dark:text-neutral-200">{filteredDeliveries.length}</span> daily logs
-                        </span>
-                        <div className="flex gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => setDeliveryPage((p: number) => Math.max(1, p - 1))}
-                            disabled={activeDeliveryPage === 1}
-                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
-                          >
-                            ◀ Prev
-                          </button>
-                          <div className="flex items-center gap-1">
-                            {Array.from({ length: totalDeliveryPages }, (_, i) => i + 1).map((p) => {
-                              if (p === 1 || p === totalDeliveryPages || Math.abs(p - activeDeliveryPage) <= 1) {
-                                return (
-                                  <button
-                                    key={p}
-                                    type="button"
-                                    onClick={() => setDeliveryPage(p)}
-                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${
-                                      p === activeDeliveryPage
-                                        ? "bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25"
-                                        : "hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
-                                    }`}
-                                  >
-                                    {p}
-                                  </button>
-                                );
-                              }
-                              if ((p === 2 && activeDeliveryPage > 3) || (p === totalDeliveryPages - 1 && activeDeliveryPage < totalDeliveryPages - 2)) {
-                                return (
-                                  <span key={p} className="text-neutral-400 text-xs px-1 select-none">
-                                    ...
-                                  </span>
-                                );
-                              }
-                              return null;
-                            })}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setDeliveryPage((p: number) => Math.min(totalDeliveryPages, p + 1))}
-                            disabled={activeDeliveryPage === totalDeliveryPages}
-                            className="px-2.5 py-1.5 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
-                          >
-                            Next ▶
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Mobile-Responsive Daily Runsheets Card Feed (Mobile Only) */}
-                  <div className="md:hidden space-y-3">
-                    {filteredDeliveries.length === 0 ? (
-                      <div className="p-6 text-center text-neutral-400 bg-neutral-50 dark:bg-neutral-900/30 rounded-lg italic text-xs">
-                        No runsheet logs found in this timeframe.
-                      </div>
-                    ) : (
-                      paginatedDeliveries.map((del) => {
-                        const rate = del.totalOrders > 0 ? Math.round((del.completedOrders / del.totalOrders) * 100) : 0;
-                        return (
-                          <div
-                            key={del.id}
-                            className="p-4 border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] shadow-sm flex flex-col gap-2.5"
-                          >
-                            {/* Card Top Row: Date & Operator */}
-                            <div className="flex justify-between items-center">
-                              <span className="text-[11px] font-bold text-neutral-400">
-                                📅 {formatRange(del.createdAt)}
-                              </span>
-                              <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200">
-                                👤 {del.driverName}
-                              </span>
-                            </div>
-
-                            {/* Card Middle Row: Category and counts */}
-                            <div className="flex justify-between items-center py-1.5 border-y border-[#edece9]/50 dark:border-[#2f2f2f]/30">
-                              <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase ${
-                                del.category === "vendor_ship"
-                                  ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
-                                  : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
-                              }`}>
-                                {del.category === "vendor_ship" ? "70 Per Order" : "Vendor Per Order"}
-                              </span>
-                              
-                              <div className="text-xs text-neutral-600 dark:text-neutral-300">
-                                <span className="font-semibold text-neutral-800 dark:text-neutral-100">{del.completedOrders}</span>
-                                <span className="text-neutral-400"> completed</span>
-                              </div>
-                            </div>
-
-                            <div className="flex justify-between items-center text-xs pt-1">
-                              <span className="text-neutral-500 font-semibold">Payout:</span>
-                              <span className="font-bold text-neutral-800 dark:text-neutral-200">
-                                ₹{(del.category === "vendor_ship" ? del.completedOrders * (systemSettings?.rateVendorShip ?? 70) : del.completedOrders * (systemSettings?.ratePerOrderWeekly ?? 35)).toLocaleString()}
-                              </span>
-                            </div>
-
-                            {/* Card Bottom Row: Actions */}
-                            <div className="flex justify-end items-center pt-1 border-t border-[#edece9]/30 dark:border-[#2f2f2f]/10">
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingDelivery(del)}
-                                  className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-900 text-[10px] cursor-pointer"
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    triggerConfirm(
-                                      "Delete Runsheet?",
-                                      "Are you sure you want to permanently delete this runsheet?",
-                                      () => {
-                                        const fd = new FormData();
-                                        fd.append("_action", "delete_delivery");
-                                        fd.append("id", del.id.toString());
-                                        submit(fd, { method: "post" });
-                                      }
-                                    );
-                                  }}
-                                  className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-900/40 text-red-700 dark:text-red-300 font-bold border border-red-200 dark:border-red-900 text-[10px] cursor-pointer"
-                                >
-                                  Delete Log
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-
-                    {/* Mobile Pagination Bar for Deliveries */}
-                    {filteredDeliveries.length > 0 && (
-                      <div className="flex md:hidden flex-col items-center justify-between border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] p-4 gap-3 mt-3 shadow-sm">
-                        <span className="text-xs text-neutral-500 font-medium">
-                          Showing <span className="font-semibold text-neutral-800 dark:text-neutral-200">{(activeDeliveryPage - 1) * DELIVERY_PAGE_SIZE + 1}</span> to{" "}
-                          <span className="font-semibold text-neutral-800 dark:text-neutral-200">
-                            {Math.min(activeDeliveryPage * DELIVERY_PAGE_SIZE, filteredDeliveries.length)}
-                          </span> of <span className="font-semibold text-neutral-800 dark:text-neutral-200">{filteredDeliveries.length}</span> daily logs
-                        </span>
-                        <div className="flex gap-1.5 w-full justify-between sm:justify-center">
-                          <button
-                            type="button"
-                            onClick={() => setDeliveryPage((p: number) => Math.max(1, p - 1))}
-                            disabled={activeDeliveryPage === 1}
-                            className="px-3 py-2 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-[#202020] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
-                          >
-                            ◀ Prev
-                          </button>
-                          <div className="flex items-center gap-1">
-                            {Array.from({ length: totalDeliveryPages }, (_, i) => i + 1).map((p) => {
-                              if (p === 1 || p === totalDeliveryPages || Math.abs(p - activeDeliveryPage) <= 1) {
-                                return (
-                                  <button
-                                    key={p}
-                                    type="button"
-                                    onClick={() => setDeliveryPage(p)}
-                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${
-                                      p === activeDeliveryPage
-                                        ? "bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25"
-                                        : "hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
-                                    }`}
-                                  >
-                                    {p}
-                                  </button>
-                                );
-                              }
-                              if ((p === 2 && activeDeliveryPage > 3) || (p === totalDeliveryPages - 1 && activeDeliveryPage < totalDeliveryPages - 2)) {
-                                return (
-                                  <span key={p} className="text-neutral-400 text-xs px-1 select-none">
-                                    ...
-                                  </span>
-                                );
-                              }
-                              return null;
-                            })}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setDeliveryPage((p: number) => Math.min(totalDeliveryPages, p + 1))}
-                            disabled={activeDeliveryPage === totalDeliveryPages}
-                            className="px-3 py-2 text-xs font-semibold rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-[#202020] hover:bg-neutral-50 dark:hover:bg-neutral-900 disabled:opacity-40 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 transition-all active:scale-95 cursor-pointer"
-                          >
-                            Next ▶
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* WEEKLY PAYOUT TRACKER BOARD */}
-              {ordersViewMode === "payouts" && (
-                <div className="space-y-6 animate-fade-in">
-                  {/* Summary Cards */}
-                  {payoutSubTab === "payouts" ? (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid 70 Per Order (Weekly)</div>
-                        <div className="text-2xl font-bold mt-1 text-[#2383e2]">
-                          ₹{weeklyPayouts
-                            .filter(w => w.category === "vendor_ship" && w.status === "UNPAID")
-                            .reduce((sum, w) => sum + w.calculatedPayout, 0)
-                            .toLocaleString()}
-                        </div>
-                      </div>
-
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Vendor Per Order (Weekly)</div>
-                        <div className="text-2xl font-bold mt-1 text-indigo-600 dark:text-indigo-400">
-                          ₹{weeklyPayouts
-                            .filter(w => w.category === "per_order_rate_weekly" && w.status === "UNPAID")
-                            .reduce((sum, w) => sum + w.calculatedPayout, 0)
-                            .toLocaleString()}
-                        </div>
-                      </div>
-                      
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Vendor Income (Monthly)</div>
-                        <div className="text-2xl font-bold mt-1 text-purple-600 dark:text-purple-400">
-                          ₹{weeklyPayouts
-                            .filter(w => w.category === "per_order_rate_monthly" && w.status === "UNPAID")
-                            .reduce((sum, w) => sum + w.calculatedPayout, 0)
-                            .toLocaleString()}
-                        </div>
-                      </div>
-
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Payouts Received (Month)</div>
-                        <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
-                          ₹{expenses
-                            .filter((e: any) => e.type === "INCOME" && (e.category === "shadowfax" || e.category === "factory" || e.category === "vendor_income") && new Date(e.timestamp).getMonth() === new Date().getMonth())
-                            .reduce((sum: number, e: any) => sum + e.amount, 0)
-                            .toLocaleString()}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Unpaid Fuel CC Bills (Due)</div>
-                        <div className="text-2xl font-bold mt-1 text-red-600 dark:text-red-400">
-                          ₹{ccSummaryMetrics.unpaidCcTotal.toLocaleString()}
-                        </div>
-                      </div>
-
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Current Cycle (Ongoing)</div>
-                        <div className="text-2xl font-bold mt-1 text-amber-600 dark:text-amber-400">
-                          ₹{ccSummaryMetrics.ongoingCcTotal.toLocaleString()}
-                        </div>
-                      </div>
-                      
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Last Paid CC Bill</div>
-                        <div className="text-2xl font-bold mt-1 text-emerald-600 dark:text-emerald-400">
-                          ₹{ccSummaryMetrics.lastPaidAmount.toLocaleString()}
-                        </div>
-                      </div>
-
-                      <div className="notion-card p-4 border border-[#edece9] dark:border-[#2f2f2f] bg-white/70 dark:bg-[#202020]/40">
-                        <div className="text-xs text-neutral-500 font-semibold uppercase tracking-wider">Total Fuel Expensed (All-Time)</div>
-                        <div className="text-2xl font-bold mt-1 text-[#2383e2]">
-                          ₹{ccSummaryMetrics.totalFuelAllTime.toLocaleString()}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Main Board */}
-                  <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg bg-white dark:bg-[#1e1e1e] shadow-sm overflow-hidden">
-                    <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-[#fbfbfa] dark:bg-neutral-900/30 flex justify-between items-center">
-                      <h3 className="text-sm font-bold text-neutral-800 dark:text-neutral-200">
-                        Settlements & Cycle Tracker
-                      </h3>
-                      <span className="text-xs text-neutral-450">Manage Credit Card Fuel cycles and weekly/monthly payout streams</span>
-                    </div>
-
-                    {/* Sub-tab Navigation */}
-                    <div className="flex border-b border-[#edece9] dark:border-[#2f2f2f] px-4 bg-[#fbfbfa] dark:bg-neutral-900/10">
-                      <button
-                        type="button"
-                        onClick={() => setPayoutSubTab("payouts")}
-                        className={`px-4 py-2.5 text-xs font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-1.5 ${
-                          payoutSubTab === "payouts"
-                            ? "border-neutral-800 text-neutral-800 dark:border-neutral-200 dark:text-neutral-200"
-                            : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
-                        }`}
-                      >
-                        💰 Payout Streams
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setPayoutSubTab("fuel_cycles")}
-                        className={`px-4 py-2.5 text-xs font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-1.5 ${
-                          payoutSubTab === "fuel_cycles"
-                            ? "border-neutral-800 text-neutral-800 dark:border-neutral-200 dark:text-neutral-200"
-                            : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
-                        }`}
-                      >
-                        ⛽ Credit Card Fuel Cycles ({systemSettings ? `${getOrdinal(systemSettings.ccFuelCycleEndDay)} - ${getOrdinal(systemSettings.ccFuelCycleEndDay)}` : "4th - 4th"})
-                      </button>
-                      {loggedInUser?.role !== "DRIVER" && (
-                        <button
-                          type="button"
-                          onClick={() => setPayoutSubTab("settings")}
-                          className={`px-4 py-2.5 text-xs font-extrabold transition-all border-b-2 cursor-pointer flex items-center gap-1.5 ${
-                            payoutSubTab === "settings"
-                              ? "border-neutral-800 text-neutral-800 dark:border-neutral-200 dark:text-neutral-200"
-                              : "border-transparent text-neutral-450 hover:text-neutral-600 dark:text-neutral-450 dark:hover:text-neutral-300"
-                          }`}
-                        >
-                          ⚙️ Config & Rates
-                        </button>
-                      )}
-                    </div>
-
-                    {/* Filter and Sort Row */}
-                    {payoutSubTab !== "settings" && (
-                      <div className="p-4 border-b border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center">
-                      {/* Status Filter Pills */}
-                      <div className="flex flex-wrap gap-1.5 items-center">
-                        <span className="text-xs font-semibold text-[#5A6A85] dark:text-[#7C8BA1] mr-1.5">Status:</span>
-                        {[
-                          { label: "All", value: "ALL" },
-                          { label: "Unpaid", value: "UNPAID" },
-                          { label: "Paid", value: "PAID" },
-                          { label: "In Progress", value: "ONGOING" }
-                        ].map((item) => (
-                          <button
-                            key={item.value}
-                            type="button"
-                            onClick={() => setPayoutStatusFilter(item.value as any)}
-                            className={`text-xs px-3 py-1 rounded-md font-semibold border transition-all cursor-pointer ${
-                              payoutStatusFilter === item.value
-                                ? "bg-[#5D87FF] border-[#5D87FF] text-white"
-                                : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
-                            }`}
-                          >
-                            {item.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* Sort Controls */}
-                      <div className="flex items-center gap-2 w-full sm:w-auto">
-                        <span className="text-xs font-semibold text-[#5A6A85] dark:text-[#7C8BA1] whitespace-nowrap">Sort By:</span>
-                        <select
-                          value={payoutSortOrder}
-                          onChange={(e) => setPayoutSortOrder(e.target.value as any)}
-                          className="text-xs px-2 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-transparent dark:bg-[#1e1e1e] text-neutral-700 dark:text-neutral-300 font-semibold focus:outline-none focus:border-[#5D87FF]"
-                        >
-                          <option value="date_desc">Due Date: Newest First</option>
-                          <option value="date_asc">Due Date: Oldest First</option>
-                          <option value="amount_desc">Amount: High to Low</option>
-                          <option value="amount_asc">Amount: Low to High</option>
-                        </select>
-                      </div>
-                    </div>
-                  )}
-
-                    <div className="divide-y divide-[#edece9]/60 dark:divide-neutral-800/60">
-                      {payoutSubTab === "settings" ? (
-                        <div className="p-6 bg-white dark:bg-[#181818] rounded-b-lg">
-                          <div className="max-w-2xl mx-auto space-y-6">
-                            <div>
-                              <h4 className="text-base font-bold text-neutral-800 dark:text-neutral-200">
-                                Operational & Financial Configuration
-                              </h4>
-                              <p className="text-xs text-neutral-400 mt-1">
-                                Adjust payout rates, base monthly packages, and credit card cutoff days. Changes propagate immediately to all metric cards and ledger generators.
-                              </p>
-                            </div>
-
-                            {settingsSuccessVisible && (
-                              <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/30 text-emerald-800 dark:text-emerald-300 rounded-md text-xs font-semibold flex items-center gap-2">
-                                <span>✅</span> Settings updated successfully!
-                              </div>
-                            )}
-
-                            {actionData?.error && actionData?.action === "update_system_settings" && (
-                              <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/30 text-rose-800 dark:text-rose-300 rounded-md text-xs font-semibold flex items-center gap-2">
-                                <span>⚠️</span> {actionData.error}
-                              </div>
-                            )}
-
-                            <Form method="post" className="space-y-4">
-                              <input type="hidden" name="_action" value="update_system_settings" />
-                              
-                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <div className="space-y-1.5">
-                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
-                                    70 Per Order Rate (₹)
-                                  </label>
-                                  <input
-                                    type="number"
-                                    name="rateVendorShip"
-                                    step="0.01"
-                                    defaultValue={systemSettings?.rateVendorShip ?? 70}
-                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
-                                    required
-                                  />
-                                  <p className="text-[10px] text-neutral-400">
-                                    Vendor weekly payout per completed order (e.g. Shadowfax runsheets).
-                                  </p>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
-                                    Vendor Per Order Weekly Rate (₹)
-                                  </label>
-                                  <input
-                                    type="number"
-                                    name="ratePerOrderWeekly"
-                                    step="0.01"
-                                    defaultValue={systemSettings?.ratePerOrderWeekly ?? 35}
-                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
-                                    required
-                                  />
-                                  <p className="text-[10px] text-neutral-400">
-                                    Per-order rate for vendor drivers, paid weekly.
-                                  </p>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
-                                    Vendor Monthly Base Salary (₹)
-                                  </label>
-                                  <input
-                                    type="number"
-                                    name="ratePerOrderMonthlyBase"
-                                    step="1"
-                                    defaultValue={systemSettings?.ratePerOrderMonthlyBase ?? 53000}
-                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
-                                    required
-                                  />
-                                  <p className="text-[10px] text-neutral-400">
-                                    Fixed monthly base pay for per-order drivers (default: ₹53,000).
-                                  </p>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                  <label className="text-xs font-extrabold text-neutral-500 uppercase tracking-wider block">
-                                    CC Fuel Cycle Billing Day
-                                  </label>
-                                  <input
-                                    type="number"
-                                    name="ccFuelCycleEndDay"
-                                    min="1"
-                                    max="28"
-                                    defaultValue={systemSettings?.ccFuelCycleEndDay ?? 4}
-                                    className="w-full text-sm px-3 py-2 border border-[#edece9] dark:border-[#2f2f2f] rounded bg-transparent dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:border-[#5D87FF]"
-                                    required
-                                  />
-                                  <p className="text-[10px] text-neutral-400">
-                                    Credit Card statement end date (1-28). The next cycle automatically starts on the following day.
-                                  </p>
-                                </div>
-                              </div>
-
-                              <div className="pt-2 border-t border-[#edece9] dark:border-[#2f2f2f] flex justify-end">
-                                <button
-                                  type="submit"
-                                  disabled={navigation.state === "submitting"}
-                                  className="px-4 py-2 text-xs font-bold bg-[#5D87FF] hover:bg-[#4570E6] text-white rounded transition-colors shadow-sm disabled:opacity-50 cursor-pointer"
-                                >
-                                  {navigation.state === "submitting" ? "Saving..." : "Save Configuration"}
-                                </button>
-                              </div>
-                            </Form>
-                          </div>
-                        </div>
-                      ) : payoutSubTab === "payouts" ? (
-                        filteredAndSortedPayouts.length === 0 ? (
-                          <div className="p-8 text-center text-neutral-400 italic text-xs">
-                            No payouts match the selected status filter.
-                          </div>
-                        ) : (
-                          filteredAndSortedPayouts.map((w) => {
-                            const isOverdue = w.status === "UNPAID" && new Date().getTime() > new Date(w.expectedDate).getTime();
-                            const diffTime = new Date(w.expectedDate).getTime() - new Date().getTime();
-                            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-                            return (
-                              <div 
-                                key={`${w.mondayStr}_${w.category}`} 
-                                className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/10 transition-colors"
-                              >
-                                <div className="space-y-1.5">
-                                  <div className="flex items-center gap-2">
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
-                                      w.category === "vendor_ship"
-                                        ? "bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-900/30"
-                                        : w.category === "per_order_rate_weekly"
-                                        ? "bg-indigo-50 dark:bg-indigo-950/20 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-900/30"
-                                        : "bg-purple-50 dark:bg-purple-950/20 text-purple-600 dark:text-purple-400 border border-purple-200/50 dark:border-purple-900/30"
-                                    }`}>
-                                      {w.category === "vendor_ship"
-                                        ? "70 Per Order Income"
-                                        : w.category === "per_order_rate_weekly"
-                                        ? "Vendor Per Order Income"
-                                        : "Vendor Income"}
-                                    </span>
-
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
-                                      w.status === "PAID"
-                                        ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-200/30 dark:border-emerald-900/30"
-                                        : w.status === "ONGOING"
-                                        ? "bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/30 dark:border-amber-900/30"
-                                        : "bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-200/30 dark:border-rose-900/30"
-                                    }`}>
-                                      {w.status === "PAID" ? "PAID" : w.status === "ONGOING" ? "IN PROGRESS" : "UNPAID"}
-                                    </span>
-                                  </div>
-
-                                  <div className="text-sm font-bold text-neutral-800 dark:text-neutral-100">
-                                    {w.weekLabel}
-                                  </div>
-
-                                  <div className="text-xs text-neutral-450 dark:text-neutral-400 flex flex-wrap items-center gap-x-3 gap-y-1 font-medium">
-                                    <span>📊 {w.deliveriesCount} runsheets</span>
-                                    <span>•</span>
-                                    <span>📦 {w.completedOrders} completed orders</span>
-                                  </div>
-                                </div>
-
-                                <div className="flex flex-col md:items-end justify-center gap-2">
-                                  <div className="text-left md:text-right">
-                                    <div className="text-xs text-neutral-400 font-semibold uppercase">Calculated Payout</div>
-                                    <div className="text-lg font-extrabold text-neutral-900 dark:text-neutral-50">
-                                      ₹{w.calculatedPayout.toLocaleString()}
-                                    </div>
-                                    {w.status === "PAID" && w.matchingExpense && (
-                                      <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                                        Received: ₹{w.matchingExpense.amount.toLocaleString()}
-                                        {w.matchingExpense.amount !== w.calculatedPayout && (
-                                          <span className="text-amber-600 dark:text-amber-400 ml-1">
-                                            (Diff: ₹{(w.matchingExpense.amount - w.calculatedPayout).toLocaleString()})
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  <div className="text-[11px] text-neutral-500 dark:text-neutral-400 font-medium">
-                                    {w.status === "PAID" && w.matchingExpense ? (
-                                      <div className="flex flex-col md:items-end gap-0.5">
-                                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
-                                          ✨ Recorded in Ledger on {new Date(w.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                                        </span>
-                                        {w.matchingExpense.notes && w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim() && (
-                                          <span className="text-[10px] text-neutral-400 italic max-w-[200px] text-right truncate" title={w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}>
-                                            Note: "{w.matchingExpense.notes.replace(/\[Ref: (Weekly|Monthly)-Payout-.*\]/, '').trim()}"
-                                          </span>
-                                        )}
-                                      </div>
-                                    ) : w.status === "ONGOING" ? (
-                                      <span className="text-amber-600 dark:text-amber-450 font-bold">
-                                        Settlement expected on {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                                      </span>
-                                    ) : (
-                                      <span className={isOverdue ? "text-rose-600 dark:text-rose-450 font-extrabold" : "text-neutral-550 dark:text-neutral-350"}>
-                                        📅 Due date: {new Date(w.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} 
-                                        {isOverdue ? " (Overdue!)" : ` (in ${diffDays} days)`}
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  <div className="flex gap-2 mt-1">
-                                    {w.status !== "PAID" && w.category !== "per_order_rate_monthly" && (
-                                      <button
-                                        type="button"
-                                        onClick={() => setWeeklyOrdersToEdit(w)}
-                                        className="px-2.5 py-1.5 text-xs font-bold bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 rounded-md border border-neutral-200 dark:border-neutral-700 transition-all cursor-pointer flex items-center gap-1"
-                                      >
-                                        ✏️ Set Orders
-                                      </button>
-                                    )}
-                                    {w.status === "UNPAID" && (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setPayoutToPay(w);
-                                        }}
-                                        className="px-3 py-1.5 text-xs font-bold bg-neutral-900 hover:bg-neutral-855 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 rounded-md shadow-sm transition-all active:scale-95 cursor-pointer flex items-center gap-1"
-                                      >
-                                        Record Payout
-                                      </button>
-                                    )}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })
-                        )
-                      ) : (
-                        filteredAndSortedCcFuelCycles.length === 0 ? (
-                          <div className="p-8 text-center text-neutral-400 italic text-xs">
-                            No credit card fuel billing cycles match the selected status filter.
-                          </div>
-                        ) : (
-                          filteredAndSortedCcFuelCycles.map((c) => {
-                            const isOverdue = c.status === "UNPAID" && new Date().getTime() > new Date(c.endDate).getTime();
-                            return (
-                              <div 
-                                key={c.billingMonth} 
-                                className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/10 transition-colors"
-                              >
-                                <div className="space-y-1.5">
-                                  <div className="flex items-center gap-2">
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/50 dark:border-amber-900/30">
-                                      ⛽ Fuel CC Cycle
-                                    </span>
-
-                                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
-                                      c.status === "PAID"
-                                        ? "bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-200/30 dark:border-emerald-900/30"
-                                        : c.status === "ONGOING"
-                                        ? "bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 border border-amber-200/30 dark:border-amber-900/30"
-                                        : "bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-200/30 dark:border-rose-900/30"
-                                    }`}>
-                                      {c.status === "PAID" ? "PAID" : c.status === "ONGOING" ? "IN PROGRESS" : "UNPAID"}
-                                    </span>
-                                  </div>
-
-                                  <div className="text-sm font-bold text-neutral-800 dark:text-neutral-100">
-                                    {c.cycleLabel}
-                                  </div>
-
-                                  <div className="text-xs text-neutral-450 dark:text-neutral-400 font-medium">
-                                    Statement Month: {c.billingMonth}
-                                  </div>
-                                </div>
-
-                                <div className="flex flex-col md:items-end justify-center gap-2">
-                                  <div className="text-left md:text-right">
-                                    <div className="text-xs text-neutral-400 font-semibold uppercase">Total Fuel Expensed</div>
-                                    <div className="text-lg font-extrabold text-neutral-900 dark:text-neutral-50">
-                                      ₹{c.totalFuelExpense.toLocaleString()}
-                                    </div>
-                                    {c.status === "PAID" && c.matchingExpense && (
-                                      <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                                        Paid CC Bill: ₹{c.matchingExpense.amount.toLocaleString()}
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  <div className="text-[11px] text-neutral-500 dark:text-neutral-400 font-medium">
-                                    {c.status === "PAID" && c.matchingExpense ? (
-                                      <div className="flex flex-col md:items-end gap-0.5">
-                                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1 font-bold">
-                                          💳 Paid on {new Date(c.matchingExpense.timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                                        </span>
-                                      </div>
-                                    ) : c.status === "ONGOING" ? (
-                                      <span className="text-amber-600 dark:text-amber-450 font-bold">
-                                        Statement ends on {new Date(c.endDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-                                      </span>
-                                    ) : (
-                                      <span className={isOverdue ? "text-rose-600 dark:text-rose-450 font-extrabold" : "text-neutral-550 dark:text-neutral-350"}>
-                                        📅 Bill due for reconciliation (Cycle ended)
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  {c.status === "UNPAID" && (
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setCcBillToPay(c);
-                                      }}
-                                      className="mt-1 px-3 py-1.5 text-xs font-bold bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 rounded-md shadow-sm transition-all active:scale-95 cursor-pointer flex items-center gap-1"
-                                    >
-                                      Reconcile & Pay Bill
-                                    </button>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })
-                        )
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* USER MANAGEMENT TAB VIEW */}
-          {activeTab === "users" && (
-            <div className="animate-fade-in space-y-6">
-                  {/* Category Header */}
-                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
-                    <div>
-                      <h1 className="text-2xl font-bold tracking-tight">Delivery Boys & Autos</h1>
-                    </div>
-                  </div>
-
-                  {/* ACTION NOTIFICATIONS */}
-                  {actionData && actionData.error && actionErrorVisible && (
-                    <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                      ⚠️ {actionData.error}
-                    </div>
-                  )}
-                  {actionData && actionData.success && userControlSuccessVisible && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "update_driver") && (
-                    <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-[#edece9] dark:border-neutral-800 rounded-md text-xs font-semibold animate-fade-in space-y-1">
-                      <div>✨ Operation completed successfully!</div>
-                      {actionData.action === "update_driver" && actionData.transferredFrom && (
-                        <div className="text-[11px] text-amber-700 dark:text-amber-400 font-bold">
-                          ⚠️ Auto {actionData.vehicleNumber} was reassigned to {actionData.newDriverName}. Previous assignment for {actionData.transferredFrom} was set to blank.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Sub-tab Selection */}
-                  <div className="flex gap-2 p-1 bg-[#f1f0ec] dark:bg-neutral-900 rounded-lg max-w-[280px] font-sans">
-                    <button
-                      type="button"
-                      onClick={() => setUserSubTab("drivers")}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                        userSubTab === "drivers"
-                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
-                          : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
-                      }`}
-                    >
-                      🚚 Delivery Boys
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setUserSubTab("autos")}
-                      className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
-                        userSubTab === "autos"
-                          ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
-                          : "text-neutral-500 hover:text-neutral-700 dark:text-neutral-450 dark:hover:text-neutral-300"
-                      }`}
-                    >
-                      🛺 Autos / Fleet
-                    </button>
-                  </div>
-                         {/* Grid Content */}
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    {/* LIST OF CURRENT ENTRIES */}
-                    <div className="lg:col-span-2 space-y-4">
-                      {userSubTab === "drivers" ? (
-                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl overflow-hidden shadow-sm">
-                          <div className="p-4 border-b border-[#edece9] dark:border-neutral-800 flex justify-between items-center">
-                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-205">
-                              Registered Delivery Boys ({drivers.length})
-                            </h3>
-                          </div>
-                          {drivers.length === 0 ? (
-                            <div className="p-8 text-center text-xs text-neutral-400">
-                              No registered delivery boys found. Use the form on the right to add a delivery boy.
-                            </div>
-                          ) : (
-                            <div className="divide-y divide-[#edece9] dark:divide-neutral-800">
-                              {drivers.map((u: any) => (
-                                <div key={u.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
-                                  <div className="flex items-center gap-3">
-                                    <div className="w-9 h-9 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/10 text-[#5D87FF] flex items-center justify-center font-bold text-sm shrink-0">
-                                      {u.name?.charAt(0) || "D"}
-                                    </div>
-                                    <div>
-                                      <h4 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-2 flex-wrap">
-                                        {u.name}
-                                      </h4>
-                                      <div className="text-[10px] font-mono text-neutral-450 dark:text-neutral-400 mt-0.5 space-y-0.5 font-sans">
-                                        <div>
-                                          📞 {u.phone} • 💰 Salary: {u.salary ? `₹${u.salary.toLocaleString()}/mo` : "Not Set"} • 🛺 Auto: {u.vehicleNumber || "None"}
-                                        </div>
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleOpenDriverProfile(u)}
-                                      className="px-2.5 py-1.5 rounded-md text-[10px] font-bold bg-[#5D87FF]/10 text-[#5D87FF] hover:bg-[#5D87FF]/15 transition-all cursor-pointer shrink-0"
-                                    >
-                                      View Card
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      disabled={isSubmitting}
-                                      onClick={() => {
-                                        triggerConfirm(
-                                          "Remove Driver?",
-                                          `Are you sure you want to remove driver ${u.name}?`,
-                                          () => {
-                                            const fd = new FormData();
-                                            fd.append("_action", "delete_driver");
-                                            fd.append("id", u.id.toString());
-                                            submit(fd, { method: "post" });
-                                          }
-                                        );
-                                      }}
-                                      className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
-                                      title="Remove Driver"
-                                    >
-                                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                      </svg>
-                                    </button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl overflow-hidden shadow-sm">
-                          <div className="p-4 border-b border-[#edece9] dark:border-neutral-800 flex justify-between items-center">
-                            <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-205">
-                              Registered Autos / Fleet ({autos?.length || 0})
-                            </h3>
-                          </div>
-                          {(autos?.length || 0) === 0 ? (
-                            <div className="p-8 text-center text-xs text-neutral-400">
-                              No registered autos found. Use the form on the right to add an auto.
-                            </div>
-                          ) : (
-                            <div className="divide-y divide-[#edece9] dark:divide-neutral-800">
-                              {autos.map((a: any) => {
-                                const assignedDriver = users.find((u: any) => u.phone === a.driverPhone);
-                                return (
-                                  <div key={a.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-neutral-50 dark:hover:bg-neutral-900/40 transition-colors">
-                                    <div className="flex items-center gap-3">
-                                      <div className="w-9 h-9 rounded-full bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 flex items-center justify-center font-bold text-sm shrink-0">
-                                        🛺
-                                      </div>
-                                      <div>
-                                        <h4 className="text-sm font-bold font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-2 py-0.5 rounded inline-block">
-                                          {a.plateNumber}
-                                        </h4>
-                                        <div className="text-[10px] text-neutral-455 dark:text-neutral-400 mt-1 space-y-0.5">
-                                          <div>
-                                            Model: <span className="font-semibold text-neutral-700 dark:text-neutral-200">{a.modelName || "N/A"}</span>
-                                            {" • Owner: "}<span className="font-semibold text-neutral-700 dark:text-neutral-200">{a.ownerName || "N/A"}</span>
-                                          </div>
-                                          <div className="text-neutral-500 dark:text-neutral-450">
-                                            👤 Driver: {assignedDriver ? (
-                                              <span className="font-bold text-emerald-600 dark:text-emerald-450">
-                                                {assignedDriver.name}
-                                              </span>
-                                            ) : (
-                                              <span className="italic text-neutral-400">Unassigned</span>
-                                            )}
-                                          </div>
-                                        </div>
-                                      </div>
-                                    </div>
-                                    <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
-                                      <button
-                                        type="button"
-                                        onClick={() => setSelectedAutoProfile(a)}
-                                        className="px-2.5 py-1.5 rounded-md text-[10px] font-bold bg-amber-500/10 text-amber-600 hover:bg-amber-500/15 transition-all cursor-pointer shrink-0"
-                                      >
-                                        View Card
-                                      </button>
-                                      <button
-                                        type="button"
-                                        disabled={isSubmitting}
-                                        onClick={() => {
-                                          triggerConfirm(
-                                            "Remove Auto?",
-                                            `Are you sure you want to remove auto ${a.plateNumber}?`,
-                                            () => {
-                                              const fd = new FormData();
-                                              fd.append("_action", "delete_auto");
-                                              fd.append("id", a.id.toString());
-                                              submit(fd, { method: "post" });
-                                            }
-                                          );
-                                        }}
-                                        className="p-1.5 rounded-md text-rose-500 hover:bg-rose-500/10 transition-all cursor-pointer disabled:opacity-40 shrink-0"
-                                        title="Remove Auto"
-                                      >
-                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                        </svg>
-                                      </button>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* FORM COLUMN */}
-                    <div>
-                      {userSubTab === "drivers" ? (
-                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
-                          <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
-                            <h3 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-1.5">
-                              <span>➕</span> Register Delivery Boy
-                            </h3>
-                          </div>
-                          <Form method="post" className="space-y-4">
-                            <input type="hidden" name="_action" value="create_driver" />
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Delivery Boy Name</label>
-                              <input
-                                type="text"
-                                name="name"
-                                required
-                                placeholder="John Doe"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Phone Number</label>
-                              <input
-                                type="tel"
-                                name="phone"
-                                required
-                                placeholder="+91 99999 99999"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Monthly Salary (₹)</label>
-                              <input
-                                type="number"
-                                name="salary"
-                                placeholder="15000"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Auto Assignment</label>
-                              <select
-                                name="vehicleNumber"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none text-neutral-800 dark:text-neutral-100"
-                              >
-                                <option value="" className="text-neutral-800 dark:text-neutral-900">Select Auto (Optional)</option>
-                                {autos?.map((a: any) => (
-                                  <option key={a.id} value={a.plateNumber} className="text-neutral-800 dark:text-neutral-900">
-                                    {a.plateNumber} ({a.modelName || "N/A"})
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-
-
-
-
-
-                            <button
-                              type="submit"
-                              disabled={isSubmitting}
-                              className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
-                            >
-                              {isSubmitting ? "Registering..." : "Register Delivery Boy"}
-                            </button>
-                          </Form>
-                        </div>
-                      ) : (
-                        <div className="bg-white dark:bg-[#151515] border border-[#edece9] dark:border-neutral-800 rounded-xl p-5 space-y-4 shadow-sm">
-                          <div className="border-b border-[#edece9] dark:border-neutral-800 pb-3">
-                            <h3 className="text-sm font-bold text-neutral-850 dark:text-neutral-100 flex items-center gap-1.5">
-                              <span>➕</span> Add New Auto / Vehicle
-                            </h3>
-                          </div>
-                          <Form method="post" className="space-y-4">
-                            <input type="hidden" name="_action" value="create_auto" />
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Plate Number / Auto Number</label>
-                              <input
-                                type="text"
-                                name="plateNumber"
-                                required
-                                placeholder="MH-12-AB-1234"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none font-mono"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Auto Model / Make</label>
-                              <input
-                                type="text"
-                                name="modelName"
-                                placeholder="Piaggio Ape / Bajaj RE"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Auto Owner</label>
-                              <input
-                                type="text"
-                                name="ownerName"
-                                placeholder="Self / Rented / Vendor"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none"
-                              />
-                            </div>
-
-                            <div className="space-y-1">
-                              <label className="text-xs font-semibold text-neutral-500">Assign Driver</label>
-                              <select
-                                name="driverPhone"
-                                className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#5D87FF] outline-none text-neutral-800 dark:text-neutral-100"
-                              >
-                                <option value="">Select Driver (Optional)</option>
-                                {drivers.map((d: any) => (
-                                  <option key={d.id} value={d.phone} className="text-neutral-800 dark:text-neutral-900">
-                                    {d.name} ({d.phone})
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-
-                            <button
-                              type="submit"
-                              disabled={isSubmitting}
-                              className="w-full py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-md text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
-                            >
-                              {isSubmitting ? "Adding..." : "Add Auto"}
-                            </button>
-                          </Form>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ========================================================================= */}
-              {/* PENDING DUES & RECEIVABLES TAB VIEW */}
-              {/* ========================================================================= */}
+          {/* ========================================================================= */}
               {activeTab === "pending_dues" && (
                 <div className="animate-fade-in space-y-6">
                   {/* Header & Add Button */}
@@ -5882,33 +4557,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* Visual Slip Viewer Modal Overlay */}
-        {selectedSlipImage && (
-          <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
-            <div className="bg-white dark:bg-[#1a1a1a] rounded-lg overflow-hidden border border-neutral-200 dark:border-neutral-800 w-full max-w-sm shadow-2xl relative">
-              <div className="flex justify-between items-center p-3 border-b border-neutral-100 dark:border-neutral-800">
-                <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200 flex items-center gap-1.5">
-                  ⛽ Petrol Slip Receipt
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setSelectedSlipImage(null)}
-                  className="p-1.5 rounded-md bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-500 dark:text-neutral-300 transition-all cursor-pointer text-xs font-bold"
-                >
-                  Close
-                </button>
-              </div>
-              <div className="aspect-[3/4] w-full bg-neutral-50 dark:bg-neutral-900 p-2">
-                <img
-                  src={selectedSlipImage}
-                  alt="Petrol Slip Attachment"
-                  className="w-full h-full object-contain rounded-md"
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Premium PWA Install Sheet Modal Overlay */}
         {showInstallBanner && (
           <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-fade-in">
@@ -6028,212 +4676,6 @@ export default function Home() {
                 >
                   Maybe Later
                 </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Premium Step-by-Step Pending CNG/Fuel Slip Modal */}
-        {showPendingModal && actionData && "needsFuelSlip" in actionData && actionData.needsFuelSlip && actionData.pendingFuelExpense && (
-          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
-            {/* Glass backdrop */}
-            <div 
-              className="absolute inset-0 bg-black/75 backdrop-blur-md transition-opacity duration-300"
-              onClick={() => {
-                setPendingSlipBase64(null);
-                setShowPendingModal(false);
-              }}
-            />
-            
-            {/* Premium Modal Card */}
-            <div className="relative bg-[#ffffff] dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800/80 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
-              
-              {/* Header */}
-              <div className="flex items-center gap-3.5 border-b border-[#edece9]/60 dark:border-neutral-800/60 pb-4">
-                <div className="p-2.5 rounded-xl bg-amber-100 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400">
-                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
-                </div>
-                <div>
-                  <h3 className="text-md font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
-                    CNG / Fuel Slip Required
-                  </h3>
-                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-amber-600 dark:text-amber-400">
-                    Step 2 of 2: Upload Receipt
-                  </span>
-                </div>
-              </div>
-
-              {/* Message Details */}
-              <div className="space-y-3.5">
-                <p className="text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
-                  Your other parsed logs have been saved <strong className="text-emerald-600 dark:text-emerald-400 font-bold">successfully</strong>! However, the fuel/CNG expense of <span className="font-bold text-neutral-800 dark:text-white">₹{actionData.pendingFuelExpense.amount}</span> requires a receipt photo to save.
-                </p>
-                
-                <div className="p-3.5 bg-neutral-50 dark:bg-neutral-900/50 rounded-xl border border-neutral-150/60 dark:border-neutral-800/40 space-y-2">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-neutral-400 font-medium">Category:</span>
-                    <span className="font-extrabold uppercase text-[10px] tracking-wider bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 rounded font-mono">
-                      ⛽ {actionData.pendingFuelExpense.category}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="text-neutral-400 font-medium">Amount:</span>
-                    <span className="font-extrabold text-neutral-900 dark:text-white text-sm">
-                      ₹{actionData.pendingFuelExpense.amount}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-start text-xs gap-4">
-                    <span className="text-neutral-400 font-medium shrink-0">Notes:</span>
-                    <span className="font-semibold text-neutral-705 dark:text-neutral-300 text-right line-clamp-2 break-all">
-                      "{actionData.pendingFuelExpense.notes}"
-                    </span>
-                  </div>
-                  {actionData.pendingFuelExpense.vehicle && (
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-neutral-400 font-medium">Vehicle Plate:</span>
-                      <span className="font-bold font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-1.5 py-0.5 rounded text-[10px]">
-                        {actionData.pendingFuelExpense.vehicle}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Photo Input Picker Area */}
-              <div className="space-y-4">
-                <div className="flex flex-col items-center justify-center border-2 border-dashed border-neutral-200 dark:border-neutral-800/70 rounded-xl p-4 bg-neutral-50/30 dark:bg-neutral-900/10 min-h-[150px] transition-all relative overflow-hidden">
-                  
-                  {pendingSlipBase64 ? (
-                    <div className="relative w-full max-w-[130px] aspect-[3/4] rounded-lg border border-neutral-300 dark:border-neutral-700 overflow-hidden shadow-lg animate-scale-in">
-                      <img src={pendingSlipBase64} className="w-full h-full object-cover" alt="Captured receipt preview" />
-                      <button
-                        type="button"
-                        onClick={() => setPendingSlipBase64(null)}
-                        className="absolute top-1 right-1 p-1 rounded-full bg-black/60 text-white hover:bg-black/85 transition-all cursor-pointer shadow-md"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="text-center space-y-2.5">
-                      <div className="text-3xl animate-bounce">📸</div>
-                      <p className="text-[11px] text-neutral-400 font-medium">Please snap or upload the receipt slip</p>
-                      <div className="flex flex-wrap justify-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => document.getElementById("modal-pending-slip-input-camera")?.click()}
-                          className="notion-btn text-[11px] px-3 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-lg font-bold transition-all shadow-md cursor-pointer inline-flex items-center gap-1"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                          </svg>
-                          Snap Photo
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => document.getElementById("modal-pending-slip-input-gallery")?.click()}
-                          className="notion-btn text-[11px] px-3 py-1.5 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-805 dark:hover:bg-neutral-800 text-neutral-800 dark:text-neutral-200 rounded-lg font-bold transition-all shadow-md cursor-pointer inline-flex items-center gap-1 border border-neutral-200 dark:border-neutral-800"
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          </svg>
-                          From Gallery
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <input
-                    type="file"
-                    id="modal-pending-slip-input-camera"
-                    accept="image/*"
-                    capture="environment"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const compressed = await compressImage(file);
-                        setPendingSlipBase64(compressed);
-                      }
-                    }}
-                  />
-                  <input
-                    type="file"
-                    id="modal-pending-slip-input-gallery"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const compressed = await compressImage(file);
-                        setPendingSlipBase64(compressed);
-                      }
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Action Dialog Controls */}
-              <div className="flex items-center gap-3 pt-2.5 border-t border-[#edece9]/60 dark:border-neutral-800/60">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPendingSlipBase64(null);
-                    setShowPendingModal(false);
-                  }}
-                  className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
-                >
-                  Cancel / Discard
-                </button>
-                
-                {pendingSlipBase64 ? (
-                  <Form method="post" className="flex-1">
-                    <input type="hidden" name="_action" value="create_expense" />
-                    <input type="hidden" name="isAi" value="false" />
-                    <input type="hidden" name="amount" value={actionData.pendingFuelExpense.amount} />
-                    <input type="hidden" name="type" value={actionData.pendingFuelExpense.type} />
-                    <input type="hidden" name="category" value={actionData.pendingFuelExpense.category} />
-                    <input type="hidden" name="notes" value={actionData.pendingFuelExpense.notes} />
-                    <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
-                    <input type="hidden" name="senderName" value="AI Assistant" />
-                    <input type="hidden" name="imageUrl" value={pendingSlipBase64} />
-                    <input type="hidden" name="date" value={actionData.pendingFuelExpense.date || ""} />
-                    
-                    <button
-                      type="submit"
-                      disabled={isSubmitting}
-                      className="w-full py-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all cursor-pointer text-center disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
-                    >
-                      {isSubmitting ? "Saving..." : "Complete Log Save"}
-                    </button>
-                  </Form>
-                ) : (
-                  <Form method="post" className="flex-1">
-                    <input type="hidden" name="_action" value="create_expense" />
-                    <input type="hidden" name="isAi" value="false" />
-                    <input type="hidden" name="amount" value={actionData.pendingFuelExpense.amount} />
-                    <input type="hidden" name="type" value={actionData.pendingFuelExpense.type} />
-                    <input type="hidden" name="category" value={actionData.pendingFuelExpense.category} />
-                    <input type="hidden" name="notes" value={actionData.pendingFuelExpense.notes} />
-                    <input type="hidden" name="vehicle" value={actionData.pendingFuelExpense.vehicle || ""} />
-                    <input type="hidden" name="senderName" value="AI Assistant" />
-                    <input type="hidden" name="imageUrl" value="" />
-                    <input type="hidden" name="date" value={actionData.pendingFuelExpense.date || ""} />
-                    
-                    <button
-                      type="submit"
-                      disabled={isSubmitting}
-                      className="w-full py-2.5 text-xs bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-200 dark:hover:bg-neutral-300 text-white dark:text-neutral-900 font-bold rounded-xl shadow-md transition-all cursor-pointer text-center disabled:opacity-50"
-                    >
-                      {isSubmitting ? "Saving..." : "Save Without Slip"}
-                    </button>
-                  </Form>
-                )}
               </div>
             </div>
           </div>
@@ -6380,493 +4822,267 @@ export default function Home() {
           </div>
         )}
 
-        {/* Edit Runsheet Modal */}
-        {editingDelivery && (
-          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
-            <div 
-              className="absolute inset-0 bg-black/75 backdrop-blur-md transition-opacity duration-300"
-              onClick={() => setEditingDelivery(null)}
-            />
-            
-            <div className="relative bg-[#ffffff] dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800/80 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
-              
-              <div className="flex items-center gap-3.5 border-b border-[#edece9]/60 dark:border-neutral-800/60 pb-4">
-                <div className="p-2.5 rounded-xl bg-purple-100 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400">
-                  <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
-                  </svg>
+        {/* WhatsApp Bulk Chat Importer Modal */}
+        {showWhatsAppImporter && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+            <div className="bg-white dark:bg-[#1a1a1a] border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl max-w-2xl w-full p-6 space-y-5 max-h-[92vh] overflow-y-auto animate-scale-up">
+              {/* Header */}
+              <div className="flex justify-between items-center border-b border-neutral-100 dark:border-neutral-800 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-2xl">💬</span>
+                  <div>
+                    <h3 className="text-base font-bold text-neutral-900 dark:text-white">
+                      WhatsApp Group Chat Importer
+                    </h3>
+                    <p className="text-[11px] text-neutral-450 dark:text-neutral-400">
+                      Instant 0ms local regex parser for weekly payouts, voice expense logs & driver advances
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-md font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
-                    Edit Daily Runsheet
-                  </h3>
-                  <span className="text-[10px] uppercase tracking-wider font-extrabold text-purple-600 dark:text-purple-400">
-                    Modify Runsheet ID: #{editingDelivery.id}
-                  </span>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowWhatsAppImporter(false)}
+                  className="p-1 rounded-md text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold text-lg cursor-pointer"
+                >
+                  ×
+                </button>
               </div>
 
-              <Form method="post" className="space-y-4">
-                <input type="hidden" name="_action" value="update_delivery" />
-                <input type="hidden" name="id" value={editingDelivery.id} />
-
-                {/* Operator/Driver Selection */}
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-neutral-500">Field Operator Name</label>
-                  <select
-                    name="driverName"
-                    value={editingDelivery.driverName}
-                    onChange={(e) => setEditingDelivery({ ...editingDelivery, driverName: e.target.value })}
-                    className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-bold"
-                  >
-                    {users.map((u: any) => (
-                      <option key={u.id} value={u.name}>{u.name} ({u.role})</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Runsheet Date Selection */}
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-neutral-500">Runsheet Week Cycle</label>
-                  <div className="flex gap-2">
+              {/* Chat Text Input Area */}
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-neutral-600 dark:text-neutral-300">
+                    Paste WhatsApp Messages or Chat Export (.txt)
+                  </label>
+                  <div className="flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => {
-                        const current = parseLocalDate(editingDelivery.createdAt || new Date());
-                        current.setDate(current.getDate() - 7);
-                        const mon = getMonday(current);
-                        setEditingDelivery({ ...editingDelivery, createdAt: toUTCISOString(mon) });
+                        setRawWhatsAppChat(SAMPLE_WHATSAPP_CHAT);
+                        const msgs = parseWhatsAppChat(SAMPLE_WHATSAPP_CHAT);
+                        const txs = detectTransactions(msgs);
+                        setDetectedWhatsAppTxs(txs);
                       }}
-                      className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-800 rounded-md bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
-                      title="Previous Week"
+                      className="px-2.5 py-1 text-[11px] font-bold rounded bg-[#13DEB9]/15 hover:bg-[#13DEB9]/25 text-[#13DEB9] border border-[#13DEB9]/30 transition-all cursor-pointer"
                     >
-                      ◀
+                      ✨ Try Sample Chat
                     </button>
+                    <label className="px-2.5 py-1 text-[11px] font-bold rounded bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-600 dark:text-neutral-300 border border-neutral-200/80 dark:border-neutral-700 cursor-pointer">
+                      📁 Upload .txt
+                      <input
+                        type="file"
+                        accept=".txt"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            const reader = new FileReader();
+                            reader.onload = (evt) => {
+                              const text = (evt.target?.result as string) || "";
+                              setRawWhatsAppChat(text);
+                              const msgs = parseWhatsAppChat(text);
+                              const txs = detectTransactions(msgs);
+                              setDetectedWhatsAppTxs(txs);
+                            };
+                            reader.readAsText(file);
+                          }
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <textarea
+                  rows={4}
+                  value={rawWhatsAppChat}
+                  onChange={(e) => {
+                    const text = e.target.value;
+                    setRawWhatsAppChat(text);
+                    if (text.trim()) {
+                      const msgs = parseWhatsAppChat(text);
+                      const txs = detectTransactions(msgs);
+                      setDetectedWhatsAppTxs(txs);
+                    } else {
+                      setDetectedWhatsAppTxs([]);
+                    }
+                  }}
+                  placeholder="Paste WhatsApp messages here, e.g.:
+[01/10, 12:37 pm] Sumit Morya: Earning 
+Vandor 1 :- 3031 
+Vandor 2 :- 2903
+Per order :- 5955
+[01/10, 12:44 pm] Sumit: Expenses 
+- 20k bill payments 
+- 12k commission to manager"
+                  className="notion-textarea w-full text-xs font-mono border border-neutral-200 dark:border-neutral-800 rounded-xl p-3 bg-neutral-50/50 dark:bg-neutral-900/50 text-neutral-800 dark:text-neutral-100 outline-none focus:ring-1 focus:ring-[#13DEB9]"
+                />
+              </div>
+
+              {/* Detected Transactions Checklist */}
+              {detectedWhatsAppTxs.length > 0 && (
+                <div className="space-y-3 pt-2 border-t border-neutral-100 dark:border-neutral-800">
+                  <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200">
+                        Detected Entries ({detectedWhatsAppTxs.filter(t => t.selected).length}/{detectedWhatsAppTxs.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allSelected = detectedWhatsAppTxs.every(t => t.selected);
+                          setDetectedWhatsAppTxs(prev => prev.map(t => ({ ...t, selected: !allSelected })));
+                        }}
+                        className="text-[10px] font-bold text-[#5D87FF] hover:underline cursor-pointer"
+                      >
+                        {detectedWhatsAppTxs.every(t => t.selected) ? "Deselect All" : "Select All"}
+                      </button>
+                    </div>
+                    <span className="text-xs font-extrabold text-[#13DEB9]">
+                      Total: ₹{detectedWhatsAppTxs.filter(t => t.selected).reduce((sum, t) => sum + (t.totalAmount || 0), 0).toLocaleString("en-IN")}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                    {detectedWhatsAppTxs.map((tx) => (
+                      <div
+                        key={tx.id}
+                        onClick={() => {
+                          setDetectedWhatsAppTxs(prev =>
+                            prev.map(t => (t.id === tx.id ? { ...t, selected: !t.selected } : t))
+                          );
+                        }}
+                        className={`p-3 rounded-xl border text-xs transition-all cursor-pointer flex items-start gap-3 select-none ${
+                          tx.selected
+                            ? "bg-[#13DEB9]/10 border-[#13DEB9]/40 text-neutral-850 dark:text-neutral-100"
+                            : "bg-neutral-50/50 dark:bg-neutral-900/30 border-neutral-200/60 dark:border-neutral-800/60 opacity-60"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={tx.selected}
+                          onChange={() => {}} // Handled by container onClick
+                          className="mt-0.5 rounded text-[#13DEB9] focus:ring-[#13DEB9] cursor-pointer"
+                        />
+                        <div className="flex-1 space-y-1">
+                          <div className="flex justify-between items-center">
+                            <span className="font-bold flex items-center gap-1.5">
+                              {tx.type === "earning" && "💰"}
+                              {tx.type === "expense" && "💸"}
+                              {tx.type === "staff_advance" && "👤"}
+                              <span>{tx.summary}</span>
+                            </span>
+                            <span className="font-extrabold text-sm">
+                              {tx.type === "earning" ? "+" : "-"} ₹{tx.totalAmount.toLocaleString("en-IN")}
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-neutral-450 dark:text-neutral-400 flex items-center gap-2">
+                            <span>📅 {tx.date}</span>
+                            <span>•</span>
+                            <span>👤 {tx.sender}</span>
+                          </div>
+
+                          {/* Breakdown preview */}
+                          {tx.type === "earning" && tx.earningDetails && (
+                            <div className="text-[10px] bg-white/60 dark:bg-black/30 rounded p-1.5 font-mono space-y-0.5 text-neutral-600 dark:text-neutral-300">
+                              <div>Vendor 1: ₹{tx.earningDetails.vendor1Net} {tx.earningDetails.vendor1TDS > 0 ? `(Gross: ${tx.earningDetails.vendor1Gross} - TDS: ${tx.earningDetails.vendor1TDS})` : ""}</div>
+                              <div>Vendor 2: ₹{tx.earningDetails.vendor2}</div>
+                              <div>Per Order: ₹{tx.earningDetails.perOrder}</div>
+                              {tx.earningDetails.extra > 0 && <div>Extra: ₹{tx.earningDetails.extra}</div>}
+                            </div>
+                          )}
+
+                          {tx.type === "expense" && tx.expenseDetails && (
+                            <div className="text-[10px] bg-white/60 dark:bg-black/30 rounded p-1.5 font-mono space-y-0.5 text-neutral-600 dark:text-neutral-300">
+                              {tx.expenseDetails.rows.map((row, rIdx) => (
+                                <div key={rIdx} className="flex justify-between">
+                                  <span>• {row.note || row.category}</span>
+                                  <span className="font-bold">₹{row.amount}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Submit to Prisma */}
+                  <Form method="post" className="pt-2">
+                    <input type="hidden" name="_action" value="import_whatsapp_transactions" />
                     <input
-                      type="date"
-                      name="createdAt"
-                      required
-                      value={editingDelivery.createdAt ? formatLocalDate(getMonday(editingDelivery.createdAt)) : ""}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        if (val) {
-                          const mon = getMonday(val);
-                          setEditingDelivery({ ...editingDelivery, createdAt: toUTCISOString(mon) });
-                        }
-                      }}
-                      className="notion-input flex-1 text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-1.5 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
+                      type="hidden"
+                      name="transactions"
+                      value={JSON.stringify(detectedWhatsAppTxs.filter(t => t.selected))}
                     />
                     <button
-                      type="button"
-                      onClick={() => {
-                        const current = parseLocalDate(editingDelivery.createdAt || new Date());
-                        current.setDate(current.getDate() + 7);
-                        const mon = getMonday(current);
-                        setEditingDelivery({ ...editingDelivery, createdAt: toUTCISOString(mon) });
-                      }}
-                      className="px-2.5 py-1.5 border border-neutral-200 dark:border-neutral-800 rounded-md bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-850 text-neutral-600 dark:text-neutral-300 font-bold transition-all shadow-sm cursor-pointer"
-                      title="Next Week"
+                      type="submit"
+                      disabled={isSubmitting || detectedWhatsAppTxs.filter(t => t.selected).length === 0}
+                      className="w-full py-3 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white font-bold rounded-xl shadow-lg transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
                     >
-                      ▶
-                    </button>
-                  </div>
-                  {editingDelivery.createdAt && (
-                    <div className="text-[10px] font-bold text-[#2383e2] dark:text-[#3894f2] mt-1.5 bg-[#2383e2]/5 dark:bg-[#2383e2]/15 px-2.5 py-1.5 rounded-lg border border-[#2383e2]/10 flex items-center justify-between">
-                      <span>📅 Cycle Range:</span>
+                      <span>💾</span>
                       <span>
-                        {formatRange(editingDelivery.createdAt)}
+                        Save {detectedWhatsAppTxs.filter(t => t.selected).length} Selected to Cloud Ledger
                       </span>
-                    </div>
-                  )}
+                    </button>
+                  </Form>
                 </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Category Select */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-neutral-500">Order Category</label>
-                    <select
-                      name="category"
-                      value={editingDelivery.category}
-                      onChange={(e) => setEditingDelivery({ ...editingDelivery, category: e.target.value })}
-                      className="notion-select w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 dark:bg-[#1e1e1e] focus:ring-1 focus:ring-[#2383e2] outline-none cursor-pointer font-semibold"
-                    >
-                      <option value="vendor_ship">🚚 Vendor Ship (₹70/order Weekly)</option>
-                      <option value="per_order_rate">🚚 Split Plan (₹35/order Weekly + ₹53k Base)</option>
-                    </select>
-                  </div>
-
-                  {/* Calculated Payout Info */}
-                  <div className="space-y-1">
-                    <label className="text-xs font-semibold text-neutral-500">Preview Payout</label>
-                    <div className="w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-neutral-50 dark:bg-[#1a1a1a] text-neutral-800 dark:text-neutral-100 font-bold">
-                      ₹{
-                        editingDelivery.category === "vendor_ship"
-                          ? (Number(editingDelivery.completedOrders || 0) * 70).toLocaleString()
-                          : (Number(editingDelivery.completedOrders || 0) * 35).toLocaleString()
-                      }
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <input type="hidden" name="totalOrders" value={editingDelivery.completedOrders} />
-                  <label className="text-xs font-semibold text-neutral-500">Completed Orders</label>
-                  <input
-                    type="number"
-                    name="completedOrders"
-                    required
-                    step="1"
-                    min="0"
-                    value={editingDelivery.completedOrders}
-                    onKeyDown={(e) => {
-                      if ([".", ",", "-", "+", "e", "E"].includes(e.key)) e.preventDefault();
-                    }}
-                    onChange={(e) => setEditingDelivery({ ...editingDelivery, completedOrders: e.target.value })}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold"
-                  />
-                </div>
-
-                {/* Notes/Remarks */}
-                <div className="space-y-1">
-                  <label className="text-xs font-semibold text-neutral-500">Notes / Remarks</label>
-                  <textarea
-                    name="notes"
-                    value={editingDelivery.notes}
-                    onChange={(e) => setEditingDelivery({ ...editingDelivery, notes: e.target.value })}
-                    rows={2}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
-                    placeholder="Additional details..."
-                  />
-                </div>
-
-                {/* Dialog Controls */}
-                <div className="flex items-center gap-3 pt-4 border-t border-[#edece9]/60 dark:border-neutral-800/60">
-                  <button
-                    type="button"
-                    onClick={() => setEditingDelivery(null)}
-                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 py-2.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all cursor-pointer text-center"
-                  >
-                    Save Changes
-                  </button>
-                </div>
-              </Form>
+              )}
             </div>
           </div>
         )}
 
-        {/* Payout Confirmation Modal */}
-        {payoutToPay && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
-            <div className="notion-card w-full max-w-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] p-6 shadow-2xl space-y-5 rounded-2xl animate-scale-up">
-              
-              <div className="pb-3 border-b border-[#edece9] dark:border-[#2f2f2f] flex justify-between items-start">
-                <div>
-                  <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
-                    Verify & Confirm Payout Receipt
+        {/* 2-Button WhatsApp Share Modal */}
+        {whatsappShareModal.isOpen && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+            <div className="bg-white dark:bg-[#1a1a1a] border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4 animate-scale-up">
+              {/* Header */}
+              <div className="flex justify-between items-center border-b border-neutral-100 dark:border-neutral-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">✅</span>
+                  <h3 className="text-sm font-bold text-neutral-900 dark:text-white">
+                    {whatsappShareModal.title || "WhatsApp Sync Note"}
                   </h3>
-                  <p className="text-[11px] text-neutral-450 mt-1 font-semibold">
-                    Ensure the received amount matches the week's calculated payout before marking as paid.
-                  </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setPayoutToPay(null)}
-                  className="p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-all cursor-pointer"
+                  onClick={() => setWhatsappShareModal(prev => ({ ...prev, isOpen: false }))}
+                  className="p-1 rounded-md text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold text-lg cursor-pointer"
                 >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  ×
                 </button>
               </div>
 
-              <div className="p-4 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 space-y-3">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-neutral-500 font-semibold">Settlement Period:</span>
-                  <span className="text-neutral-800 dark:text-neutral-200 font-bold">{payoutToPay.weekLabel}</span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-neutral-500 font-semibold">Category Type:</span>
-                  <span className="text-neutral-800 dark:text-neutral-200 font-bold capitalize text-right">
-                    {payoutToPay.category === "vendor_ship" 
-                      ? "70 Per Order Income" 
-                      : payoutToPay.category === "per_order_rate_weekly"
-                      ? "Vendor Per Order Income"
-                      : "Vendor Income"}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-neutral-500 font-semibold">Expected On:</span>
-                  <span className="text-neutral-850 dark:text-neutral-150 font-semibold flex items-center">
-                    {new Date(payoutToPay.expectedDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-                  </span>
-                </div>
-                <div className="pt-2 border-t border-neutral-200/50 dark:border-neutral-800/50 flex justify-between items-center text-sm">
-                  <span className="text-neutral-500 font-bold">Calculated Amount:</span>
-                  <span className="text-emerald-600 dark:text-emerald-400 font-extrabold text-base">
-                    ₹{payoutToPay.calculatedPayout.toLocaleString()}
-                  </span>
-                </div>
+              {/* Formatted Text Preview */}
+              <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-neutral-900/70 border border-neutral-200/80 dark:border-neutral-800 max-h-56 overflow-y-auto">
+                <pre className="text-xs font-mono whitespace-pre-wrap text-neutral-800 dark:text-neutral-200 leading-relaxed">
+                  {whatsappShareModal.text}
+                </pre>
               </div>
 
-              <Form method="post" className="space-y-4">
-                <input type="hidden" name="_action" value="mark_payout_paid" />
-                <input type="hidden" name="mondayStr" value={payoutToPay.mondayStr} />
-                <input type="hidden" name="category" value={payoutToPay.category} />
-
-                {/* Amount Cross-Check */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Received Amount (₹)</label>
-                  <input
-                    type="number"
-                    name="amount"
-                    required
-                    step="any"
-                    min="0"
-                    defaultValue={payoutToPay.calculatedPayout}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
-                  />
-                </div>
-
-                {/* Payment Date Selection */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Date Received</label>
-                  <input
-                    type="date"
-                    name="paymentDate"
-                    required
-                    defaultValue={formatLocalDate(new Date())}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
-                  />
-                </div>
-
-                {/* Optional reference notes */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Transaction Notes (Optional)</label>
-                  <textarea
-                    name="notes"
-                    rows={2}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
-                    placeholder="e.g. Bank Ref #, cross check adjustments..."
-                  />
-                </div>
-
-                <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
-                  <button
-                    type="button"
-                    onClick={() => setPayoutToPay(null)}
-                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
-                  >
-                    Confirm & Record
-                  </button>
-                </div>
-              </Form>
-            </div>
-          </div>
-        )}
-
-        {/* Weekly Orders Edit Modal */}
-        {weeklyOrdersToEdit && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
-            <div className="notion-card w-full max-w-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] p-6 shadow-2xl space-y-5 rounded-2xl animate-scale-up">
-              
-              <div className="pb-3 border-b border-[#edece9] dark:border-[#2f2f2f] flex justify-between items-start">
-                <div>
-                  <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
-                    Update Weekly Order Counts
-                  </h3>
-                  <p className="text-[11px] text-neutral-450 mt-1 font-semibold">
-                    Enter completed orders for this week to calculate payouts.
-                  </p>
-                </div>
+              {/* 2 Big Action Buttons */}
+              <div className="grid grid-cols-2 gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => setWeeklyOrdersToEdit(null)}
-                  className="p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-all cursor-pointer"
+                  onClick={() => handleCopyShareText(whatsappShareModal.text)}
+                  className="py-2.5 px-3 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 font-bold rounded-xl border border-neutral-200/80 dark:border-neutral-700 transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs shadow-sm"
                 >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <span>{copiedShareText ? "✅" : "📋"}</span>
+                  <span>{copiedShareText ? "Copied!" : "Copy Text"}</span>
                 </button>
-              </div>
 
-              <Form method="post" className="space-y-4">
-                <input type="hidden" name="_action" value="update_weekly_orders" />
-                <input type="hidden" name="mondayStr" value={weeklyOrdersToEdit.mondayStr} />
-
-                <div className="p-3 rounded-lg bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 text-xs text-neutral-600 dark:text-neutral-400">
-                  Week: <span className="font-bold text-neutral-800 dark:text-neutral-250">{weeklyOrdersToEdit.weekLabel}</span>
-                </div>
-
-                {/* 70 Per Order Orders Input */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">70 Per Order Income Completed Orders</label>
-                  <input
-                    type="number"
-                    name="vendorShipOrders"
-                    required
-                    min="0"
-                    step="1"
-                    defaultValue={
-                      deliveries
-                        .filter(d => d.category === "vendor_ship" && new Date(d.createdAt) >= new Date(weeklyOrdersToEdit.startDate) && new Date(d.createdAt) <= new Date(weeklyOrdersToEdit.endDate))
-                        .reduce((sum, d) => sum + d.completedOrders, 0)
-                    }
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
-                  />
-                </div>
-
-                {/* Vendor Per Order Orders Input */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Vendor Per Order Income Completed Orders</label>
-                  <input
-                    type="number"
-                    name="perOrderOrders"
-                    required
-                    min="0"
-                    step="1"
-                    defaultValue={
-                      deliveries
-                        .filter(d => d.category === "per_order_rate" && new Date(d.createdAt) >= new Date(weeklyOrdersToEdit.startDate) && new Date(d.createdAt) <= new Date(weeklyOrdersToEdit.endDate))
-                        .reduce((sum, d) => sum + d.completedOrders, 0)
-                    }
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
-                  />
-                </div>
-
-                <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
-                  <button
-                    type="button"
-                    onClick={() => setWeeklyOrdersToEdit(null)}
-                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
-                  >
-                    Save Changes
-                  </button>
-                </div>
-              </Form>
-            </div>
-          </div>
-        )}
-
-        {/* Fuel CC Bill Payment Modal */}
-        {ccBillToPay && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-fade-in">
-            <div className="notion-card w-full max-w-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1e1e1e] p-6 shadow-2xl space-y-5 rounded-2xl animate-scale-up">
-              
-              <div className="pb-3 border-b border-[#edece9] dark:border-[#2f2f2f] flex justify-between items-start">
-                <div>
-                  <h3 className="text-md font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
-                    Confirm CC Fuel Bill Payment
-                  </h3>
-                  <p className="text-[11px] text-neutral-450 mt-1 font-semibold">
-                    Record the card bill payment in the main expense ledger.
-                  </p>
-                </div>
                 <button
                   type="button"
-                  onClick={() => setCcBillToPay(null)}
-                  className="p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-300 transition-all cursor-pointer"
+                  onClick={() => handleOpenWhatsApp(whatsappShareModal.text)}
+                  className="py-2.5 px-3 bg-[#25D366] hover:bg-[#20ba59] text-white font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs shadow-md"
                 >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <span>💬</span>
+                  <span>Send to WhatsApp</span>
                 </button>
               </div>
-
-              <div className="p-4 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 space-y-3">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-neutral-500 font-semibold">Billing Cycle:</span>
-                  <span className="text-neutral-800 dark:text-neutral-200 font-bold">{ccBillToPay.cycleLabel}</span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-neutral-500 font-semibold">Statement Month:</span>
-                  <span className="text-neutral-800 dark:text-neutral-200 font-bold">{ccBillToPay.billingMonth}</span>
-                </div>
-                <div className="pt-2 border-t border-neutral-200/50 dark:border-neutral-800/50 flex justify-between items-center text-sm">
-                  <span className="text-neutral-500 font-bold">Accumulated Fuel Cost:</span>
-                  <span className="text-neutral-900 dark:text-neutral-100 font-extrabold text-base">
-                    ₹{ccBillToPay.totalFuelExpense.toLocaleString()}
-                  </span>
-                </div>
-              </div>
-
-              <Form method="post" className="space-y-4">
-                <input type="hidden" name="_action" value="mark_fuel_cc_paid" />
-                <input type="hidden" name="billingMonth" value={ccBillToPay.billingMonth} />
-
-                {/* Amount Input */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Payment Amount (₹)</label>
-                  <input
-                    type="number"
-                    name="amount"
-                    required
-                    step="any"
-                    min="0"
-                    defaultValue={ccBillToPay.totalFuelExpense}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-bold"
-                  />
-                </div>
-
-                {/* Payment Date Selection */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Date Paid</label>
-                  <input
-                    type="date"
-                    name="paymentDate"
-                    required
-                    defaultValue={formatLocalDate(new Date())}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none font-semibold cursor-pointer"
-                  />
-                </div>
-
-                {/* Optional reference notes */}
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-neutral-500">Transaction Notes (Optional)</label>
-                  <textarea
-                    name="notes"
-                    rows={2}
-                    className="notion-input w-full text-sm border border-neutral-200 dark:border-neutral-800 rounded-md px-3 py-2 bg-transparent text-neutral-800 dark:text-neutral-100 focus:ring-1 focus:ring-[#2383e2] outline-none"
-                    placeholder="e.g. Card statement reference, cash back offset..."
-                  />
-                </div>
-
-                <div className="flex items-center gap-3 pt-3 border-t border-neutral-100 dark:border-neutral-800">
-                  <button
-                    type="button"
-                    onClick={() => setCcBillToPay(null)}
-                    className="flex-1 py-2.5 text-xs text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:bg-neutral-900 dark:hover:bg-neutral-800 font-bold rounded-xl border border-neutral-200 dark:border-neutral-800 transition-all cursor-pointer text-center"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="flex-1 py-2.5 text-xs bg-neutral-900 hover:bg-neutral-850 dark:bg-neutral-200 dark:hover:bg-white text-white dark:text-neutral-900 font-bold rounded-xl shadow-lg transition-all cursor-pointer text-center"
-                  >
-                    Confirm CC Payment
-                  </button>
-                </div>
-              </Form>
             </div>
           </div>
         )}
+
         {/* Custom Confirmation / Alert Dialog Modal */}
         {customDialog.isOpen && (
           <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 animate-fade-in">
@@ -6944,474 +5160,6 @@ export default function Home() {
             </div>
           </div>
         )}
-      {/* Temporary Access Pass Management Modal */}
-      {showPassModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-white dark:bg-[#1a1a1a] border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl max-w-lg w-full p-6 space-y-5 max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b border-neutral-100 dark:border-neutral-800 pb-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">🔑</span>
-                <h3 className="text-base font-bold text-neutral-900 dark:text-white">
-                  Temporary Access Pass Manager
-                </h3>
-              </div>
-              <button
-                onClick={() => setShowPassModal(false)}
-                className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold text-lg cursor-pointer"
-              >
-                ×
-              </button>
-            </div>
-
-            {/* Create New Pass Form */}
-            <Form method="post" className="bg-neutral-50 dark:bg-neutral-900/60 p-4 rounded-xl border border-neutral-200/80 dark:border-neutral-800 space-y-3">
-              <input type="hidden" name="_action" value="create_temp_pass" />
-              <div className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-                Generate New Guest Pass
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="sm:col-span-3 space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">
-                    Pass Description / Label
-                  </label>
-                  <input
-                    type="text"
-                    name="label"
-                    placeholder="e.g. CA Audit, Partner Inspection"
-                    className="w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-lg px-3 py-2 bg-white dark:bg-[#121212] text-neutral-900 dark:text-white outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">
-                    Permission Level
-                  </label>
-                  <select
-                    name="permission"
-                    className="w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-lg px-2 py-2 bg-white dark:bg-[#121212] text-neutral-900 dark:text-white outline-none"
-                  >
-                    <option value="VIEW_ONLY">👁️ View Only</option>
-                    <option value="FULL_EDIT">✏️ Full Edit</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="text-[11px] font-semibold text-neutral-600 dark:text-neutral-300">
-                    Duration
-                  </label>
-                  <select
-                    name="duration"
-                    defaultValue="1h"
-                    className="w-full text-xs border border-neutral-200 dark:border-neutral-800 rounded-lg px-2 py-2 bg-white dark:bg-[#121212] text-neutral-900 dark:text-white outline-none"
-                  >
-                    <option value="30m">30 Minutes</option>
-                    <option value="1h">1 Hour</option>
-                    <option value="6h">6 Hours</option>
-                    <option value="24h">24 Hours</option>
-                    <option value="7d">7 Days</option>
-                  </select>
-                </div>
-
-                <div className="flex items-end">
-                  <button
-                    type="submit"
-                    className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
-                  >
-                    + Generate
-                  </button>
-                </div>
-              </div>
-            </Form>
-
-            {/* List of Passes */}
-            <div className="space-y-3">
-              <div className="text-xs font-bold uppercase tracking-wider text-neutral-500">
-                Active & Recent Temporary Passes ({temporaryPasses.length})
-              </div>
-
-              {temporaryPasses.length === 0 ? (
-                <div className="text-xs text-neutral-400 text-center py-6 border border-dashed border-neutral-200 dark:border-neutral-800 rounded-xl">
-                  No temporary passes generated yet.
-                </div>
-              ) : (
-                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-                  {temporaryPasses.map((p: any) => {
-                    const isExpired = new Date() > new Date(p.expiresAt) || !p.isActive;
-                    const shareUrl = `${typeof window !== "undefined" ? window.location.origin : ""}/login?pass=${p.passCode}`;
-
-                    return (
-                      <div
-                        key={p.id}
-                        className={`p-3 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                          isExpired
-                            ? "bg-neutral-50 dark:bg-neutral-900/30 border-neutral-200 dark:border-neutral-800 opacity-60"
-                            : "bg-white dark:bg-[#121212] border-blue-100 dark:border-blue-900/40 shadow-sm"
-                        }`}
-                      >
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold text-neutral-900 dark:text-white">
-                              {p.label || "Guest Pass"}
-                            </span>
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
-                              p.permission === "VIEW_ONLY"
-                                ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300"
-                                : "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300"
-                            }`}>
-                              {p.permission === "VIEW_ONLY" ? "👁️ View Only" : "✏️ Full Edit"}
-                            </span>
-                            {isExpired && (
-                              <span className="bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 px-1.5 py-0.5 rounded text-[10px] font-bold">
-                                Expired / Revoked
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-neutral-500 text-[11px] flex items-center gap-2">
-                            <span>Code: <code className="font-mono font-bold text-neutral-800 dark:text-neutral-200">{p.passCode}</code></span>
-                            <span>•</span>
-                            <span>Expires: {new Date(p.expiresAt).toLocaleString()}</span>
-                          </div>
-                        </div>
-
-                        {!isExpired && (
-                          <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                navigator.clipboard.writeText(shareUrl);
-                                setCopiedPassId(p.id);
-                                setTimeout(() => setCopiedPassId(null), 3000);
-                              }}
-                              className="px-2.5 py-1.5 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 font-semibold rounded-lg text-neutral-800 dark:text-neutral-200 transition-all cursor-pointer text-[11px]"
-                            >
-                              {copiedPassId === p.id ? "✅ Copied!" : "📋 Copy Link"}
-                            </button>
-
-                            <Form method="post">
-                              <input type="hidden" name="_action" value="revoke_temp_pass" />
-                              <input type="hidden" name="id" value={p.id} />
-                              <button
-                                type="submit"
-                                className="px-2 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 font-semibold rounded-lg transition-all cursor-pointer text-[11px]"
-                              >
-                                Revoke
-                              </button>
-                            </Form>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Floating AI Intelligence Button */}
-      <button
-        type="button"
-        onClick={() => {
-          setIsAiSpotlightOpen(true);
-        }}
-        className="fixed bottom-6 right-6 z-40 flex items-center gap-2.5 px-4 py-2.5 rounded-full bg-neutral-900/90 dark:bg-indigo-600/90 hover:bg-neutral-800 dark:hover:bg-indigo-500 text-white font-bold text-xs shadow-2xl backdrop-blur-md border border-white/15 dark:border-indigo-400/30 transition-all duration-300 hover:scale-105 active:scale-95 group cursor-pointer"
-        title="Ask Financial AI (⌘K or Ctrl+K)"
-      >
-        <span className="relative flex h-2.5 w-2.5">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-indigo-300"></span>
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span>✨ Ask AI</span>
-          <kbd className="hidden sm:inline-block font-mono text-[9px] uppercase px-1.5 py-0.5 rounded bg-white/20 text-white/90">
-            ⌘K
-          </kbd>
-        </span>
-      </button>
-
-      {/* Spotlight AI Intelligence Modal (Multi-Turn Conversational Assistant) */}
-      {isAiSpotlightOpen && (
-        <div 
-          className="fixed inset-0 z-50 flex items-start justify-center pt-8 sm:pt-16 p-4 bg-black/80 backdrop-blur-md animate-fade-in"
-          onClick={() => setIsAiSpotlightOpen(false)}
-        >
-          <div 
-            className="bg-white dark:bg-[#111827] border border-neutral-200 dark:border-white/10 rounded-3xl shadow-2xl max-w-2xl w-full overflow-hidden flex flex-col h-[85vh] transition-all"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Modal Header */}
-            <div className="px-5 py-3.5 border-b border-neutral-200 dark:border-white/10 bg-neutral-50 dark:bg-[#161f30] flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-lg bg-indigo-600/10 border border-indigo-500/20 text-indigo-500 flex items-center justify-center text-sm font-bold">
-                  ✨
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-neutral-900 dark:text-white flex items-center gap-1.5">
-                    <span>Dreamline AI Financial Assistant</span>
-                    <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 font-extrabold">
-                      Live
-                    </span>
-                  </h3>
-                  <p className="text-[10px] text-neutral-500 dark:text-slate-400">
-                    Deterministic SQL math • Driver salaries • Expense queries
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {chatMessages.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setChatMessages([]);
-                      setAiQueryInput("");
-                    }}
-                    className="text-[11px] font-semibold text-neutral-500 hover:text-neutral-700 dark:text-slate-400 dark:hover:text-white px-2 py-1 rounded-lg hover:bg-neutral-200/50 dark:hover:bg-white/5 transition-all cursor-pointer"
-                  >
-                    🔄 New Chat
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setIsAiSpotlightOpen(false)}
-                  className="p-1.5 text-neutral-400 hover:text-neutral-600 dark:hover:text-white rounded-lg transition-colors cursor-pointer text-xs"
-                  title="Close (Esc)"
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            {/* Scrollable Chat Message Stream */}
-            <div className="flex-1 p-5 overflow-y-auto space-y-4">
-              {chatMessages.length === 0 && !isAiQueryLoading && (
-                <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-4">
-                  <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-500 flex items-center justify-center text-2xl">
-                    ✨
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold text-neutral-900 dark:text-white">
-                      Ask Any Operational or Financial Question
-                    </h4>
-                    <p className="text-xs text-neutral-500 dark:text-slate-400 mt-1 max-w-sm">
-                      You can ask about driver salaries, fuel expenses, cash advances, or follow up on any previous answers!
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-left w-full max-w-md pt-2">
-                    {[
-                      "Bittu worked 28 days what salary to pay?",
-                      "How much fuel was spent 5 months ago?",
-                      "Total cash advance given to drivers this month",
-                      "Total factory income in 2026"
-                    ].map((samplePrompt) => (
-                      <button
-                        key={samplePrompt}
-                        type="button"
-                        onClick={() => {
-                          setAiQueryInput(samplePrompt);
-                          setChatMessages([
-                            {
-                              id: `msg-user-${Date.now()}`,
-                              role: "user",
-                              content: samplePrompt,
-                              timestamp: new Date()
-                            }
-                          ]);
-                          setIsAiQueryLoading(true);
-                          submit(
-                            {
-                              _action: "ask_ai_financial_query",
-                              query: samplePrompt,
-                              chatHistory: JSON.stringify([])
-                            },
-                            { method: "post" }
-                          );
-                          setAiQueryInput("");
-                        }}
-                        className="p-2.5 rounded-xl bg-neutral-50 dark:bg-white/[0.03] hover:bg-indigo-50 dark:hover:bg-indigo-500/10 border border-neutral-200 dark:border-white/5 hover:border-indigo-200 dark:hover:border-indigo-500/20 text-xs font-semibold text-neutral-700 dark:text-slate-300 transition-all text-left cursor-pointer"
-                      >
-                        💡 {samplePrompt}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {chatMessages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"} animate-fade-in`}
-                >
-                  {/* Message Bubble */}
-                  <div
-                    className={`max-w-[88%] rounded-2xl p-3.5 text-xs leading-relaxed ${
-                      msg.role === "user"
-                        ? "bg-indigo-600 text-white rounded-br-none shadow-md font-semibold"
-                        : "bg-neutral-100 dark:bg-white/[0.04] text-neutral-900 dark:text-slate-100 border border-neutral-200/80 dark:border-white/10 rounded-bl-none shadow-sm space-y-3"
-                    }`}
-                  >
-                    {/* Plain Text or Markdown Content */}
-                    <div className="whitespace-pre-line">
-                      {msg.content}
-                    </div>
-
-                    {/* Rich Assistant Interactive Elements */}
-                    {msg.role === "assistant" && msg.data && (
-                      <div className="space-y-2 pt-1 border-t border-neutral-200 dark:border-white/10">
-                        {/* High Impact Stat (Optional) */}
-                        {msg.data.highlightStat && (
-                          <div className="flex items-baseline justify-between p-2.5 rounded-xl bg-indigo-50/60 dark:bg-indigo-500/10 border border-indigo-200/80 dark:border-indigo-500/20">
-                            <div>
-                              <span className="text-[10px] font-mono uppercase font-bold text-indigo-600 dark:text-indigo-400 block">
-                                {msg.data.highlightStat.label}
-                              </span>
-                              <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                                {msg.data.highlightStat.value}
-                              </span>
-                            </div>
-                            <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
-                              ✓ Live Verified
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Deep-link to Ledger (Optional) */}
-                        {msg.data.ledgerFilters && (
-                          <div className="flex justify-end pt-1">
-                            <button
-                              type="button"
-                              onClick={() => handleViewInLedger(msg.data.ledgerFilters)}
-                              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1 active:scale-95"
-                            >
-                              <span>🔍</span>
-                              <span>View in Ledger</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <span className="text-[9px] text-neutral-400 dark:text-slate-500 mt-1 px-1 font-mono">
-                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                  </span>
-                </div>
-              ))}
-
-              {isAiQueryLoading && (
-                <div className="flex items-start gap-2 animate-pulse">
-                  <div className="p-3.5 rounded-2xl rounded-bl-none bg-neutral-100 dark:bg-white/[0.04] border border-neutral-200/80 dark:border-white/10 text-xs flex items-center gap-2">
-                    <span className="animate-spin text-sm">⏳</span>
-                    <span className="text-neutral-600 dark:text-slate-300 font-semibold">
-                      Calculating exact mathematical totals...
-                    </span>
-                  </div>
-                </div>
-              )}
-              <div ref={chatBottomRef} />
-            </div>
-
-            {/* Message Input Footer */}
-            <div className="p-4 border-t border-neutral-200 dark:border-white/10 bg-neutral-50/50 dark:bg-[#161f30]/50">
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const trimmed = aiQueryInput.trim();
-                  if (!trimmed || isAiQueryLoading) return;
-
-                  const userMsg: AiChatMessage = {
-                    id: `msg-user-${Date.now()}`,
-                    role: "user",
-                    content: trimmed,
-                    timestamp: new Date()
-                  };
-
-                  const assistantMsgId = `msg-assistant-${Date.now()}`;
-                  const assistantMsg: AiChatMessage = {
-                    id: assistantMsgId,
-                    role: "assistant",
-                    content: "",
-                    timestamp: new Date()
-                  };
-
-                  setChatMessages(prev => [...prev, userMsg, assistantMsg]);
-                  const currentQuery = trimmed;
-                  setAiQueryInput("");
-                  setIsAiQueryLoading(true);
-
-                  setTimeout(() => {
-                    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-                  }, 50);
-
-                  const dbSummary = JSON.stringify({
-                    totalExpensesCount: expenses.length,
-                    recentEntries: expenses.slice(0, 35).map(e => ({
-                      amount: e.amount,
-                      category: e.category,
-                      notes: e.notes,
-                      senderName: e.senderName,
-                      vehicle: e.vehicle,
-                      type: e.type,
-                      date: e.timestamp
-                    })),
-                    registeredDrivers: drivers.map(d => ({ name: d.name, vehicle: d.vehicleNumber, salary: d.salary }))
-                  });
-
-                  fetch("/api/chat-stream", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ userQuery: currentQuery, dbContext: dbSummary }),
-                  })
-                    .then(async (res) => {
-                      setIsAiQueryLoading(false);
-                      if (!res.ok || !res.body) {
-                        throw new Error("Streaming error");
-                      }
-                      const reader = res.body.getReader();
-                      const decoder = new TextDecoder();
-
-                      while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-                        const chunkText = decoder.decode(value, { stream: true });
-                        setChatMessages(prev =>
-                          prev.map(m => m.id === assistantMsgId ? { ...m, content: m.content + chunkText } : m)
-                        );
-                        chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-                      }
-                    })
-                    .catch((err) => {
-                      setIsAiQueryLoading(false);
-                      setChatMessages(prev =>
-                        prev.map(m => m.id === assistantMsgId ? { ...m, content: m.content || "⚠️ Unable to generate response. Please try again." } : m)
-                      );
-                    });
-                }}
-                className="relative flex items-center"
-              >
-                <input
-                  type="text"
-                  name="query"
-                  value={aiQueryInput}
-                  onChange={(e) => setAiQueryInput(e.target.value)}
-                  placeholder="Ask a question or follow-up... (e.g. Total fuel expenses this month)"
-                  autoFocus
-                  className="w-full pl-4 pr-24 py-3 bg-white dark:bg-[#111827] text-neutral-900 dark:text-white rounded-2xl border border-neutral-200 dark:border-white/10 focus:ring-2 focus:ring-indigo-500 text-xs sm:text-sm font-semibold placeholder:text-neutral-400 dark:placeholder:text-slate-500 outline-none shadow-inner"
-                />
-                <button
-                  type="submit"
-                  disabled={isAiQueryLoading || !aiQueryInput.trim()}
-                  className="absolute right-2 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-bold rounded-xl transition-all shadow-md cursor-pointer flex items-center gap-1"
-                >
-                  {isAiQueryLoading ? "⚡" : "Send ➔"}
-                </button>
-              </form>
-            </div>
-          </div>
-        </div>
-      )}
       </main>
     </div>
   );

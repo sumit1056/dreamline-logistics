@@ -5,4 +5,5 @@ export default [
   route("login", "routes/login.tsx"),
   route("share-target", "routes/share-target.tsx"),
   route("api/chat-stream", "routes/api.chat-stream.ts"),
+  route("api/receipt", "routes/api.receipt.ts"),
 ] satisfies RouteConfig;
