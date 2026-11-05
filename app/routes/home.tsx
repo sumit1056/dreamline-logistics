@@ -31,7 +31,7 @@ const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December"
 ];
 
-export function meta({}: Route.MetaArgs) {
+export function meta({ }: Route.MetaArgs) {
   return [
     { title: "Dreamline Logistics" },
     { name: "description", content: "Daily Hisaab & Cashflow Management" },
@@ -114,66 +114,66 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: "Permission Denied: Your temporary access pass is set to View Only. You cannot perform write operations." };
   }
 
-  
+
 
   if (actionType === "create_expense") {
-      // Manual entry
-      const amount = Math.round(parseFloat(formData.get("amount")?.toString() || "0") || 0);
-      const type = formData.get("type")?.toString() || "EXPENSE";
-      let category = formData.get("category")?.toString() || "other";
-      const notes = formData.get("notes")?.toString() || "";
-      const vehicle = formData.get("vehicle")?.toString() || null;
-      let senderName = formData.get("senderName")?.toString() || "Founder";
-      const imageUrlsStr = formData.get("imageUrls")?.toString() || "[]";
-      let imageUrl = null;
-      try {
-        const urls = JSON.parse(imageUrlsStr);
-        imageUrl = urls[0] || null;
-      } catch (e) {
-        imageUrl = formData.get("imageUrl")?.toString() || null;
-      }
-      const customDateStr = formData.get("date")?.toString() || null;
-      const entryDate = customDateStr ? new Date(customDateStr) : new Date();
-
-      // Guarantee Bittu / Gaurav advances link directly to Driver profile
-      if (category === "bittu" || category === "bittu_advance" || /bittu/i.test(notes)) {
-        category = "bittu";
-        senderName = "Bittu";
-      } else if (category === "gaurav_advance" || /gaurav/i.test(notes)) {
-        category = "gaurav_advance";
-        senderName = "Gaurav";
-      }
-
-      await prisma.expense.create({
-        data: {
-          amount,
-          category,
-          notes,
-          vehicle,
-          senderName,
-          approved: true,
-          settled: false,
-          imageUrl,
-          type,
-          timestamp: entryDate,
-        },
-      });
-
-      const pillObj = FAST_EXPENSE_PILLS.find(p => p.value === category);
-      const catLabel = pillObj ? pillObj.label : category.replace(/_/g, " ").toUpperCase();
-      const noteSuffix = notes && notes.trim() && notes.trim() !== pillObj?.defaultNotes ? ` (${notes.trim()})` : "";
-
-      const waText = type === "INCOME"
-        ? `INCOME\n• ${catLabel}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💰 TOTAL: ₹${amount.toLocaleString("en-IN")}`
-        : `EXPENSES\n• ${catLabel}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💸 TOTAL: ₹${amount.toLocaleString("en-IN")}`;
-
-      return {
-        success: true,
-        action: "create_expense",
-        whatsappText: waText,
-        whatsappTitle: type === "INCOME" ? "Income Logged" : "Expense Logged",
-      };
+    // Manual entry
+    const amount = Math.round(parseFloat(formData.get("amount")?.toString() || "0") || 0);
+    const type = formData.get("type")?.toString() || "EXPENSE";
+    let category = formData.get("category")?.toString() || "other";
+    const notes = formData.get("notes")?.toString() || "";
+    const vehicle = formData.get("vehicle")?.toString() || null;
+    let senderName = formData.get("senderName")?.toString() || "Founder";
+    const imageUrlsStr = formData.get("imageUrls")?.toString() || "[]";
+    let imageUrl = null;
+    try {
+      const urls = JSON.parse(imageUrlsStr);
+      imageUrl = urls[0] || null;
+    } catch (e) {
+      imageUrl = formData.get("imageUrl")?.toString() || null;
     }
+    const customDateStr = formData.get("date")?.toString() || null;
+    const entryDate = customDateStr ? new Date(customDateStr) : new Date();
+
+    // Guarantee Bittu / Gaurav advances link directly to Driver profile
+    if (category === "bittu" || category === "bittu_advance" || /bittu/i.test(notes)) {
+      category = "bittu";
+      senderName = "Bittu";
+    } else if (category === "gaurav_advance" || /gaurav/i.test(notes)) {
+      category = "gaurav_advance";
+      senderName = "Gaurav";
+    }
+
+    await prisma.expense.create({
+      data: {
+        amount,
+        category,
+        notes,
+        vehicle,
+        senderName,
+        approved: true,
+        settled: false,
+        imageUrl,
+        type,
+        timestamp: entryDate,
+      },
+    });
+
+    const pillObj = FAST_EXPENSE_PILLS.find(p => p.value === category);
+    const catLabel = pillObj ? pillObj.label : category.replace(/_/g, " ").toUpperCase();
+    const noteSuffix = notes && notes.trim() && notes.trim() !== pillObj?.defaultNotes ? ` (${notes.trim()})` : "";
+
+    const waText = type === "INCOME"
+      ? `INCOME\n• ${catLabel}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💰 TOTAL: ₹${amount.toLocaleString("en-IN")}`
+      : `EXPENSES\n• ${catLabel}: ₹${amount.toLocaleString("en-IN")}${noteSuffix}\n💸 TOTAL: ₹${amount.toLocaleString("en-IN")}`;
+
+    return {
+      success: true,
+      action: "create_expense",
+      whatsappText: waText,
+      whatsappTitle: type === "INCOME" ? "Income Logged" : "Expense Logged",
+    };
+  }
 
   if (actionType === "create_weekly_earning") {
     const v1 = parseKAmount(formData.get("vendor1")?.toString() || formData.get("vendor1Gross")?.toString() || "0");
@@ -457,7 +457,7 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
-  
+
 
   if (actionType === "approve_expense") {
     const id = parseInt(formData.get("id")?.toString() || "0") || 0;
@@ -506,16 +506,16 @@ export async function action({ request }: ActionFunctionArgs) {
     const vehicleNumber = formData.get("vehicleNumber")?.toString()?.trim() || null;
     const salary = parseInt(formData.get("salary")?.toString() || "0") || null;
     const loginEnabled = false; // Disable login portal access for drivers as requested
-    
+
     if (!name || !phone) {
       return { error: "Driver Name and Phone Number are required." };
     }
-    
+
     const existing = await prisma.user.findUnique({ where: { phone } });
     if (existing) {
       return { error: `A user with phone number "${phone}" already exists.` };
     }
-    
+
     await prisma.user.create({
       data: {
         name,
@@ -597,7 +597,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     let transferredFromName: string | null = null;
-    
+
     // Auto assignment logic
     if (vehicleNumber) {
       // Find if anyone else is assigned to this auto
@@ -649,16 +649,16 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     });
 
-    return { 
-      success: true, 
-      action: "update_driver", 
-      transferredFrom: transferredFromName, 
-      newDriverName: name, 
-      vehicleNumber 
+    return {
+      success: true,
+      action: "update_driver",
+      transferredFrom: transferredFromName,
+      newDriverName: name,
+      vehicleNumber
     };
   }
 
-  
+
 
   if (actionType === "create_pending_payment") {
     const title = formData.get("title")?.toString()?.trim() || "Pending Payment";
@@ -1156,7 +1156,7 @@ export default function Home() {
   const [viewingDriverAdvances, setViewingDriverAdvances] = useState<any | null>(null);
   const [copiedSlipText, setCopiedSlipText] = useState(false);
 
-  
+
 
   const [expenseFilter, setExpenseFilter] = useState<"ALL" | "YEAR" | "MONTH" | "TODAY" | "CUSTOM">("ALL");
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<"ALL" | "EXPENSE" | "INCOME">("ALL");
@@ -1294,7 +1294,7 @@ export default function Home() {
   const [expensePage, setExpensePage] = useState(1);
 
   // [manualType and selectedCategory replaced by consoleTab and selectedExpenseCategory]
-    
+
   // Local edit states
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
 
@@ -1319,6 +1319,9 @@ export default function Home() {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
       const showAddParam = params.get("showAdd");
+      const shareSuccessParam = params.get("shareSuccess");
+      const shareErrorParam = params.get("shareError");
+      const sharedFromSW = params.get("sharedFromSW");
 
       if (tabParam === "expenses") {
         setActiveTab("expenses");
@@ -1327,7 +1330,22 @@ export default function Home() {
         } else {
           setShowExpenseDashboard(true);  // Show Ledger
         }
+      } else if (tabParam === "orders") {
+        setActiveTab("expenses");
       }
+
+      if (shareSuccessParam === "true") {
+        const count = parseInt(params.get("count") || "1");
+        const total = parseInt(params.get("total") || "0");
+        setShareSuccessInfo({ count, total });
+        // Clean URL to prevent showing toast again on page reload
+        window.history.replaceState({}, document.title, "/?tab=expenses");
+      } else if (shareErrorParam) {
+        setShareErrorInfo(shareErrorParam);
+        window.history.replaceState({}, document.title, "/?tab=expenses");
+      }
+
+
     }
   }, []);
 
@@ -1339,10 +1357,10 @@ export default function Home() {
   useEffect(() => {
     if (typeof window !== "undefined") {
       // Check if already running in standalone mode
-      const isStandaloneMode = 
-        window.matchMedia("(display-mode: standalone)").matches || 
+      const isStandaloneMode =
+        window.matchMedia("(display-mode: standalone)").matches ||
         (window.navigator as any).standalone === true;
-      
+
       setIsStandalone(isStandaloneMode);
 
       // Detect iOS platform
@@ -1509,8 +1527,8 @@ export default function Home() {
       const unSettledAdvances = expenses.filter((e: any) => {
         if (e.settled) return false;
 
-        const isAdvanceCategory = 
-          e.category === "bittu" || 
+        const isAdvanceCategory =
+          e.category === "bittu" ||
           e.category === "bittu_advance" ||
           e.category === "gaurav_advance" ||
           /advance|salary|kharcha|loan|uthav/i.test(e.notes || "") ||
@@ -1528,11 +1546,11 @@ export default function Home() {
         const isBittuDriver = driverFullName.includes("bittu") || driverFullName.includes("betu");
         const isGauravDriver = driverFullName.includes("gaurav");
 
-        const categoryMatch = 
+        const categoryMatch =
           (isBittuDriver && (e.category === "bittu" || e.category === "bittu_advance")) ||
           (isGauravDriver && (e.category === "gaurav_advance" || notesLower.includes("gaurav")));
 
-        const nameMatch = 
+        const nameMatch =
           (driverFullName && (notesLower.includes(driverFullName) || senderLower.includes(driverFullName))) ||
           (driverFirstName && driverFirstName.length >= 3 && (notesLower.includes(driverFirstName) || senderLower.includes(driverFirstName)));
         const vehicleMatch = Boolean(vehiclePlate && expVehicle && (vehiclePlate.includes(expVehicle) || expVehicle.includes(vehiclePlate)));
@@ -1572,7 +1590,7 @@ export default function Home() {
   };
 
   // AI Spotlight Multi-Turn Chat State
-  
+
   // Dynamically extract all available years from expenses to populate the year filter dropdown
   const availableYears = useMemo(() => {
     const years = new Set<string>();
@@ -1721,13 +1739,13 @@ export default function Home() {
 
       // If a fuel slip is still pending, do NOT show the success toast yet —
       // the popup modal will handle the remaining workflow.
-      
+
       // Always clear the text inputs and primary fuel slip (non-pending)
       setFastAmountInput("");
       setManualNotes("Cash CNG fuel refill");
       setActiveFastPill("Cash CNG");
       setSelectedExpenseCategory("fuel");
-      
+
       // Native browser form reset for all input text fields
       manualExpenseFormRef.current?.reset();
 
@@ -1789,9 +1807,9 @@ export default function Home() {
     }
   }, [actionData]);
 
-  
 
-  
+
+
 
 
 
@@ -1838,11 +1856,10 @@ export default function Home() {
         <nav className="flex-grow py-4 space-y-1">
           <button
             onClick={() => switchTab("expenses")}
-            className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
-              activeTab === "expenses"
+            className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${activeTab === "expenses"
                 ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
                 : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
-            }`}
+              }`}
           >
             <svg className={`w-4 h-4 transition-colors ${activeTab === 'expenses' ? 'text-[#5D87FF]' : 'text-emerald-500'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -1855,11 +1872,10 @@ export default function Home() {
           {loggedInUser?.role !== "DRIVER" && (
             <button
               onClick={() => switchTab("pending_dues")}
-              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center justify-between px-3.5 py-2.5 mx-2 rounded-md transition-all ${
-                activeTab === "pending_dues"
+              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center justify-between px-3.5 py-2.5 mx-2 rounded-md transition-all ${activeTab === "pending_dues"
                   ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
                   : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
-              }`}
+                }`}
             >
               <div className="flex items-center gap-2.5">
                 <span className="text-sm">🟡</span>
@@ -1877,18 +1893,17 @@ export default function Home() {
           {loggedInUser?.role !== "DRIVER" && (
             <button
               onClick={() => switchTab("driver_salaries")}
-              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${
-                activeTab === "driver_salaries"
+              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center gap-2.5 px-3.5 py-2.5 mx-2 rounded-md transition-all ${activeTab === "driver_salaries"
                   ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
                   : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
-              }`}
+                }`}
             >
               <span className="text-sm">💵</span>
               <span>Driver Salaries Hub</span>
             </button>
           )}
 
-          
+
         </nav>
 
         {/* Persistent Install App Button (Hidden when already standalone) */}
@@ -1959,7 +1974,7 @@ export default function Home() {
               </button>
             )}
 
-            
+
 
             {/* Light / Dark Mode Toggle */}
             <button
@@ -1996,7 +2011,7 @@ export default function Home() {
 
         {/* Content Container */}
         <div className="flex-grow p-6 max-w-5xl mx-auto w-full space-y-6 pb-24">
-          
+
           {/* Guest Access Live Countdown Banner */}
           {loggedInUser?.isTempPass && (
             <div className="bg-amber-500/10 border border-amber-500/30 dark:bg-amber-500/15 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-sm animate-fade-in">
@@ -2066,7 +2081,7 @@ export default function Home() {
                   {/* Unified Entry Console */}
                   <div className="lg:col-span-2 space-y-6">
                     <div className="notion-card border border-[#edece9] dark:border-[#2f2f2f] rounded-lg p-6 bg-white dark:bg-[#1e1e1e] shadow-sm space-y-6">
-                      
+
                       {/* Interactive Tonal Segmented Pill Control: Mode A (Add Expense) vs Mode B (Add Earning) */}
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                         <div className="flex items-center gap-2">
@@ -2078,11 +2093,10 @@ export default function Home() {
                           <button
                             type="button"
                             onClick={() => setConsoleTab("expense")}
-                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
-                              consoleTab === "expense"
+                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${consoleTab === "expense"
                                 ? "bg-[#5D87FF] text-white shadow-sm"
                                 : "text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
-                            }`}
+                              }`}
                           >
                             <span>💸</span>
                             <span>Add Expense</span>
@@ -2090,11 +2104,10 @@ export default function Home() {
                           <button
                             type="button"
                             onClick={() => setConsoleTab("earning")}
-                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${
-                              consoleTab === "earning"
+                            className={`px-3.5 py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer flex items-center gap-1.5 ${consoleTab === "earning"
                                 ? "bg-[#13DEB9] text-white shadow-sm"
                                 : "text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
-                            }`}
+                              }`}
                           >
                             <span>💰</span>
                             <span>Add Earning</span>
@@ -2127,11 +2140,10 @@ export default function Home() {
                                       setSelectedExpenseCategory(pill.value);
                                       if (pill.defaultNotes) setManualNotes(pill.defaultNotes);
                                     }}
-                                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${
-                                      isSelected
+                                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border transition-all cursor-pointer flex items-center gap-1 ${isSelected
                                         ? "bg-[#5D87FF] text-white border-[#5D87FF] shadow-sm scale-105"
                                         : "bg-white hover:bg-neutral-100 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 border-neutral-200/80 dark:border-neutral-700/80"
-                                    }`}
+                                      }`}
                                   >
                                     <span>{pill.icon}</span>
                                     <span>{pill.label}</span>
@@ -2153,8 +2165,8 @@ export default function Home() {
                                 activeFastPill.includes("Bittu")
                                   ? "Bittu"
                                   : activeFastPill.includes("Gaurav")
-                                  ? "Gaurav"
-                                  : (loggedInUser?.name || "Founder")
+                                    ? "Gaurav"
+                                    : (loggedInUser?.name || "Founder")
                               }
                             />
                             <input type="hidden" name="vehicle" value="" />
@@ -2247,33 +2259,30 @@ export default function Home() {
                             <button
                               type="button"
                               onClick={() => setEarningSubTab("weekly")}
-                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
-                                earningSubTab === "weekly"
+                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${earningSubTab === "weekly"
                                   ? "bg-[#13DEB9] text-white shadow-sm"
                                   : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-                              }`}
+                                }`}
                             >
                               💰 Weekly Payout (3 IDs)
                             </button>
                             <button
                               type="button"
                               onClick={() => setEarningSubTab("bill45")}
-                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
-                                earningSubTab === "bill45"
+                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${earningSubTab === "bill45"
                                   ? "bg-[#13DEB9] text-white shadow-sm"
                                   : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-                              }`}
+                                }`}
                             >
                               📑 45-Day Bill Payment
                             </button>
                             <button
                               type="button"
                               onClick={() => setEarningSubTab("other")}
-                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${
-                                earningSubTab === "other"
+                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer text-center ${earningSubTab === "other"
                                   ? "bg-[#13DEB9] text-white shadow-sm"
                                   : "text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-                              }`}
+                                }`}
                             >
                               💵 Other Income
                             </button>
@@ -2666,13 +2675,13 @@ export default function Home() {
                               {exp.category === "vendor_income" && "🚚"}
                               {exp.category === "other_income" && "💰"}
                               {exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}
-                              
+
                             </span>
                             <span className={`text-xs font-bold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-neutral-100"}`}>
                               {exp.type === "INCOME" ? "+" : ""} ₹{exp.amount}
                             </span>
                           </div>
-                          
+
                           <div className="text-[11px] text-neutral-500 dark:text-neutral-400 flex justify-between gap-2">
                             <span className="truncate max-w-[140px] italic">"{exp.notes}"</span>
                             <span className="text-[10px] text-neutral-400 shrink-0 font-medium">
@@ -2739,11 +2748,10 @@ export default function Home() {
                                     setSelectedMonth(new Date().getMonth().toString());
                                   }
                                 }}
-                                className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${
-                                  expenseFilter === filter
+                                className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${expenseFilter === filter
                                     ? "bg-neutral-900 border-neutral-900 text-white dark:bg-white dark:border-white dark:text-neutral-900"
                                     : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                                }`}
+                                  }`}
                               >
                                 {filter}
                               </button>
@@ -2782,7 +2790,7 @@ export default function Home() {
                                   ))}
                                 </select>
                               </div>
-                              
+
                               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
                                 <span className="text-[9px] sm:text-[10px] text-neutral-400 font-bold uppercase tracking-wider">Month:</span>
                                 <select
@@ -2799,7 +2807,7 @@ export default function Home() {
                             </div>
                           )}
 
-                            {expenseFilter === "CUSTOM" && (
+                          {expenseFilter === "CUSTOM" && (
                             <div className="flex flex-wrap items-center gap-2 animate-fadeIn flex-shrink-0">
                               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[#edece9] dark:border-[#2f2f2f] bg-white dark:bg-[#1a1a1a] shadow-sm">
                                 <span className="text-[9px] text-neutral-400 font-bold uppercase">From:</span>
@@ -2845,11 +2853,10 @@ export default function Home() {
                             key={cat.value}
                             type="button"
                             onClick={() => setExpenseCategoryFilter(cat.value as any)}
-                            className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${
-                              expenseCategoryFilter === cat.value
+                            className={`text-[10px] sm:text-xs px-2.5 py-1 rounded-md font-semibold border transition-all cursor-pointer whitespace-nowrap ${expenseCategoryFilter === cat.value
                                 ? "bg-[#5D87FF] border-[#5D87FF] text-white"
                                 : "bg-transparent border-[#edece9] dark:border-[#2f2f2f] hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-450"
-                            }`}
+                              }`}
                           >
                             {cat.label}
                           </button>
@@ -2857,7 +2864,7 @@ export default function Home() {
                       </div>
                     </div>
 
-                    
+
                   </div>
 
                   {/* Interactive full ledger grid/table */}
@@ -2895,7 +2902,7 @@ export default function Home() {
                                   {exp.category === "vendor_income" && "🚚"}
                                   {exp.category === "other_income" && "💰"}
                                   <span>{exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}</span>
-                                  
+
                                 </td>
                                 <td className="p-3.5 max-w-[200px] truncate">{exp.notes}</td>
                                 <td className={`p-3.5 font-bold ${exp.type === "INCOME" ? "text-emerald-600 dark:text-emerald-400" : "text-neutral-900 dark:text-white"}`}>
@@ -2959,7 +2966,7 @@ export default function Home() {
                                 {exp.category === "vendor_income" && "🚚"}
                                 {exp.category === "other_income" && "💰"}
                                 <span>{exp.category === "shadowfax" ? "70 Per Order Income" : exp.category === "factory" ? "Vendor Per Order Income" : exp.category === "vendor_income" ? "Vendor Income" : exp.category === "other_income" ? "Other Income" : exp.category}</span>
-                                
+
                               </div>
                             </div>
 
@@ -3039,11 +3046,10 @@ export default function Home() {
                                     key={p}
                                     type="button"
                                     onClick={() => setExpensePage(p)}
-                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${
-                                      p === activeExpensePage
+                                    className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-md transition-all active:scale-95 cursor-pointer ${p === activeExpensePage
                                         ? "bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25"
                                         : "hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
-                                    }`}
+                                      }`}
                                   >
                                     {p}
                                   </button>
@@ -3077,606 +3083,598 @@ export default function Home() {
           )}
 
           {/* ========================================================================= */}
-              {activeTab === "pending_dues" && (
-                <div className="animate-fade-in space-y-6">
-                  {/* Header & Add Buttons */}
-                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
-                    <div>
-                      <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
-                        <span>🟡</span>
-                        <span>Pending Dues & Liabilities Tracker</span>
-                      </h1>
-                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                        Track money clients owe you (Receivables) and cash borrowed from friends/family (To Pay Back).
-                      </p>
-                    </div>
+          {activeTab === "pending_dues" && (
+            <div className="animate-fade-in space-y-6">
+              {/* Header & Add Buttons */}
+              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
+                    <span>🟡</span>
+                    <span>Pending Dues & Liabilities Tracker</span>
+                  </h1>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                    Track money clients owe you (Receivables) and cash borrowed from friends/family (To Pay Back).
+                  </p>
+                </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowAddPendingModal(true)}
-                        className="notion-btn text-xs px-3.5 py-2.5 font-bold flex items-center gap-1.5 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white rounded-xl shadow-sm transition-all cursor-pointer"
-                      >
-                        <span>🟢</span>
-                        <span>+ Add Client Due</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setShowAddBorrowedModal(true)}
-                        className="notion-btn text-xs px-3.5 py-2.5 font-bold flex items-center gap-1.5 bg-[#FA896B] hover:bg-[#e07153] text-white rounded-xl shadow-sm transition-all cursor-pointer"
-                      >
-                        <span>🤝</span>
-                        <span>+ Add Borrowed Money</span>
-                      </button>
-                    </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddPendingModal(true)}
+                    className="notion-btn text-xs px-3.5 py-2.5 font-bold flex items-center gap-1.5 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white rounded-xl shadow-sm transition-all cursor-pointer"
+                  >
+                    <span>🟢</span>
+                    <span>+ Add Client Due</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddBorrowedModal(true)}
+                    className="notion-btn text-xs px-3.5 py-2.5 font-bold flex items-center gap-1.5 bg-[#FA896B] hover:bg-[#e07153] text-white rounded-xl shadow-sm transition-all cursor-pointer"
+                  >
+                    <span>🤝</span>
+                    <span>+ Add Borrowed Money</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Summary Metric Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {/* Card 1: To Receive (Receivables) */}
+                <div
+                  onClick={() => setPendingDueDirection("RECEIVE")}
+                  className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-sm space-y-1.5 ${pendingDueDirection === "RECEIVE"
+                      ? "bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-500/40 ring-1 ring-emerald-500/30"
+                      : "bg-white dark:bg-[#1e293b] border-neutral-200/80 dark:border-slate-800 hover:border-emerald-500/30"
+                    }`}
+                >
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
+                      🟢 Total To Receive (Bills & Dues)
+                    </span>
+                    {pendingDueDirection === "RECEIVE" && (
+                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400">
+                        Active Tab
+                      </span>
+                    )}
                   </div>
+                  <span className="text-2xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400 block">
+                    ₹{duesSummary.totalToReceive.toLocaleString("en-IN")}
+                  </span>
+                  <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block">
+                    {duesSummary.countToReceive} pending invoices (clients & vendors)
+                  </span>
+                </div>
 
-                  {/* Summary Metric Cards */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    {/* Card 1: To Receive (Receivables) */}
-                    <div 
-                      onClick={() => setPendingDueDirection("RECEIVE")}
-                      className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-sm space-y-1.5 ${
-                        pendingDueDirection === "RECEIVE"
-                          ? "bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-500/40 ring-1 ring-emerald-500/30"
-                          : "bg-white dark:bg-[#1e293b] border-neutral-200/80 dark:border-slate-800 hover:border-emerald-500/30"
-                      }`}
-                    >
-                      <div className="flex justify-between items-center">
-                        <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
-                          🟢 Total To Receive (Bills & Dues)
-                        </span>
-                        {pendingDueDirection === "RECEIVE" && (
-                          <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400">
-                            Active Tab
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-2xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400 block">
-                        ₹{duesSummary.totalToReceive.toLocaleString("en-IN")}
+                {/* Card 2: Borrowed / To Pay Back */}
+                <div
+                  onClick={() => setPendingDueDirection("BORROWED")}
+                  className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-sm space-y-1.5 ${pendingDueDirection === "BORROWED"
+                      ? "bg-rose-50/40 dark:bg-rose-950/20 border-rose-500/40 ring-1 ring-rose-500/30"
+                      : "bg-white dark:bg-[#1e293b] border-neutral-200/80 dark:border-slate-800 hover:border-rose-500/30"
+                    }`}
+                >
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">
+                      🔴 Borrowed / To Pay Back
+                    </span>
+                    {pendingDueDirection === "BORROWED" && (
+                      <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400">
+                        Active Tab
                       </span>
-                      <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block">
-                        {duesSummary.countToReceive} pending invoices (clients & vendors)
-                      </span>
-                    </div>
-
-                    {/* Card 2: Borrowed / To Pay Back */}
-                    <div 
-                      onClick={() => setPendingDueDirection("BORROWED")}
-                      className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-sm space-y-1.5 ${
-                        pendingDueDirection === "BORROWED"
-                          ? "bg-rose-50/40 dark:bg-rose-950/20 border-rose-500/40 ring-1 ring-rose-500/30"
-                          : "bg-white dark:bg-[#1e293b] border-neutral-200/80 dark:border-slate-800 hover:border-rose-500/30"
-                      }`}
-                    >
-                      <div className="flex justify-between items-center">
-                        <span className="text-[11px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">
-                          🔴 Borrowed / To Pay Back
-                        </span>
-                        {pendingDueDirection === "BORROWED" && (
-                          <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400">
-                            Active Tab
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-2xl font-extrabold font-mono text-rose-600 dark:text-rose-400 block">
-                        ₹{duesSummary.totalBorrowedOwed.toLocaleString("en-IN")}
-                      </span>
-                      <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block">
-                        {duesSummary.countBorrowed} active debts (friends, family & financiers)
-                      </span>
-                    </div>
-
-                    {/* Card 3: Cleared & Settled */}
-                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-1.5">
-                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
-                        ⚖️ Settled & Cleared Ledgers
-                      </span>
-                      <div className="flex items-center gap-3 font-mono font-bold text-sm">
-                        <span className="text-emerald-600 dark:text-emerald-400">
-                          +₹{duesSummary.totalReceived.toLocaleString("en-IN")} <span className="text-[10px] text-neutral-400 font-sans font-normal">received</span>
-                        </span>
-                        <span className="text-neutral-300 dark:text-slate-700">|</span>
-                        <span className="text-rose-500">
-                          -₹{duesSummary.totalBorrowedRepaid.toLocaleString("en-IN")} <span className="text-[10px] text-neutral-400 font-sans font-normal">repaid</span>
-                        </span>
-                      </div>
-                      <span className="text-[11px] text-neutral-400 block">
-                        Net pending: ₹{(duesSummary.totalToReceive - duesSummary.totalBorrowedOwed).toLocaleString("en-IN")}
-                      </span>
-                    </div>
+                    )}
                   </div>
+                  <span className="text-2xl font-extrabold font-mono text-rose-600 dark:text-rose-400 block">
+                    ₹{duesSummary.totalBorrowedOwed.toLocaleString("en-IN")}
+                  </span>
+                  <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block">
+                    {duesSummary.countBorrowed} active debts (friends, family & financiers)
+                  </span>
+                </div>
 
-                  {/* Direction Tabs & Status Filter */}
-                  <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                    {/* Two Clear Sub-Modes / Filter Tabs */}
-                    <div className="flex items-center gap-1.5 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl border border-neutral-200/60 dark:border-slate-700/50">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPendingDueDirection("RECEIVE");
-                          setPendingFilterStatus("ALL");
-                        }}
-                        className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
-                          pendingDueDirection === "RECEIVE"
-                            ? "bg-white dark:bg-[#1e293b] text-emerald-600 dark:text-emerald-400 shadow-sm"
-                            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                {/* Card 3: Cleared & Settled */}
+                <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-1.5">
+                  <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
+                    ⚖️ Settled & Cleared Ledgers
+                  </span>
+                  <div className="flex items-center gap-3 font-mono font-bold text-sm">
+                    <span className="text-emerald-600 dark:text-emerald-400">
+                      +₹{duesSummary.totalReceived.toLocaleString("en-IN")} <span className="text-[10px] text-neutral-400 font-sans font-normal">received</span>
+                    </span>
+                    <span className="text-neutral-300 dark:text-slate-700">|</span>
+                    <span className="text-rose-500">
+                      -₹{duesSummary.totalBorrowedRepaid.toLocaleString("en-IN")} <span className="text-[10px] text-neutral-400 font-sans font-normal">repaid</span>
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-neutral-400 block">
+                    Net pending: ₹{(duesSummary.totalToReceive - duesSummary.totalBorrowedOwed).toLocaleString("en-IN")}
+                  </span>
+                </div>
+              </div>
+
+              {/* Direction Tabs & Status Filter */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                {/* Two Clear Sub-Modes / Filter Tabs */}
+                <div className="flex items-center gap-1.5 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl border border-neutral-200/60 dark:border-slate-700/50">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingDueDirection("RECEIVE");
+                      setPendingFilterStatus("ALL");
+                    }}
+                    className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${pendingDueDirection === "RECEIVE"
+                        ? "bg-white dark:bg-[#1e293b] text-emerald-600 dark:text-emerald-400 shadow-sm"
+                        : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                      }`}
+                  >
+                    <span>🟢 To Receive (Bills & Dues)</span>
+                    {duesSummary.countToReceive > 0 && (
+                      <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-mono">
+                        {duesSummary.countToReceive}
+                      </span>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingDueDirection("BORROWED");
+                      setPendingFilterStatus("ALL");
+                    }}
+                    className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${pendingDueDirection === "BORROWED"
+                        ? "bg-white dark:bg-[#1e293b] text-rose-600 dark:text-rose-400 shadow-sm"
+                        : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                      }`}
+                  >
+                    <span>🔴 Borrowed / To Pay Back</span>
+                    {duesSummary.countBorrowed > 0 && (
+                      <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-500/15 text-rose-600 dark:text-rose-400 font-mono">
+                        {duesSummary.countBorrowed}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {/* Secondary Status Filter Pills */}
+                <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl border border-neutral-200/60 dark:border-slate-700/50">
+                  {(["ALL", "PENDING", "PAID"] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setPendingFilterStatus(st)}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${pendingFilterStatus === st
+                          ? "bg-white dark:bg-[#1e293b] text-neutral-900 dark:text-white shadow-sm"
+                          : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
                         }`}
-                      >
-                        <span>🟢 To Receive (Bills & Dues)</span>
-                        {duesSummary.countToReceive > 0 && (
-                          <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-mono">
-                            {duesSummary.countToReceive}
-                          </span>
-                        )}
-                      </button>
+                    >
+                      {st === "ALL" ? "All" : st === "PENDING" ? (pendingDueDirection === "RECEIVE" ? "Pending Only" : "Unpaid Only") : "Cleared / Done"}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPendingDueDirection("BORROWED");
-                          setPendingFilterStatus("ALL");
-                        }}
-                        className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
-                          pendingDueDirection === "BORROWED"
-                            ? "bg-white dark:bg-[#1e293b] text-rose-600 dark:text-rose-400 shadow-sm"
-                            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
-                        }`}
-                      >
-                        <span>🔴 Borrowed / To Pay Back</span>
-                        {duesSummary.countBorrowed > 0 && (
-                          <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-500/15 text-rose-600 dark:text-rose-400 font-mono">
-                            {duesSummary.countBorrowed}
-                          </span>
-                        )}
-                      </button>
-                    </div>
+              {/* Invoices & Borrowed List */}
+              {filteredPendingPayments.length === 0 ? (
+                <div className="p-12 text-center border border-dashed border-neutral-200 dark:border-slate-800 rounded-2xl bg-white/40 dark:bg-slate-900/20 space-y-3">
+                  <span className="text-3xl block">{pendingDueDirection === "RECEIVE" ? "🟢" : "🤝"}</span>
+                  <p className="text-sm font-semibold text-neutral-600 dark:text-neutral-300">
+                    {pendingDueDirection === "RECEIVE"
+                      ? "No client receivable dues found in this view!"
+                      : "No borrowed / friend debt records found in this view!"}
+                  </p>
+                  <p className="text-xs text-neutral-400">
+                    {pendingDueDirection === "RECEIVE"
+                      ? "Click '+ Add Client Due' above to track pending client payments."
+                      : "Click '+ Add Borrowed Money' to track cash borrowed from friends or family."}
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {filteredPendingPayments.map((p: any) => {
+                    const isBorrowed = isBorrowedItem(p);
+                    const isFullyPaid = isBorrowed ? p.status === "BORROWED_PAID" : p.status === "PAID";
+                    const isPartial = isBorrowed ? p.status === "BORROWED_PARTIAL" : p.status === "PARTIAL";
+                    const remainingDue = Math.max(0, (p.totalAmount || 0) - (p.receivedAmount || 0));
 
-                    {/* Secondary Status Filter Pills */}
-                    <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl border border-neutral-200/60 dark:border-slate-700/50">
-                      {(["ALL", "PENDING", "PAID"] as const).map((st) => (
-                        <button
-                          key={st}
-                          type="button"
-                          onClick={() => setPendingFilterStatus(st)}
-                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                            pendingFilterStatus === st
-                              ? "bg-white dark:bg-[#1e293b] text-neutral-900 dark:text-white shadow-sm"
-                              : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                    return (
+                      <div
+                        key={p.id}
+                        className={`p-5 rounded-2xl bg-white dark:bg-[#1e293b] border shadow-sm space-y-4 hover:shadow-md transition-all flex flex-col justify-between ${isFullyPaid
+                            ? "border-emerald-500/30 bg-emerald-50/5 dark:bg-emerald-950/10"
+                            : isBorrowed
+                              ? "border-rose-500/30 hover:border-rose-500/60 bg-rose-50/5 dark:bg-rose-950/5"
+                              : "border-amber-500/30 hover:border-amber-500/60"
                           }`}
-                        >
-                          {st === "ALL" ? "All" : st === "PENDING" ? (pendingDueDirection === "RECEIVE" ? "Pending Only" : "Unpaid Only") : "Cleared / Done"}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                      >
+                        <div className="space-y-3">
+                          {/* Header info */}
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-neutral-100 dark:bg-slate-800 text-neutral-700 dark:text-neutral-300">
+                                  {isBorrowed ? `👤 ${p.clientName || 'Friend/Family'}` : `🏢 ${p.clientName || 'Client'}`}
+                                </span>
+                                {isBorrowed && (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                                    Borrowed
+                                  </span>
+                                )}
+                              </div>
+                              <h3 className="text-base font-bold text-neutral-900 dark:text-white pt-1">
+                                {p.title}
+                              </h3>
+                              {p.notes && p.notes !== p.title && (
+                                <p className="text-xs text-neutral-500 dark:text-neutral-400 whitespace-pre-line">
+                                  {p.notes}
+                                </p>
+                              )}
+                              <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-neutral-400 pt-0.5">
+                                <span>📅 Added: {new Date(p.createdAt).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}</span>
+                                {p.dueDate && (
+                                  <span className={new Date(p.dueDate) < new Date() && !isFullyPaid ? "text-rose-500 font-bold" : ""}>
+                                    🎯 Return by: {new Date(p.dueDate).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
 
-                  {/* Invoices & Borrowed List */}
-                  {filteredPendingPayments.length === 0 ? (
-                    <div className="p-12 text-center border border-dashed border-neutral-200 dark:border-slate-800 rounded-2xl bg-white/40 dark:bg-slate-900/20 space-y-3">
-                      <span className="text-3xl block">{pendingDueDirection === "RECEIVE" ? "🟢" : "🤝"}</span>
-                      <p className="text-sm font-semibold text-neutral-600 dark:text-neutral-300">
-                        {pendingDueDirection === "RECEIVE" 
-                          ? "No client receivable dues found in this view!"
-                          : "No borrowed / friend debt records found in this view!"}
-                      </p>
-                      <p className="text-xs text-neutral-400">
-                        {pendingDueDirection === "RECEIVE"
-                          ? "Click '+ Add Client Due' above to track pending client payments."
-                          : "Click '+ Add Borrowed Money' to track cash borrowed from friends or family."}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {filteredPendingPayments.map((p: any) => {
-                        const isBorrowed = isBorrowedItem(p);
-                        const isFullyPaid = isBorrowed ? p.status === "BORROWED_PAID" : p.status === "PAID";
-                        const isPartial = isBorrowed ? p.status === "BORROWED_PARTIAL" : p.status === "PARTIAL";
-                        const remainingDue = Math.max(0, (p.totalAmount || 0) - (p.receivedAmount || 0));
-
-                        return (
-                          <div
-                            key={p.id}
-                            className={`p-5 rounded-2xl bg-white dark:bg-[#1e293b] border shadow-sm space-y-4 hover:shadow-md transition-all flex flex-col justify-between ${
-                              isFullyPaid
-                                ? "border-emerald-500/30 bg-emerald-50/5 dark:bg-emerald-950/10"
-                                : isBorrowed
-                                ? "border-rose-500/30 hover:border-rose-500/60 bg-rose-50/5 dark:bg-rose-950/5"
-                                : "border-amber-500/30 hover:border-amber-500/60"
-                            }`}
-                          >
-                            <div className="space-y-3">
-                              {/* Header info */}
-                              <div className="flex justify-between items-start gap-2">
-                                <div className="space-y-1">
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-neutral-100 dark:bg-slate-800 text-neutral-700 dark:text-neutral-300">
-                                      {isBorrowed ? `👤 ${p.clientName || 'Friend/Family'}` : `🏢 ${p.clientName || 'Client'}`}
-                                    </span>
-                                    {isBorrowed && (
-                                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400">
-                                        Borrowed
-                                      </span>
-                                    )}
-                                  </div>
-                                  <h3 className="text-base font-bold text-neutral-900 dark:text-white pt-1">
-                                    {p.title}
-                                  </h3>
-                                  {p.notes && p.notes !== p.title && (
-                                    <p className="text-xs text-neutral-500 dark:text-neutral-400 whitespace-pre-line">
-                                      {p.notes}
-                                    </p>
-                                  )}
-                                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-neutral-400 pt-0.5">
-                                    <span>📅 Added: {new Date(p.createdAt).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}</span>
-                                    {p.dueDate && (
-                                      <span className={new Date(p.dueDate) < new Date() && !isFullyPaid ? "text-rose-500 font-bold" : ""}>
-                                        🎯 Return by: {new Date(p.dueDate).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}
-                                      </span>
-                                    )}
-                                  </div>
-                                </div>
-
-                                <span
-                                  className={`text-[10px] font-extrabold uppercase font-mono px-2.5 py-1 rounded-full border shrink-0 ${
-                                    isFullyPaid
-                                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                                      : isPartial
-                                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
-                                      : isBorrowed
+                            <span
+                              className={`text-[10px] font-extrabold uppercase font-mono px-2.5 py-1 rounded-full border shrink-0 ${isFullyPaid
+                                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                                  : isPartial
+                                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                                    : isBorrowed
                                       ? "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20"
                                       : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
-                                  }`}
-                                >
-                                  {isFullyPaid 
-                                    ? (isBorrowed ? "✅ Fully Repaid" : "✅ Cleared / Done") 
-                                    : isPartial
-                                    ? `🟡 Partial (₹${remainingDue.toLocaleString("en-IN")} left)`
-                                    : (isBorrowed ? "🔴 To Pay Back" : "🟡 Pending")}
-                                </span>
-                              </div>
-
-                              {/* Amount Breakdown Card */}
-                              <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 space-y-2">
-                                <div className="flex justify-between items-center">
-                                  <span className="text-xs font-semibold text-neutral-500">
-                                    {isBorrowed ? "Total Borrowed" : "Total Billed / Due"}
-                                  </span>
-                                  <span className="text-sm font-bold font-mono text-neutral-700 dark:text-neutral-300">
-                                    ₹{p.totalAmount.toLocaleString("en-IN")}
-                                  </span>
-                                </div>
-
-                                {(p.receivedAmount || 0) > 0 && (
-                                  <div className="flex justify-between items-center text-xs">
-                                    <span className="text-neutral-500">
-                                      {isBorrowed ? "Repaid So Far" : "Collected So Far"}
-                                    </span>
-                                    <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">
-                                      ₹{(p.receivedAmount || 0).toLocaleString("en-IN")}
-                                    </span>
-                                  </div>
-                                )}
-
-                                <div className="pt-1.5 border-t border-neutral-200/60 dark:border-slate-800 flex justify-between items-center">
-                                  <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200">
-                                    {isFullyPaid 
-                                      ? "Final Status" 
-                                      : isBorrowed 
-                                      ? "Remaining Owed to Friend" 
-                                      : "Remaining to Collect"}
-                                  </span>
-                                  <span className={`text-lg font-extrabold font-mono ${
-                                    isFullyPaid 
-                                      ? "text-emerald-600 dark:text-emerald-400" 
-                                      : isBorrowed 
-                                      ? "text-rose-600 dark:text-rose-400" 
-                                      : "text-amber-600 dark:text-amber-400"
-                                  }`}>
-                                    {isFullyPaid ? "CLEARED" : `₹${remainingDue.toLocaleString("en-IN")}`}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Card Footer Actions */}
-                            <div className="pt-3 border-t border-neutral-100 dark:border-slate-800/80 flex justify-between items-center text-xs">
-                              <div>
-                                {isFullyPaid ? (
-                                  <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
-                                    <span>✨</span>
-                                    <span>{isBorrowed ? "Repayment Logged to Expenses" : "Recorded in Income Ledger"}</span>
-                                  </span>
-                                ) : isBorrowed ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      setRepayingBorrowedItem(p);
-                                      setRepayAmountInput(remainingDue.toString());
-                                      setRepayNoteInput("");
-                                    }}
-                                    className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
-                                  >
-                                    <span>💸</span>
-                                    <span>Pay Back (₹{remainingDue.toLocaleString("en-IN")})</span>
-                                  </button>
-                                ) : (
-                                  <Form method="post">
-                                    <input type="hidden" name="_action" value="mark_pending_received" />
-                                    <input type="hidden" name="id" value={p.id} />
-                                    <button
-                                      type="submit"
-                                      disabled={isSubmitting}
-                                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-                                    >
-                                      <span>✅</span>
-                                      <span>Mark as Received & Add to Income</span>
-                                    </button>
-                                  </Form>
-                                )}
-                              </div>
-
-                              <Form
-                                method="post"
-                                onSubmit={(e) => {
-                                  if (!confirm(`Are you sure you want to delete "${p.title}"?`)) {
-                                    e.preventDefault();
-                                  }
-                                }}
-                              >
-                                <input type="hidden" name="_action" value="delete_pending_payment" />
-                                <input type="hidden" name="id" value={p.id} />
-                                <button
-                                  type="submit"
-                                  className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-all cursor-pointer"
-                                  title="Delete record"
-                                >
-                                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
-                                </button>
-                              </Form>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* ========================================================================= */}
-              {/* DRIVER SALARIES & ADVANCES HUB TAB VIEW */}
-              {/* ========================================================================= */}
-              {activeTab === "driver_salaries" && (
-                <div className="animate-fade-in space-y-6">
-                  {/* Header & Month Selector */}
-                  <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
-                    <div>
-                      <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
-                        <span>💵</span>
-                        <span>Driver Salaries & Advance Settlement Hub</span>
-                      </h1>
-                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                        Calculate exact working day salary, auto-deduct cash advances taken during the month, settle with 1-click, and send WhatsApp slips!
-                      </p>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-neutral-500">Settlement Month:</span>
-                      <input
-                        type="month"
-                        value={salaryMonthYear}
-                        onChange={(e) => setSalaryMonthYear(e.target.value)}
-                        className="notion-input px-3 py-1.5 text-xs font-bold rounded-lg border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#1e293b] text-neutral-800 dark:text-white outline-none cursor-pointer font-mono"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Summary Metric Cards */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Active Drivers</span>
-                      <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                        {drivers.length}
-                      </span>
-                    </div>
-
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Base Salary Commitment</span>
-                      <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                        ₹{drivers.reduce((s: number, d: any) => s + (d.salary || 16500), 0).toLocaleString("en-IN")}
-                      </span>
-                    </div>
-
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-rose-200/80 dark:border-rose-500/20 bg-rose-50/20 dark:bg-rose-500/5 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-rose-500 uppercase tracking-wider block">Unsettled Advances</span>
-                      <span className="text-xl font-extrabold font-mono text-rose-500">
-                        ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.totalAdvances, 0).toLocaleString("en-IN")}
-                      </span>
-                    </div>
-
-                    <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-emerald-200/80 dark:border-emerald-500/20 bg-emerald-50/20 dark:bg-emerald-500/5 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Est. Net Payable</span>
-                      <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
-                        ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.netPayable, 0).toLocaleString("en-IN")}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Driver Reconciliation Interactive Grid */}
-                  <div className="space-y-4">
-                    <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
-                      Live Month-End Driver Payout Breakdown
-                    </h2>
-
-                    <div className="space-y-3">
-                      {driverSalaryReconciliation.map((item: any) => (
-                        <div
-                          key={item.driver.id}
-                          className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 transition-all hover:border-[#5D87FF]/40"
-                        >
-                          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                            {/* Driver Info */}
-                            <div className="flex items-center gap-3.5">
-                              <div className="w-11 h-11 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-extrabold text-base flex items-center justify-center border border-[#5D87FF]/20">
-                                {item.driver.name.charAt(0)}
-                              </div>
-                              <div>
-                                <h3 className="text-base font-bold text-neutral-900 dark:text-white flex items-center gap-2">
-                                  <span>{item.driver.name}</span>
-                                  {item.driver.vehicleNumber && (
-                                    <span className="text-[10px] font-mono bg-neutral-100 dark:bg-slate-800 text-neutral-600 dark:text-slate-300 px-2 py-0.5 rounded font-bold">
-                                      🛺 {item.driver.vehicleNumber}
-                                    </span>
-                                  )}
-                                </h3>
-                                <span className="text-xs text-neutral-400 font-mono">
-                                  📞 {item.driver.phone} • Base: ₹{item.baseSalary.toLocaleString("en-IN")}/mo (₹{item.dailyRate}/day)
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Working Days & Bonus Adjusters */}
-                            <div className="flex flex-wrap items-center gap-3 text-xs">
-                              {/* Days Worked */}
-                              <div className="flex items-center gap-1.5 bg-neutral-50 dark:bg-slate-900/60 p-1.5 rounded-xl border border-neutral-200/70 dark:border-slate-800">
-                                <span className="text-neutral-500 font-medium pl-1">Days:</span>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max="31"
-                                  value={item.daysWorked}
-                                  onChange={(e) => {
-                                    const val = Math.min(31, Math.max(0, parseInt(e.target.value) || 0));
-                                    setDriverDaysWorkedMap((prev) => ({ ...prev, [item.driver.id]: val }));
-                                  }}
-                                  className="w-12 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 rounded-md py-0.5 outline-none"
-                                />
-                                <span className="text-[10px] text-slate-400 pr-1">(= ₹{item.earnedSalary.toLocaleString("en-IN")})</span>
-                              </div>
-
-                              {/* Bonus */}
-                              <div className="flex items-center gap-1 bg-emerald-500/5 p-1.5 rounded-xl border border-emerald-500/20">
-                                <span className="text-emerald-600 dark:text-emerald-400 font-semibold pl-1">+Bonus:</span>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  placeholder="0"
-                                  value={item.bonus || ""}
-                                  onChange={(e) => {
-                                    const val = Math.max(0, parseFloat(e.target.value) || 0);
-                                    setDriverBonusMap((prev) => ({ ...prev, [item.driver.id]: val }));
-                                  }}
-                                  className="w-16 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-emerald-500/30 rounded-md py-0.5 outline-none text-emerald-600 dark:text-emerald-400"
-                                />
-                              </div>
-
-                              {/* Un-deducted Advances */}
-                              <div className="flex items-center gap-1.5 bg-rose-500/5 p-1.5 rounded-xl border border-rose-500/20">
-                                <span className="text-rose-500 font-semibold pl-1">Advances:</span>
-                                <button
-                                  type="button"
-                                  onClick={() => setViewingDriverAdvances(item)}
-                                  className="font-bold font-mono text-rose-500 hover:underline cursor-pointer flex items-center gap-1"
-                                  title="Click to view all advances"
-                                >
-                                  <span>-₹{item.totalAdvances.toLocaleString("en-IN")}</span>
-                                  <span className="text-[9px] bg-rose-500/20 px-1 py-0.2 rounded font-mono">
-                                    {item.unSettledAdvances.length} slips 👁️
-                                  </span>
-                                </button>
-                              </div>
-                            </div>
+                                }`}
+                            >
+                              {isFullyPaid
+                                ? (isBorrowed ? "✅ Fully Repaid" : "✅ Cleared / Done")
+                                : isPartial
+                                  ? `🟡 Partial (₹${remainingDue.toLocaleString("en-IN")} left)`
+                                  : (isBorrowed ? "🔴 To Pay Back" : "🟡 Pending")}
+                            </span>
                           </div>
 
-                          {/* Payout Calculation Bar & Actions */}
-                          <div className="pt-3 border-t border-neutral-100 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
-                            <div className="flex items-baseline gap-2">
-                              <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">
-                                Net Payable Payout:
+                          {/* Amount Breakdown Card */}
+                          <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 space-y-2">
+                            <div className="flex justify-between items-center">
+                              <span className="text-xs font-semibold text-neutral-500">
+                                {isBorrowed ? "Total Borrowed" : "Total Billed / Due"}
                               </span>
-                              <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
-                                ₹{item.netPayable.toLocaleString("en-IN")}
+                              <span className="text-sm font-bold font-mono text-neutral-700 dark:text-neutral-300">
+                                ₹{p.totalAmount.toLocaleString("en-IN")}
                               </span>
                             </div>
 
-                            <div className="flex items-center gap-2">
-                              {/* WhatsApp Slip Button */}
+                            {(p.receivedAmount || 0) > 0 && (
+                              <div className="flex justify-between items-center text-xs">
+                                <span className="text-neutral-500">
+                                  {isBorrowed ? "Repaid So Far" : "Collected So Far"}
+                                </span>
+                                <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                                  ₹{(p.receivedAmount || 0).toLocaleString("en-IN")}
+                                </span>
+                              </div>
+                            )}
+
+                            <div className="pt-1.5 border-t border-neutral-200/60 dark:border-slate-800 flex justify-between items-center">
+                              <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200">
+                                {isFullyPaid
+                                  ? "Final Status"
+                                  : isBorrowed
+                                    ? "Remaining Owed to Friend"
+                                    : "Remaining to Collect"}
+                              </span>
+                              <span className={`text-lg font-extrabold font-mono ${isFullyPaid
+                                  ? "text-emerald-600 dark:text-emerald-400"
+                                  : isBorrowed
+                                    ? "text-rose-600 dark:text-rose-400"
+                                    : "text-amber-600 dark:text-amber-400"
+                                }`}>
+                                {isFullyPaid ? "CLEARED" : `₹${remainingDue.toLocaleString("en-IN")}`}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Card Footer Actions */}
+                        <div className="pt-3 border-t border-neutral-100 dark:border-slate-800/80 flex justify-between items-center text-xs">
+                          <div>
+                            {isFullyPaid ? (
+                              <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+                                <span>✨</span>
+                                <span>{isBorrowed ? "Repayment Logged to Expenses" : "Recorded in Income Ledger"}</span>
+                              </span>
+                            ) : isBorrowed ? (
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setSelectedSlipData(item);
-                                  setCopiedSlipText(false);
+                                  setRepayingBorrowedItem(p);
+                                  setRepayAmountInput(remainingDue.toString());
+                                  setRepayNoteInput("");
                                 }}
-                                className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
-                              >
-                                <span>📱</span>
-                                <span>WhatsApp Slip</span>
-                              </button>
-
-                              {/* Settle & Pay Button */}
-                              <button
-                                type="button"
-                                onClick={() => setSettlingDriver(item)}
-                                className="px-3.5 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                                className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
                               >
                                 <span>💸</span>
-                                <span>Settle & Pay Salary</span>
+                                <span>Pay Back (₹{remainingDue.toLocaleString("en-IN")})</span>
                               </button>
-                            </div>
+                            ) : (
+                              <Form method="post">
+                                <input type="hidden" name="_action" value="mark_pending_received" />
+                                <input type="hidden" name="id" value={p.id} />
+                                <button
+                                  type="submit"
+                                  disabled={isSubmitting}
+                                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                >
+                                  <span>✅</span>
+                                  <span>Mark as Received & Add to Income</span>
+                                </button>
+                              </Form>
+                            )}
+                          </div>
+
+                          <Form
+                            method="post"
+                            onSubmit={(e) => {
+                              if (!confirm(`Are you sure you want to delete "${p.title}"?`)) {
+                                e.preventDefault();
+                              }
+                            }}
+                          >
+                            <input type="hidden" name="_action" value="delete_pending_payment" />
+                            <input type="hidden" name="id" value={p.id} />
+                            <button
+                              type="submit"
+                              className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-all cursor-pointer"
+                              title="Delete record"
+                            >
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </Form>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* DRIVER SALARIES & ADVANCES HUB TAB VIEW */}
+          {/* ========================================================================= */}
+          {activeTab === "driver_salaries" && (
+            <div className="animate-fade-in space-y-6">
+              {/* Header & Month Selector */}
+              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
+                    <span>💵</span>
+                    <span>Driver Salaries & Advance Settlement Hub</span>
+                  </h1>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                    Calculate exact working day salary, auto-deduct cash advances taken during the month, settle with 1-click, and send WhatsApp slips!
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-neutral-500">Settlement Month:</span>
+                  <input
+                    type="month"
+                    value={salaryMonthYear}
+                    onChange={(e) => setSalaryMonthYear(e.target.value)}
+                    className="notion-input px-3 py-1.5 text-xs font-bold rounded-lg border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#1e293b] text-neutral-800 dark:text-white outline-none cursor-pointer font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Summary Metric Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                  <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Active Drivers</span>
+                  <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                    {drivers.length}
+                  </span>
+                </div>
+
+                <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Base Salary Commitment</span>
+                  <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
+                    ₹{drivers.reduce((s: number, d: any) => s + (d.salary || 16500), 0).toLocaleString("en-IN")}
+                  </span>
+                </div>
+
+                <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-rose-200/80 dark:border-rose-500/20 bg-rose-50/20 dark:bg-rose-500/5 shadow-sm space-y-1">
+                  <span className="text-[11px] font-bold text-rose-500 uppercase tracking-wider block">Unsettled Advances</span>
+                  <span className="text-xl font-extrabold font-mono text-rose-500">
+                    ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.totalAdvances, 0).toLocaleString("en-IN")}
+                  </span>
+                </div>
+
+                <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-emerald-200/80 dark:border-emerald-500/20 bg-emerald-50/20 dark:bg-emerald-500/5 shadow-sm space-y-1">
+                  <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">Est. Net Payable</span>
+                  <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                    ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.netPayable, 0).toLocaleString("en-IN")}
+                  </span>
+                </div>
+              </div>
+
+              {/* Driver Reconciliation Interactive Grid */}
+              <div className="space-y-4">
+                <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
+                  Live Month-End Driver Payout Breakdown
+                </h2>
+
+                <div className="space-y-3">
+                  {driverSalaryReconciliation.map((item: any) => (
+                    <div
+                      key={item.driver.id}
+                      className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 transition-all hover:border-[#5D87FF]/40"
+                    >
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        {/* Driver Info */}
+                        <div className="flex items-center gap-3.5">
+                          <div className="w-11 h-11 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-extrabold text-base flex items-center justify-center border border-[#5D87FF]/20">
+                            {item.driver.name.charAt(0)}
+                          </div>
+                          <div>
+                            <h3 className="text-base font-bold text-neutral-900 dark:text-white flex items-center gap-2">
+                              <span>{item.driver.name}</span>
+                              {item.driver.vehicleNumber && (
+                                <span className="text-[10px] font-mono bg-neutral-100 dark:bg-slate-800 text-neutral-600 dark:text-slate-300 px-2 py-0.5 rounded font-bold">
+                                  🛺 {item.driver.vehicleNumber}
+                                </span>
+                              )}
+                            </h3>
+                            <span className="text-xs text-neutral-400 font-mono">
+                              📞 {item.driver.phone} • Base: ₹{item.baseSalary.toLocaleString("en-IN")}/mo (₹{item.dailyRate}/day)
+                            </span>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  </div>
 
-                  {/* Past Settlements History */}
-                  {salarySettlements.length > 0 && (
-                    <div className="space-y-3 pt-6 border-t border-neutral-200 dark:border-slate-800">
-                      <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300 flex items-center gap-2">
-                        <span>📜</span>
-                        <span>Recent Salary Settlement Vouchers ({salarySettlements.length})</span>
-                      </h3>
+                        {/* Working Days & Bonus Adjusters */}
+                        <div className="flex flex-wrap items-center gap-3 text-xs">
+                          {/* Days Worked */}
+                          <div className="flex items-center gap-1.5 bg-neutral-50 dark:bg-slate-900/60 p-1.5 rounded-xl border border-neutral-200/70 dark:border-slate-800">
+                            <span className="text-neutral-500 font-medium pl-1">Days:</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="31"
+                              value={item.daysWorked}
+                              onChange={(e) => {
+                                const val = Math.min(31, Math.max(0, parseInt(e.target.value) || 0));
+                                setDriverDaysWorkedMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                              }}
+                              className="w-12 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 rounded-md py-0.5 outline-none"
+                            />
+                            <span className="text-[10px] text-slate-400 pr-1">(= ₹{item.earnedSalary.toLocaleString("en-IN")})</span>
+                          </div>
 
-                      <div className="rounded-2xl border border-neutral-200/80 dark:border-slate-800 bg-white dark:bg-[#1e293b] overflow-hidden shadow-sm">
-                        <div className="overflow-x-auto">
-                          <table className="w-full text-left text-xs">
-                            <thead className="bg-neutral-50 dark:bg-slate-800/80 text-neutral-500 uppercase tracking-wider border-b border-neutral-200/80 dark:border-slate-800 font-mono">
-                              <tr>
-                                <th className="p-3">Date</th>
-                                <th className="p-3">Month</th>
-                                <th className="p-3">Driver Name</th>
-                                <th className="p-3">Days Worked</th>
-                                <th className="p-3">Advances Deducted</th>
-                                <th className="p-3">Net Paid</th>
-                                <th className="p-3">Mode</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-neutral-100 dark:divide-slate-800/60 font-medium text-neutral-700 dark:text-neutral-300">
-                              {salarySettlements.map((s: any) => (
-                                <tr key={s.id} className="hover:bg-neutral-50/50 dark:hover:bg-slate-800/40">
-                                  <td className="p-3 font-mono text-neutral-400">
-                                    {new Date(s.paymentDate).toLocaleDateString()}
-                                  </td>
-                                  <td className="p-3 font-mono font-bold text-[#5D87FF]">{s.monthYear}</td>
-                                  <td className="p-3 font-bold text-neutral-900 dark:text-white">{s.driverName}</td>
-                                  <td className="p-3 font-mono">{s.daysWorked} days</td>
-                                  <td className="p-3 font-mono text-rose-500">-₹{s.advancesDeducted.toLocaleString("en-IN")}</td>
-                                  <td className="p-3 font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                                    ₹{s.netPaidAmount.toLocaleString("en-IN")}
-                                  </td>
-                                  <td className="p-3 font-mono text-[10px] uppercase font-bold text-slate-400">{s.paymentMode}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                          {/* Bonus */}
+                          <div className="flex items-center gap-1 bg-emerald-500/5 p-1.5 rounded-xl border border-emerald-500/20">
+                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold pl-1">+Bonus:</span>
+                            <input
+                              type="number"
+                              min="0"
+                              placeholder="0"
+                              value={item.bonus || ""}
+                              onChange={(e) => {
+                                const val = Math.max(0, parseFloat(e.target.value) || 0);
+                                setDriverBonusMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                              }}
+                              className="w-16 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-emerald-500/30 rounded-md py-0.5 outline-none text-emerald-600 dark:text-emerald-400"
+                            />
+                          </div>
+
+                          {/* Un-deducted Advances */}
+                          <div className="flex items-center gap-1.5 bg-rose-500/5 p-1.5 rounded-xl border border-rose-500/20">
+                            <span className="text-rose-500 font-semibold pl-1">Advances:</span>
+                            <button
+                              type="button"
+                              onClick={() => setViewingDriverAdvances(item)}
+                              className="font-bold font-mono text-rose-500 hover:underline cursor-pointer flex items-center gap-1"
+                              title="Click to view all advances"
+                            >
+                              <span>-₹{item.totalAdvances.toLocaleString("en-IN")}</span>
+                              <span className="text-[9px] bg-rose-500/20 px-1 py-0.2 rounded font-mono">
+                                {item.unSettledAdvances.length} slips 👁️
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Payout Calculation Bar & Actions */}
+                      <div className="pt-3 border-t border-neutral-100 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                        <div className="flex items-baseline gap-2">
+                          <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">
+                            Net Payable Payout:
+                          </span>
+                          <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                            ₹{item.netPayable.toLocaleString("en-IN")}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {/* WhatsApp Slip Button */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedSlipData(item);
+                              setCopiedSlipText(false);
+                            }}
+                            className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                          >
+                            <span>📱</span>
+                            <span>WhatsApp Slip</span>
+                          </button>
+
+                          {/* Settle & Pay Button */}
+                          <button
+                            type="button"
+                            onClick={() => setSettlingDriver(item)}
+                            className="px-3.5 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                          >
+                            <span>💸</span>
+                            <span>Settle & Pay Salary</span>
+                          </button>
                         </div>
                       </div>
                     </div>
-                  )}
+                  ))}
+                </div>
+              </div>
+
+              {/* Past Settlements History */}
+              {salarySettlements.length > 0 && (
+                <div className="space-y-3 pt-6 border-t border-neutral-200 dark:border-slate-800">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300 flex items-center gap-2">
+                    <span>📜</span>
+                    <span>Recent Salary Settlement Vouchers ({salarySettlements.length})</span>
+                  </h3>
+
+                  <div className="rounded-2xl border border-neutral-200/80 dark:border-slate-800 bg-white dark:bg-[#1e293b] overflow-hidden shadow-sm">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-neutral-50 dark:bg-slate-800/80 text-neutral-500 uppercase tracking-wider border-b border-neutral-200/80 dark:border-slate-800 font-mono">
+                          <tr>
+                            <th className="p-3">Date</th>
+                            <th className="p-3">Month</th>
+                            <th className="p-3">Driver Name</th>
+                            <th className="p-3">Days Worked</th>
+                            <th className="p-3">Advances Deducted</th>
+                            <th className="p-3">Net Paid</th>
+                            <th className="p-3">Mode</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-neutral-100 dark:divide-slate-800/60 font-medium text-neutral-700 dark:text-neutral-300">
+                          {salarySettlements.map((s: any) => (
+                            <tr key={s.id} className="hover:bg-neutral-50/50 dark:hover:bg-slate-800/40">
+                              <td className="p-3 font-mono text-neutral-400">
+                                {new Date(s.paymentDate).toLocaleDateString()}
+                              </td>
+                              <td className="p-3 font-mono font-bold text-[#5D87FF]">{s.monthYear}</td>
+                              <td className="p-3 font-bold text-neutral-900 dark:text-white">{s.driverName}</td>
+                              <td className="p-3 font-mono">{s.daysWorked} days</td>
+                              <td className="p-3 font-mono text-rose-500">-₹{s.advancesDeducted.toLocaleString("en-IN")}</td>
+                              <td className="p-3 font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                                ₹{s.netPaidAmount.toLocaleString("en-IN")}
+                              </td>
+                              <td className="p-3 font-mono text-[10px] uppercase font-bold text-slate-400">{s.paymentMode}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
               )}
+            </div>
+          )}
         </div>
 
         {/* ========================================================================= */}
@@ -4426,13 +4424,13 @@ export default function Home() {
                                       ₹{exp.amount.toLocaleString()}
                                     </div>
                                     <div className="text-[9px] text-neutral-400">
-                                      {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
+                                      {new Date(exp.timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                                     </div>
                                   </div>
                                 </div>
                               ))}
                             </div>
-                            
+
                             {driverExpenses.length > 0 && (
                               <div className="pt-1 text-center">
                                 <button
@@ -4471,17 +4469,17 @@ export default function Home() {
         )}
 
         {/* Selected Auto Profile Modal Overlay */}
-        
+
 
         {/* Premium PWA Install Sheet Modal Overlay */}
         {showInstallBanner && (
           <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-fade-in">
-            <div 
-              className="absolute inset-0 cursor-pointer" 
-              onClick={handleDismissBanner} 
+            <div
+              className="absolute inset-0 cursor-pointer"
+              onClick={handleDismissBanner}
               aria-label="Dismiss banner"
             />
-            
+
             <div className="bg-white dark:bg-[#1c1c1e] rounded-t-2xl sm:rounded-2xl overflow-hidden border border-neutral-200 dark:border-neutral-800 w-full max-w-md shadow-2xl relative z-10 animate-slide-up flex flex-col max-h-[90vh]">
               {/* Modal Header */}
               <div className="flex justify-between items-center p-4 border-b border-neutral-100 dark:border-neutral-800">
@@ -4600,13 +4598,13 @@ export default function Home() {
         {/* Edit Expense Modal */}
         {editingExpense && (
           <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
-            <div 
+            <div
               className="absolute inset-0 bg-black/75 backdrop-blur-md transition-opacity duration-300"
               onClick={() => setEditingExpense(null)}
             />
-            
+
             <div className="relative bg-[#ffffff] dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800/80 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
-              
+
               <div className="flex items-center gap-3.5 border-b border-[#edece9]/60 dark:border-neutral-800/60 pb-4">
                 <div className="p-2.5 rounded-xl bg-blue-100 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400">
                   <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -4634,22 +4632,20 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => setEditingExpense({ ...editingExpense, type: "EXPENSE", category: "fuel" })}
-                      className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
-                        editingExpense.type === "EXPENSE"
+                      className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${editingExpense.type === "EXPENSE"
                           ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
                           : "text-neutral-500 hover:text-neutral-700"
-                      }`}
+                        }`}
                     >
                       Expense
                     </button>
                     <button
                       type="button"
                       onClick={() => setEditingExpense({ ...editingExpense, type: "INCOME", category: "shadowfax" })}
-                      className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${
-                        editingExpense.type === "INCOME"
+                      className={`py-1.5 text-xs font-bold rounded-md transition-all cursor-pointer ${editingExpense.type === "INCOME"
                           ? "bg-white dark:bg-neutral-800 shadow-sm text-neutral-950 dark:text-white"
                           : "text-neutral-500 hover:text-neutral-700"
-                      }`}
+                        }`}
                     >
                       Income
                     </button>
@@ -4867,16 +4863,15 @@ Per order :- 5955
                             prev.map(t => (t.id === tx.id ? { ...t, selected: !t.selected } : t))
                           );
                         }}
-                        className={`p-3 rounded-xl border text-xs transition-all cursor-pointer flex items-start gap-3 select-none ${
-                          tx.selected
+                        className={`p-3 rounded-xl border text-xs transition-all cursor-pointer flex items-start gap-3 select-none ${tx.selected
                             ? "bg-[#13DEB9]/10 border-[#13DEB9]/40 text-neutral-850 dark:text-neutral-100"
                             : "bg-neutral-50/50 dark:bg-neutral-900/30 border-neutral-200/60 dark:border-neutral-800/60 opacity-60"
-                        }`}
+                          }`}
                       >
                         <input
                           type="checkbox"
                           checked={tx.selected}
-                          onChange={() => {}} // Handled by container onClick
+                          onChange={() => { }} // Handled by container onClick
                           className="mt-0.5 rounded text-[#13DEB9] focus:ring-[#13DEB9] cursor-pointer"
                         />
                         <div className="flex-1 space-y-1">
@@ -5003,7 +4998,7 @@ Per order :- 5955
         {customDialog.isOpen && (
           <div className="fixed inset-0 z-[2000] flex items-center justify-center p-4 animate-fade-in">
             {/* Glass backdrop */}
-            <div 
+            <div
               className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-300"
               onClick={() => {
                 if (customDialog.type === "alert") {
@@ -5011,16 +5006,15 @@ Per order :- 5955
                 }
               }}
             />
-            
+
             {/* Modal Card */}
             <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200 dark:border-neutral-800 rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl p-6 space-y-5 animate-slide-up text-neutral-800 dark:text-neutral-200">
               {/* Title & Icon */}
               <div className="flex items-center gap-3 pb-3 border-b border-[#edece9]/60 dark:border-neutral-800/60">
-                <div className={`p-2.5 rounded-xl ${
-                  customDialog.type === "confirm" 
-                    ? "bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-450" 
+                <div className={`p-2.5 rounded-xl ${customDialog.type === "confirm"
+                    ? "bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-450"
                     : "bg-blue-100 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400"
-                }`}>
+                  }`}>
                   {customDialog.type === "confirm" ? (
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
