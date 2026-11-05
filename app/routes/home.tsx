@@ -3,6 +3,7 @@ import { useLoaderData, Form, useNavigation, useActionData, useSubmit } from "re
 import type { Route } from "./+types/home";
 import { prisma, withDbRetry } from "../db.server";
 import { parseExpenseText, scanReceiptImage } from "../services/ai.server";
+import { initKeepAwake } from "../utils/keepAwake.server";
 import {
   parseKAmount,
   parseWhatsAppChat,
@@ -251,6 +252,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const session = await requireAdmin(request);
+  initKeepAwake();
   const isTempPass = session.get("isTempPass") || false;
   const permission = session.get("permission") || "FULL_ADMIN";
   const expiresAt = session.get("expiresAt") || null;
@@ -318,7 +320,7 @@ export async function action({ request }: ActionFunctionArgs) {
     "create_expense", "delete_expense", "create_user", "delete_user",
     "update_user_password", "create_auto", "delete_auto", "create_temp_pass",
     "revoke_temp_pass", "create_pending_payment", "collect_pending_payment",
-    "mark_pending_received", "delete_pending_payment", "settle_driver_salary",
+    "mark_pending_received", "delete_pending_payment", "create_borrowed_due", "repay_borrowed_payment", "settle_driver_salary",
     "create_weekly_earning", "import_whatsapp_transactions"
   ].includes(actionType || "");
 
@@ -1220,6 +1222,125 @@ export async function action({ request }: ActionFunctionArgs) {
     return { success: true, action: "delete_pending_payment" };
   }
 
+  if (actionType === "create_borrowed_due") {
+    const lenderName = formData.get("lenderName")?.toString()?.trim() || "Friend / Family";
+    const reason = formData.get("reason")?.toString()?.trim() || "Borrowed cash for cashflow";
+    const amount = parseFloat(formData.get("amount")?.toString() || "0") || 0;
+    const returnDateStr = formData.get("returnDate")?.toString()?.trim();
+    const logCashflow = formData.get("logCashflow") === "on" || formData.get("logCashflow") === "true";
+    const notes = formData.get("notes")?.toString()?.trim() || "";
+
+    if (amount <= 0) {
+      return { error: "Borrowed amount must be greater than 0." };
+    }
+
+    const returnDate = returnDateStr ? new Date(returnDateStr) : null;
+
+    const payment = await (prisma as any).pendingPayment.create({
+      data: {
+        title: reason,
+        clientName: lenderName,
+        totalAmount: amount,
+        receivedAmount: 0,
+        dueDate: returnDate,
+        status: "BORROWED",
+        notes: notes,
+      }
+    });
+
+    if (logCashflow) {
+      await prisma.expense.create({
+        data: {
+          amount: amount,
+          category: "other_income",
+          notes: `Borrowed from ${lenderName}: ${reason}${notes ? ` (${notes})` : ''}`,
+          senderName: lenderName,
+          type: "INCOME",
+          approved: true,
+        }
+      });
+    }
+
+    const waText = [
+      `*BORROWED CASH RECORDED*`,
+      `• Lender / Friend: ${lenderName}`,
+      `• Borrowed: ₹${amount.toLocaleString("en-IN")}`,
+      `• Reason: ${reason}`,
+      returnDateStr ? `• Return By: ${returnDateStr}` : null,
+      logCashflow ? `• Cashflow: Logged to Money IN` : null,
+      `🤝 STATUS: OWED / TO PAY BACK`
+    ].filter(Boolean).join("\n");
+
+    return {
+      success: true,
+      action: "create_borrowed_due",
+      payment,
+      whatsappTitle: "Borrowed Cash Entry",
+      whatsappText: waText,
+    };
+  }
+
+  if (actionType === "repay_borrowed_payment") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const amountToRepay = parseFloat(formData.get("amountToRepay")?.toString() || "0") || 0;
+    const repaymentNote = formData.get("note")?.toString()?.trim() || "";
+
+    if (id <= 0 || amountToRepay <= 0) {
+      return { error: "Please enter a valid repayment amount." };
+    }
+
+    const current = await (prisma as any).pendingPayment.findUnique({ where: { id } });
+    if (!current) {
+      return { error: "Borrowed debt record not found." };
+    }
+
+    const prevRepaid = current.receivedAmount || 0;
+    const newRepaid = Math.min(current.totalAmount, prevRepaid + amountToRepay);
+    const isFullyPaid = newRepaid >= current.totalAmount;
+    const newStatus = isFullyPaid ? "BORROWED_PAID" : "BORROWED_PARTIAL";
+    const remainingDue = Math.max(0, current.totalAmount - newRepaid);
+
+    const updated = await (prisma as any).pendingPayment.update({
+      where: { id },
+      data: {
+        receivedAmount: newRepaid,
+        status: newStatus,
+        notes: repaymentNote
+          ? (current.notes ? `${current.notes}\nRepaid ₹${amountToRepay} (${repaymentNote})` : `Repaid ₹${amountToRepay} (${repaymentNote})`)
+          : current.notes,
+      }
+    });
+
+    // Automatically log this repayment as an EXPENSE in Cashflow Ledger!
+    await prisma.expense.create({
+      data: {
+        amount: amountToRepay,
+        category: "other",
+        notes: `Loan / Friend Repayment to ${current.clientName} (${current.title})${repaymentNote ? ` - ${repaymentNote}` : ''}`,
+        senderName: session.get("userName") || "Founder",
+        type: "EXPENSE",
+        approved: true,
+      }
+    });
+
+    const waText = [
+      `*LOAN / FRIEND REPAYMENT*`,
+      `• Paid To: ${current.clientName}`,
+      `• Repaid Amount: ₹${amountToRepay.toLocaleString("en-IN")}`,
+      `• Remaining Owed: ₹${remainingDue.toLocaleString("en-IN")}`,
+      current.title ? `• Note: ${current.title}` : null,
+      `💸 STATUS: ${isFullyPaid ? "FULLY PAID & CLEARED ✅" : "PARTIALLY REPAID 🟡"}`
+    ].filter(Boolean).join("\n");
+
+    return {
+      success: true,
+      action: "repay_borrowed_payment",
+      payment: updated,
+      whatsappTitle: "Repayment Receipt Ready",
+      whatsappText: waText,
+    };
+  }
+
   if (actionType === "settle_driver_salary") {
     const driverName = formData.get("driverName")?.toString()?.trim() || "";
     const driverPhone = formData.get("driverPhone")?.toString()?.trim() || "";
@@ -1463,12 +1584,26 @@ export default function Home() {
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
   const [driverPassword, setDriverPassword] = useState("");
 
-  // Pending Payments & Receivables State
+  // Pending Payments & Borrowed Liabilities State
   const [showAddPendingModal, setShowAddPendingModal] = useState(false);
+  const [showAddBorrowedModal, setShowAddBorrowedModal] = useState(false);
+  const [repayingBorrowedItem, setRepayingBorrowedItem] = useState<any | null>(null);
+  const [pendingDueDirection, setPendingDueDirection] = useState<"RECEIVE" | "BORROWED">("RECEIVE");
+  const [pendingFilterStatus, setPendingFilterStatus] = useState<"ALL" | "PENDING" | "PAID">("ALL");
+
+  // Fast inputs with 'k' / '+000' shorthand support
+  const [pendingAmountInput, setPendingAmountInput] = useState("");
+  const [borrowedAmountInput, setBorrowedAmountInput] = useState("");
+  const [repayAmountInput, setRepayAmountInput] = useState("");
+  const [borrowedLender, setBorrowedLender] = useState("");
+  const [borrowedReason, setBorrowedReason] = useState("");
+  const [borrowedReturnDate, setBorrowedReturnDate] = useState("");
+  const [borrowedNotes, setBorrowedNotes] = useState("");
+  const [borrowedLogCashflow, setBorrowedLogCashflow] = useState(true);
+  const [repayNoteInput, setRepayNoteInput] = useState("");
   const [collectingPayment, setCollectingPayment] = useState<any | null>(null);
   const [collectAmount, setCollectAmount] = useState("");
   const [collectNotes, setCollectNotes] = useState("");
-  const [pendingFilterStatus, setPendingFilterStatus] = useState<"ALL" | "PENDING" | "PARTIAL" | "PAID">("ALL");
 
   // Driver Salaries & Advance Settlement State
   const [salaryMonthYear, setSalaryMonthYear] = useState<string>(new Date().toISOString().substring(0, 7));
@@ -1793,31 +1928,66 @@ export default function Home() {
     setEntityFilter("ALL");
   };
 
-  // Pending Dues Aggregates
-  const pendingDuesSummary = useMemo(() => {
-    let totalBilled = 0;
-    let totalCollected = 0;
-    let totalPending = 0;
-    let overdueCount = 0;
-    const now = new Date();
+  const isBorrowedItem = (p: any) => p.status?.startsWith("BORROWED") || (p.title || "").includes("[BORROWED]");
+
+  // Pending Dues & Borrowed Liabilities Aggregates
+  const duesSummary = useMemo(() => {
+    let totalToReceive = 0;
+    let totalReceived = 0;
+    let countToReceive = 0;
+
+    let totalBorrowedOwed = 0;
+    let totalBorrowedRepaid = 0;
+    let countBorrowed = 0;
 
     pendingPayments.forEach((p: any) => {
-      totalBilled += p.totalAmount || 0;
-      totalCollected += p.receivedAmount || 0;
-      const pending = Math.max(0, (p.totalAmount || 0) - (p.receivedAmount || 0));
-      totalPending += pending;
-      if (p.dueDate && new Date(p.dueDate) < now && p.status !== "PAID") {
-        overdueCount++;
+      const isBorrowed = isBorrowedItem(p);
+      const total = p.totalAmount || 0;
+      const receivedOrRepaid = p.receivedAmount || 0;
+      const remaining = Math.max(0, total - receivedOrRepaid);
+
+      if (isBorrowed) {
+        totalBorrowedOwed += remaining;
+        totalBorrowedRepaid += receivedOrRepaid;
+        if (remaining > 0) countBorrowed++;
+      } else {
+        totalToReceive += remaining;
+        totalReceived += receivedOrRepaid;
+        if (remaining > 0) countToReceive++;
       }
     });
 
-    return { totalBilled, totalCollected, totalPending, overdueCount };
+    return {
+      totalToReceive,
+      totalReceived,
+      countToReceive,
+      totalBorrowedOwed,
+      totalBorrowedRepaid,
+      countBorrowed,
+      totalPending: totalToReceive + totalBorrowedOwed,
+      totalCollected: totalReceived,
+    };
   }, [pendingPayments]);
 
+  const pendingDuesSummary = duesSummary;
+
   const filteredPendingPayments = useMemo(() => {
-    if (pendingFilterStatus === "ALL") return pendingPayments;
-    return pendingPayments.filter((p: any) => p.status === pendingFilterStatus);
-  }, [pendingPayments, pendingFilterStatus]);
+    return pendingPayments.filter((p: any) => {
+      const isBorrowed = isBorrowedItem(p);
+      if (pendingDueDirection === "RECEIVE") {
+        if (isBorrowed) return false;
+        if (pendingFilterStatus === "PENDING") return p.status !== "PAID";
+        if (pendingFilterStatus === "PAID") return p.status === "PAID";
+        return true;
+      } else {
+        // BORROWED
+        if (!isBorrowed) return false;
+        if (pendingFilterStatus === "PENDING") return p.status !== "BORROWED_PAID";
+        if (pendingFilterStatus === "PAID") return p.status === "BORROWED_PAID";
+        return true;
+      }
+    });
+  }, [pendingPayments, pendingDueDirection, pendingFilterStatus]);
 
   // Driver Salary Hub Live Reconciliation
   const driverSalaryReconciliation = useMemo(() => {
@@ -3545,143 +3715,327 @@ export default function Home() {
           {/* ========================================================================= */}
               {activeTab === "pending_dues" && (
                 <div className="animate-fade-in space-y-6">
-                  {/* Header & Add Button */}
+                  {/* Header & Add Buttons */}
                   <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                     <div>
                       <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
                         <span>🟡</span>
-                        <span>Pending Dues Tracker</span>
+                        <span>Pending Dues & Liabilities Tracker</span>
                       </h1>
                       <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                        Track pending client/vendor payments. Click <strong>"Mark as Received"</strong> to automatically record them into your Income Ledger.
+                        Track money clients owe you (Receivables) and cash borrowed from friends/family (To Pay Back).
                       </p>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={() => setShowAddPendingModal(true)}
-                        className="notion-btn text-xs px-4 py-2.5 font-bold flex items-center gap-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-xl shadow-sm transition-all cursor-pointer"
+                        className="notion-btn text-xs px-3.5 py-2.5 font-bold flex items-center gap-1.5 bg-[#13DEB9] hover:bg-[#0fbfa0] text-white rounded-xl shadow-sm transition-all cursor-pointer"
                       >
-                        <span>➕</span>
-                        <span>Add Pending Due</span>
+                        <span>🟢</span>
+                        <span>+ Add Client Due</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowAddBorrowedModal(true)}
+                        className="notion-btn text-xs px-3.5 py-2.5 font-bold flex items-center gap-1.5 bg-[#FA896B] hover:bg-[#e07153] text-white rounded-xl shadow-sm transition-all cursor-pointer"
+                      >
+                        <span>🤝</span>
+                        <span>+ Add Borrowed Money</span>
                       </button>
                     </div>
                   </div>
 
                   {/* Summary Metric Cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-amber-200/80 dark:border-amber-500/20 bg-amber-50/20 dark:bg-amber-500/5 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">🟡 Total Pending Amount</span>
-                      <span className="text-2xl font-extrabold font-mono text-amber-600 dark:text-amber-400">
-                        ₹{pendingDuesSummary.totalPending.toLocaleString("en-IN")}
+                    {/* Card 1: To Receive (Receivables) */}
+                    <div 
+                      onClick={() => setPendingDueDirection("RECEIVE")}
+                      className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-sm space-y-1.5 ${
+                        pendingDueDirection === "RECEIVE"
+                          ? "bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-500/40 ring-1 ring-emerald-500/30"
+                          : "bg-white dark:bg-[#1e293b] border-neutral-200/80 dark:border-slate-800 hover:border-emerald-500/30"
+                      }`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">
+                          🟢 Total To Receive (Bills & Dues)
+                        </span>
+                        {pendingDueDirection === "RECEIVE" && (
+                          <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-600 dark:text-emerald-400">
+                            Active Tab
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-2xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400 block">
+                        ₹{duesSummary.totalToReceive.toLocaleString("en-IN")}
+                      </span>
+                      <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block">
+                        {duesSummary.countToReceive} pending invoices (clients & vendors)
                       </span>
                     </div>
 
-                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-emerald-200/80 dark:border-emerald-500/20 bg-emerald-50/20 dark:bg-emerald-500/5 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-wider block">✅ Total Received & Cleared</span>
-                      <span className="text-2xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
-                        ₹{pendingDuesSummary.totalCollected.toLocaleString("en-IN")}
+                    {/* Card 2: Borrowed / To Pay Back */}
+                    <div 
+                      onClick={() => setPendingDueDirection("BORROWED")}
+                      className={`p-4 rounded-2xl border transition-all cursor-pointer shadow-sm space-y-1.5 ${
+                        pendingDueDirection === "BORROWED"
+                          ? "bg-rose-50/40 dark:bg-rose-950/20 border-rose-500/40 ring-1 ring-rose-500/30"
+                          : "bg-white dark:bg-[#1e293b] border-neutral-200/80 dark:border-slate-800 hover:border-rose-500/30"
+                      }`}
+                    >
+                      <div className="flex justify-between items-center">
+                        <span className="text-[11px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">
+                          🔴 Borrowed / To Pay Back
+                        </span>
+                        {pendingDueDirection === "BORROWED" && (
+                          <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-600 dark:text-rose-400">
+                            Active Tab
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-2xl font-extrabold font-mono text-rose-600 dark:text-rose-400 block">
+                        ₹{duesSummary.totalBorrowedOwed.toLocaleString("en-IN")}
+                      </span>
+                      <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block">
+                        {duesSummary.countBorrowed} active debts (friends, family & financiers)
                       </span>
                     </div>
 
-                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">📋 Total Records</span>
-                      <span className="text-2xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                        {pendingPayments.length}
+                    {/* Card 3: Cleared & Settled */}
+                    <div className="p-4 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-1.5">
+                      <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">
+                        ⚖️ Settled & Cleared Ledgers
+                      </span>
+                      <div className="flex items-center gap-3 font-mono font-bold text-sm">
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          +₹{duesSummary.totalReceived.toLocaleString("en-IN")} <span className="text-[10px] text-neutral-400 font-sans font-normal">received</span>
+                        </span>
+                        <span className="text-neutral-300 dark:text-slate-700">|</span>
+                        <span className="text-rose-500">
+                          -₹{duesSummary.totalBorrowedRepaid.toLocaleString("en-IN")} <span className="text-[10px] text-neutral-400 font-sans font-normal">repaid</span>
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-neutral-400 block">
+                        Net pending: ₹{(duesSummary.totalToReceive - duesSummary.totalBorrowedOwed).toLocaleString("en-IN")}
                       </span>
                     </div>
                   </div>
 
-                  {/* Status Filter Tabs */}
-                  <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl w-fit border border-neutral-200/60 dark:border-slate-700/50">
-                    {(["ALL", "PENDING", "PAID"] as const).map((st) => (
+                  {/* Direction Tabs & Status Filter */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                    {/* Two Clear Sub-Modes / Filter Tabs */}
+                    <div className="flex items-center gap-1.5 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl border border-neutral-200/60 dark:border-slate-700/50">
                       <button
-                        key={st}
                         type="button"
-                        onClick={() => setPendingFilterStatus(st)}
-                        className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-                          pendingFilterStatus === st
-                            ? "bg-white dark:bg-[#1e293b] text-neutral-900 dark:text-white shadow-sm"
+                        onClick={() => {
+                          setPendingDueDirection("RECEIVE");
+                          setPendingFilterStatus("ALL");
+                        }}
+                        className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                          pendingDueDirection === "RECEIVE"
+                            ? "bg-white dark:bg-[#1e293b] text-emerald-600 dark:text-emerald-400 shadow-sm"
                             : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
                         }`}
                       >
-                        {st === "ALL" ? "All Records" : st === "PENDING" ? "🟡 Pending Only" : "✅ Cleared / Done"}
+                        <span>🟢 To Receive (Bills & Dues)</span>
+                        {duesSummary.countToReceive > 0 && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-mono">
+                            {duesSummary.countToReceive}
+                          </span>
+                        )}
                       </button>
-                    ))}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPendingDueDirection("BORROWED");
+                          setPendingFilterStatus("ALL");
+                        }}
+                        className={`px-3.5 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                          pendingDueDirection === "BORROWED"
+                            ? "bg-white dark:bg-[#1e293b] text-rose-600 dark:text-rose-400 shadow-sm"
+                            : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                        }`}
+                      >
+                        <span>🔴 Borrowed / To Pay Back</span>
+                        {duesSummary.countBorrowed > 0 && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-500/15 text-rose-600 dark:text-rose-400 font-mono">
+                            {duesSummary.countBorrowed}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+
+                    {/* Secondary Status Filter Pills */}
+                    <div className="flex items-center gap-1 p-1 bg-neutral-100 dark:bg-slate-800/60 rounded-xl border border-neutral-200/60 dark:border-slate-700/50">
+                      {(["ALL", "PENDING", "PAID"] as const).map((st) => (
+                        <button
+                          key={st}
+                          type="button"
+                          onClick={() => setPendingFilterStatus(st)}
+                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                            pendingFilterStatus === st
+                              ? "bg-white dark:bg-[#1e293b] text-neutral-900 dark:text-white shadow-sm"
+                              : "text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200"
+                          }`}
+                        >
+                          {st === "ALL" ? "All" : st === "PENDING" ? (pendingDueDirection === "RECEIVE" ? "Pending Only" : "Unpaid Only") : "Cleared / Done"}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
-                  {/* Invoices List / Table */}
+                  {/* Invoices & Borrowed List */}
                   {filteredPendingPayments.length === 0 ? (
                     <div className="p-12 text-center border border-dashed border-neutral-200 dark:border-slate-800 rounded-2xl bg-white/40 dark:bg-slate-900/20 space-y-3">
-                      <span className="text-3xl block">✨</span>
+                      <span className="text-3xl block">{pendingDueDirection === "RECEIVE" ? "🟢" : "🤝"}</span>
                       <p className="text-sm font-semibold text-neutral-600 dark:text-neutral-300">
-                        No records found in this view!
+                        {pendingDueDirection === "RECEIVE" 
+                          ? "No client receivable dues found in this view!"
+                          : "No borrowed / friend debt records found in this view!"}
                       </p>
                       <p className="text-xs text-neutral-400">
-                        Click "Add Pending Due" above to add any money owed.
+                        {pendingDueDirection === "RECEIVE"
+                          ? "Click '+ Add Client Due' above to track pending client payments."
+                          : "Click '+ Add Borrowed Money' to track cash borrowed from friends or family."}
                       </p>
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {filteredPendingPayments.map((p: any) => {
-                        const isPaid = p.status === "PAID";
+                        const isBorrowed = isBorrowedItem(p);
+                        const isFullyPaid = isBorrowed ? p.status === "BORROWED_PAID" : p.status === "PAID";
+                        const isPartial = isBorrowed ? p.status === "BORROWED_PARTIAL" : p.status === "PARTIAL";
+                        const remainingDue = Math.max(0, (p.totalAmount || 0) - (p.receivedAmount || 0));
 
                         return (
                           <div
                             key={p.id}
                             className={`p-5 rounded-2xl bg-white dark:bg-[#1e293b] border shadow-sm space-y-4 hover:shadow-md transition-all flex flex-col justify-between ${
-                              isPaid
+                              isFullyPaid
                                 ? "border-emerald-500/30 bg-emerald-50/5 dark:bg-emerald-950/10"
+                                : isBorrowed
+                                ? "border-rose-500/30 hover:border-rose-500/60 bg-rose-50/5 dark:bg-rose-950/5"
                                 : "border-amber-500/30 hover:border-amber-500/60"
                             }`}
                           >
                             <div className="space-y-3">
+                              {/* Header info */}
                               <div className="flex justify-between items-start gap-2">
                                 <div className="space-y-1">
-                                  <h3 className="text-base font-bold text-neutral-900 dark:text-white">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-neutral-100 dark:bg-slate-800 text-neutral-700 dark:text-neutral-300">
+                                      {isBorrowed ? `👤 ${p.clientName || 'Friend/Family'}` : `🏢 ${p.clientName || 'Client'}`}
+                                    </span>
+                                    {isBorrowed && (
+                                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400">
+                                        Borrowed
+                                      </span>
+                                    )}
+                                  </div>
+                                  <h3 className="text-base font-bold text-neutral-900 dark:text-white pt-1">
                                     {p.title}
                                   </h3>
                                   {p.notes && p.notes !== p.title && (
-                                    <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                                    <p className="text-xs text-neutral-500 dark:text-neutral-400 whitespace-pre-line">
                                       {p.notes}
                                     </p>
                                   )}
-                                  <span className="text-[11px] font-mono text-neutral-400 block">
-                                    📅 Added on {new Date(p.createdAt).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}
-                                  </span>
+                                  <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-neutral-400 pt-0.5">
+                                    <span>📅 Added: {new Date(p.createdAt).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}</span>
+                                    {p.dueDate && (
+                                      <span className={new Date(p.dueDate) < new Date() && !isFullyPaid ? "text-rose-500 font-bold" : ""}>
+                                        🎯 Return by: {new Date(p.dueDate).toLocaleDateString("en-IN", { month: "short", day: "numeric", year: "numeric" })}
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
 
                                 <span
                                   className={`text-[10px] font-extrabold uppercase font-mono px-2.5 py-1 rounded-full border shrink-0 ${
-                                    isPaid
+                                    isFullyPaid
                                       ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                                      : isPartial
+                                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
+                                      : isBorrowed
+                                      ? "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/20"
                                       : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20"
                                   }`}
                                 >
-                                  {isPaid ? "✅ Cleared / Done" : "🟡 Pending"}
+                                  {isFullyPaid 
+                                    ? (isBorrowed ? "✅ Fully Repaid" : "✅ Cleared / Done") 
+                                    : isPartial
+                                    ? `🟡 Partial (₹${remainingDue.toLocaleString("en-IN")} left)`
+                                    : (isBorrowed ? "🔴 To Pay Back" : "🟡 Pending")}
                                 </span>
                               </div>
 
-                              {/* Amount Display */}
-                              <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 flex justify-between items-center">
-                                <span className="text-xs font-semibold text-neutral-500">
-                                  {isPaid ? "Received Amount" : "Pending Due Amount"}
-                                </span>
-                                <span className={`text-xl font-extrabold font-mono ${isPaid ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
-                                  ₹{p.totalAmount.toLocaleString("en-IN")}
-                                </span>
+                              {/* Amount Breakdown Card */}
+                              <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 space-y-2">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-xs font-semibold text-neutral-500">
+                                    {isBorrowed ? "Total Borrowed" : "Total Billed / Due"}
+                                  </span>
+                                  <span className="text-sm font-bold font-mono text-neutral-700 dark:text-neutral-300">
+                                    ₹{p.totalAmount.toLocaleString("en-IN")}
+                                  </span>
+                                </div>
+
+                                {(p.receivedAmount || 0) > 0 && (
+                                  <div className="flex justify-between items-center text-xs">
+                                    <span className="text-neutral-500">
+                                      {isBorrowed ? "Repaid So Far" : "Collected So Far"}
+                                    </span>
+                                    <span className="font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                                      ₹{(p.receivedAmount || 0).toLocaleString("en-IN")}
+                                    </span>
+                                  </div>
+                                )}
+
+                                <div className="pt-1.5 border-t border-neutral-200/60 dark:border-slate-800 flex justify-between items-center">
+                                  <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200">
+                                    {isFullyPaid 
+                                      ? "Final Status" 
+                                      : isBorrowed 
+                                      ? "Remaining Owed to Friend" 
+                                      : "Remaining to Collect"}
+                                  </span>
+                                  <span className={`text-lg font-extrabold font-mono ${
+                                    isFullyPaid 
+                                      ? "text-emerald-600 dark:text-emerald-400" 
+                                      : isBorrowed 
+                                      ? "text-rose-600 dark:text-rose-400" 
+                                      : "text-amber-600 dark:text-amber-400"
+                                  }`}>
+                                    {isFullyPaid ? "CLEARED" : `₹${remainingDue.toLocaleString("en-IN")}`}
+                                  </span>
+                                </div>
                               </div>
                             </div>
 
-                            {/* Card Footer: 1-Click Action & Delete */}
+                            {/* Card Footer Actions */}
                             <div className="pt-3 border-t border-neutral-100 dark:border-slate-800/80 flex justify-between items-center text-xs">
                               <div>
-                                {isPaid ? (
+                                {isFullyPaid ? (
                                   <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                                     <span>✨</span>
-                                    <span>Added to Income Ledger</span>
+                                    <span>{isBorrowed ? "Repayment Logged to Expenses" : "Recorded in Income Ledger"}</span>
                                   </span>
+                                ) : isBorrowed ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRepayingBorrowedItem(p);
+                                      setRepayAmountInput(remainingDue.toString());
+                                      setRepayNoteInput("");
+                                    }}
+                                    className="px-3.5 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                                  >
+                                    <span>💸</span>
+                                    <span>Pay Back (₹{remainingDue.toLocaleString("en-IN")})</span>
+                                  </button>
                                 ) : (
                                   <Form method="post">
                                     <input type="hidden" name="_action" value="mark_pending_received" />
@@ -3711,7 +4065,7 @@ export default function Home() {
                                 <button
                                   type="submit"
                                   className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-all cursor-pointer"
-                                  title="Delete invoice"
+                                  title="Delete record"
                                 >
                                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -3962,18 +4316,18 @@ export default function Home() {
         </div>
 
         {/* ========================================================================= */}
-        {/* MODAL: ADD PENDING DUE */}
+        {/* MODAL 1: ADD PENDING CLIENT DUE (RECEIVABLE) */}
         {/* ========================================================================= */}
         {showAddPendingModal && (
           <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
             <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setShowAddPendingModal(false)} />
             <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
               <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
-                <h3 className="text-base font-bold flex items-center gap-2">
-                  <span>🟡</span>
-                  <span>Add Pending Due</span>
+                <h3 className="text-base font-bold flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                  <span>🟢</span>
+                  <span>Add Client Pending Due</span>
                 </h3>
-                <button type="button" onClick={() => setShowAddPendingModal(false)} className="text-neutral-400 hover:text-neutral-600">✕</button>
+                <button type="button" onClick={() => setShowAddPendingModal(false)} className="text-neutral-400 hover:text-neutral-600 cursor-pointer">✕</button>
               </div>
 
               <Form method="post" onSubmit={() => setShowAddPendingModal(false)} className="space-y-4 text-xs">
@@ -3981,41 +4335,76 @@ export default function Home() {
 
                 <div className="space-y-1.5">
                   <label className="font-bold text-neutral-700 dark:text-neutral-300">
-                    💰 Pending Amount (₹) <span className="text-rose-500">*</span>
+                    Client / Company Name <span className="text-rose-500">*</span>
                   </label>
                   <input
-                    type="number"
-                    name="amount"
+                    type="text"
+                    name="clientName"
                     required
-                    min="1"
-                    step="any"
                     autoFocus
-                    placeholder="e.g. 15000"
-                    className="notion-input w-full p-3 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-amber-600 dark:text-amber-400"
+                    placeholder="e.g. Shadowfax, Flipkart, Factory A"
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-semibold text-sm"
                   />
                 </div>
 
                 <div className="space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                      Pending Due Amount (₹ INR) <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[10px] text-neutral-400">Type "15k" or "+000"</span>
+                  </div>
+                  <div className="relative flex items-center">
+                    <span className="absolute left-3 text-neutral-400 font-bold text-sm pointer-events-none select-none">₹</span>
+                    <input
+                      type="text"
+                      name="amount"
+                      required
+                      placeholder="e.g. 15,000 or 15k"
+                      value={pendingAmountInput}
+                      onChange={(e) => setPendingAmountInput(e.target.value)}
+                      onBlur={() => {
+                        const parsed = parseKAmount(pendingAmountInput);
+                        if (parsed > 0) setPendingAmountInput(parsed.toString());
+                      }}
+                      style={{ paddingLeft: "34px", paddingRight: "64px" }}
+                      className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-emerald-600 dark:text-emerald-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const curr = parseKAmount(pendingAmountInput);
+                        if (curr > 0) setPendingAmountInput((curr * 1000).toString());
+                        else if (pendingAmountInput && !isNaN(Number(pendingAmountInput))) setPendingAmountInput(pendingAmountInput + "000");
+                      }}
+                      className="absolute right-1.5 px-2 py-1 text-[10px] font-extrabold rounded bg-[#13DEB9]/15 hover:bg-[#13DEB9]/25 text-[#13DEB9] border border-[#13DEB9]/30 transition-all cursor-pointer"
+                    >
+                      +000
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
                   <label className="font-bold text-neutral-700 dark:text-neutral-300">
-                    📝 Note / Title <span className="text-rose-500">*</span>
+                    Invoice / Bill Title <span className="text-rose-500">*</span>
                   </label>
                   <input
                     type="text"
                     name="title"
                     required
-                    placeholder="e.g. Factory A remaining payment"
-                    className="notion-input w-full p-3 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
+                    placeholder="e.g. October 45-Day Deliveries Settlement"
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
                   />
                 </div>
 
                 <div className="space-y-1.5">
                   <label className="font-medium text-neutral-400">
-                    Additional Details (Optional)
+                    Additional Details / Notes (Optional)
                   </label>
                   <textarea
                     name="notes"
                     rows={2}
-                    placeholder="Any extra details or contact info..."
+                    placeholder="Any extra details, invoice number, or reminder dates..."
                     className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none text-xs"
                   />
                 </div>
@@ -4030,9 +4419,290 @@ export default function Home() {
                   </button>
                   <button
                     type="submit"
-                    className="flex-1 py-2.5 rounded-xl bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold shadow-sm transition-all cursor-pointer"
+                    className="flex-1 py-2.5 rounded-xl bg-[#13DEB9] hover:bg-[#0fbfa0] text-white font-bold shadow-sm transition-all cursor-pointer"
                   >
-                    ➕ Save Pending Due
+                    🟢 Save Client Due
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL 2: ADD BORROWED MONEY FROM FRIEND / FAMILY / BYAAJ */}
+        {/* ========================================================================= */}
+        {showAddBorrowedModal && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setShowAddBorrowedModal(false)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <div>
+                  <h3 className="text-base font-bold flex items-center gap-2 text-rose-600 dark:text-rose-400">
+                    <span>🤝</span>
+                    <span>Add Borrowed Money (Friend / Family)</span>
+                  </h3>
+                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
+                    Track money borrowed for cashflow. You can pay back in full or partial anytime.
+                  </p>
+                </div>
+                <button type="button" onClick={() => setShowAddBorrowedModal(false)} className="text-neutral-400 hover:text-neutral-600 cursor-pointer">✕</button>
+              </div>
+
+              <Form method="post" onSubmit={() => setShowAddBorrowedModal(false)} className="space-y-3.5 text-xs">
+                <input type="hidden" name="_action" value="create_borrowed_due" />
+
+                <div className="space-y-1.5">
+                  <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                    Lender / Friend Name <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="lenderName"
+                    required
+                    autoFocus
+                    value={borrowedLender}
+                    onChange={(e) => setBorrowedLender(e.target.value)}
+                    placeholder="e.g. Rahul (Friend), Papa, Sharma Ji (Byaaj)"
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-semibold text-sm"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                      Amount Borrowed (₹ INR) <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[10px] text-neutral-400">Type "20k" or "+000"</span>
+                  </div>
+                  <div className="relative flex items-center">
+                    <span className="absolute left-3 text-neutral-400 font-bold text-sm pointer-events-none select-none">₹</span>
+                    <input
+                      type="text"
+                      name="amount"
+                      required
+                      placeholder="e.g. 20,000 or 20k"
+                      value={borrowedAmountInput}
+                      onChange={(e) => setBorrowedAmountInput(e.target.value)}
+                      onBlur={() => {
+                        const parsed = parseKAmount(borrowedAmountInput);
+                        if (parsed > 0) setBorrowedAmountInput(parsed.toString());
+                      }}
+                      style={{ paddingLeft: "34px", paddingRight: "64px" }}
+                      className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-rose-600 dark:text-rose-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const curr = parseKAmount(borrowedAmountInput);
+                        if (curr > 0) setBorrowedAmountInput((curr * 1000).toString());
+                        else if (borrowedAmountInput && !isNaN(Number(borrowedAmountInput))) setBorrowedAmountInput(borrowedAmountInput + "000");
+                      }}
+                      className="absolute right-1.5 px-2 py-1 text-[10px] font-extrabold rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-600 dark:text-rose-400 border border-rose-500/30 transition-all cursor-pointer"
+                    >
+                      +000
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                    Reason / Purpose <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="reason"
+                    required
+                    value={borrowedReason}
+                    onChange={(e) => setBorrowedReason(e.target.value)}
+                    placeholder="e.g. CNG cashflow & emergency auto tyre replacement"
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-sm"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-medium text-neutral-600 dark:text-neutral-400">
+                    Expected Return Date (Optional)
+                  </label>
+                  <input
+                    type="date"
+                    name="returnDate"
+                    value={borrowedReturnDate}
+                    onChange={(e) => setBorrowedReturnDate(e.target.value)}
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-semibold text-xs cursor-pointer"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-medium text-neutral-400">
+                    Notes / Remarks (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    name="notes"
+                    value={borrowedNotes}
+                    onChange={(e) => setBorrowedNotes(e.target.value)}
+                    placeholder="e.g. Promised to return after Shadowfax payout"
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none text-xs"
+                  />
+                </div>
+
+                {/* Log to Cashflow Income Checkbox */}
+                <label className="flex items-start gap-2.5 p-3 rounded-xl bg-neutral-50 dark:bg-slate-900/80 border border-neutral-200/80 dark:border-slate-800 cursor-pointer hover:bg-neutral-100/60 transition-colors">
+                  <input
+                    type="checkbox"
+                    name="logCashflow"
+                    checked={borrowedLogCashflow}
+                    onChange={(e) => setBorrowedLogCashflow(e.target.checked)}
+                    className="mt-0.5 rounded text-[#5D87FF] focus:ring-0 cursor-pointer"
+                  />
+                  <div className="space-y-0.5">
+                    <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200 block">
+                      Log this borrowed cash as Money IN on Cashflow Ledger today
+                    </span>
+                    <span className="text-[11px] text-neutral-500 dark:text-neutral-400 block leading-tight">
+                      Records an INCOME entry so your cash-in-hand matches your wallet.
+                    </span>
+                  </div>
+                </label>
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddBorrowedModal(false)}
+                    className="flex-1 py-2.5 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold hover:bg-neutral-200 transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-[#FA896B] hover:bg-[#e07153] text-white font-bold shadow-sm transition-all cursor-pointer"
+                  >
+                    🤝 Save Borrowed Debt
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL 3: REPAY BORROWED MONEY (PARTIAL OR FULL) */}
+        {/* ========================================================================= */}
+        {repayingBorrowedItem && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setRepayingBorrowedItem(null)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <div>
+                  <h3 className="text-base font-bold flex items-center gap-2 text-rose-600 dark:text-rose-400">
+                    <span>💸</span>
+                    <span>Pay Back Friend / Family</span>
+                  </h3>
+                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
+                    Lender: <strong>{repayingBorrowedItem.clientName}</strong> ({repayingBorrowedItem.title})
+                  </p>
+                </div>
+                <button type="button" onClick={() => setRepayingBorrowedItem(null)} className="text-neutral-400 hover:text-neutral-600 cursor-pointer">✕</button>
+              </div>
+
+              {/* Debt Snapshot */}
+              <div className="p-3.5 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 space-y-1.5 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-neutral-500">Total Borrowed:</span>
+                  <span className="font-mono font-bold">₹{repayingBorrowedItem.totalAmount.toLocaleString("en-IN")}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-neutral-500">Already Repaid:</span>
+                  <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                    ₹{(repayingBorrowedItem.receivedAmount || 0).toLocaleString("en-IN")}
+                  </span>
+                </div>
+                <div className="pt-1.5 border-t border-neutral-200/60 dark:border-slate-800 flex justify-between items-center">
+                  <span className="font-bold text-neutral-800 dark:text-neutral-200">Current Balance Owed:</span>
+                  <span className="font-mono font-extrabold text-base text-rose-600 dark:text-rose-400">
+                    ₹{Math.max(0, repayingBorrowedItem.totalAmount - (repayingBorrowedItem.receivedAmount || 0)).toLocaleString("en-IN")}
+                  </span>
+                </div>
+              </div>
+
+              <Form method="post" onSubmit={() => setRepayingBorrowedItem(null)} className="space-y-4 text-xs">
+                <input type="hidden" name="_action" value="repay_borrowed_payment" />
+                <input type="hidden" name="id" value={repayingBorrowedItem.id} />
+
+                <div className="space-y-1.5">
+                  <div className="flex justify-between items-center">
+                    <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                      Amount to Pay Back (₹ INR) <span className="text-rose-500">*</span>
+                    </label>
+                    <span className="text-[10px] text-neutral-400">Full or Partial</span>
+                  </div>
+                  <div className="relative flex items-center">
+                    <span className="absolute left-3 text-neutral-400 font-bold text-sm pointer-events-none select-none">₹</span>
+                    <input
+                      type="text"
+                      name="amountToRepay"
+                      required
+                      autoFocus
+                      value={repayAmountInput}
+                      onChange={(e) => setRepayAmountInput(e.target.value)}
+                      onBlur={() => {
+                        const parsed = parseKAmount(repayAmountInput);
+                        if (parsed > 0) setRepayAmountInput(parsed.toString());
+                      }}
+                      style={{ paddingLeft: "34px", paddingRight: "64px" }}
+                      className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-lg text-emerald-600 dark:text-emerald-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const curr = parseKAmount(repayAmountInput);
+                        if (curr > 0) setRepayAmountInput((curr * 1000).toString());
+                        else if (repayAmountInput && !isNaN(Number(repayAmountInput))) setRepayAmountInput(repayAmountInput + "000");
+                      }}
+                      className="absolute right-1.5 px-2 py-1 text-[10px] font-extrabold rounded bg-[#13DEB9]/15 hover:bg-[#13DEB9]/25 text-[#13DEB9] border border-[#13DEB9]/30 transition-all cursor-pointer"
+                    >
+                      +000
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-neutral-400">
+                    Remaining balance: ₹{Math.max(0, repayingBorrowedItem.totalAmount - (repayingBorrowedItem.receivedAmount || 0)).toLocaleString("en-IN")}. You can repay in full or make a partial payment.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-bold text-neutral-700 dark:text-neutral-300">
+                    Payment Method / Note (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    name="note"
+                    value={repayNoteInput}
+                    onChange={(e) => setRepayNoteInput(e.target.value)}
+                    placeholder="e.g. Paid via PhonePe UPI / Cash"
+                    className="notion-input w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-medium text-xs"
+                  />
+                </div>
+
+                <div className="p-3 rounded-xl bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-800/40 text-[11px] text-amber-800 dark:text-amber-300 flex items-start gap-2">
+                  <span>⚡</span>
+                  <span>This payment will automatically log an <strong>Expense</strong> in your Cashflow Ledger and generate a short WhatsApp receipt.</span>
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRepayingBorrowedItem(null)}
+                    className="flex-1 py-2.5 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold hover:bg-neutral-200 transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold shadow-sm transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  >
+                    <span>💸</span>
+                    <span>Confirm Pay Back</span>
                   </button>
                 </div>
               </Form>

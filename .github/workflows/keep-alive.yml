@@ -1,0 +1,24 @@
+name: Render 24/7 Keep-Alive Cron
+
+on:
+  schedule:
+    # Trigger every 14 minutes (Render spins down after 15 minutes of inactivity)
+    - cron: "*/14 * * * *"
+  workflow_dispatch:
+
+jobs:
+  keep-awake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Dreamline Logistics /ping endpoint
+        run: |
+          echo "Pinging Dreamline Logistics at $(date -u)"
+          STATUS=$(curl -s -o response.json -w "%{http_code}" https://dreamline-logistics.onrender.com/ping)
+          echo "HTTP Status Code: $STATUS"
+          cat response.json
+          if [ "$STATUS" -ne 200 ]; then
+            echo "::warning::Received non-200 status code: $STATUS"
+          else
+            echo "Instance is active and awake!"
+          fi
+

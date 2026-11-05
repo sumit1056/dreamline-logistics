@@ -6,4 +6,5 @@ export default [
   route("share-target", "routes/share-target.tsx"),
   route("api/chat-stream", "routes/api.chat-stream.ts"),
   route("api/receipt", "routes/api.receipt.ts"),
+  route("ping", "routes/ping.ts"),
 ] satisfies RouteConfig;
