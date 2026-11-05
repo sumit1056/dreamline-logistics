@@ -6,8 +6,8 @@ import { getSession, loginAdmin, logoutAdmin, loginWithTempPass } from "../sessi
 // Page metadata
 export function meta() {
   return [
-    { title: "Secure Login - Dreamline Logistics" },
-    { name: "description", content: "Super secure administrative console gateway." },
+    { title: "Sign In - Dreamline Logistics" },
+    { name: "description", content: "Sign in to Dreamline Logistics Daily Hisaab & Cashflow." },
   ];
 }
 
@@ -95,43 +95,46 @@ export default function LoginRoute() {
 
   return (
     <div className="min-h-screen relative flex items-center justify-center bg-[#f8f9fa] dark:bg-[#121212] overflow-hidden px-4 select-none">
-      {/* Dynamic Aesthetic Background Glow Circles */}
-      <div className="absolute top-[-10%] left-[-10%] w-[50%] aspect-square rounded-full bg-blue-500/10 dark:bg-blue-600/5 blur-[120px] pointer-events-none animate-pulse" style={{ animationDuration: "12s" }} />
-      <div className="absolute bottom-[-10%] right-[-10%] w-[50%] aspect-square rounded-full bg-emerald-500/10 dark:bg-emerald-600/5 blur-[120px] pointer-events-none animate-pulse" style={{ animationDuration: "16s" }} />
+      {/* Subtle Background Ambience */}
+      <div className="absolute top-[-10%] left-[-10%] w-[40%] aspect-square rounded-full bg-blue-500/5 dark:bg-blue-600/5 blur-[100px] pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-10%] w-[40%] aspect-square rounded-full bg-emerald-500/5 dark:bg-emerald-600/5 blur-[100px] pointer-events-none" />
 
       <div className="w-full max-w-[420px] z-10">
         {/* Logo and Greeting Header */}
         <div className="text-center mb-8 flex flex-col items-center">
-          <div className="w-16 h-16 rounded-2xl bg-white dark:bg-neutral-900 flex items-center justify-center shadow-2xl shadow-blue-500/10 mb-4 transition-transform hover:scale-105 duration-300 p-2 border border-neutral-100 dark:border-neutral-800">
+          <div className="w-16 h-16 rounded-2xl bg-white dark:bg-neutral-900 flex items-center justify-center shadow-xl mb-4 transition-transform hover:scale-105 duration-200 p-2 border border-neutral-150 dark:border-neutral-800">
             <img src="/logo.png" alt="Dreamline Logo" className="w-full h-full object-contain rounded-xl" />
           </div>
           <h1 className="text-2xl font-extrabold tracking-tight text-neutral-950 dark:text-neutral-50 font-sans">
             Dreamline Logistics
           </h1>
+          <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+            Daily Hisaab & Cashflow Management
+          </p>
         </div>
 
-        {/* Glassmorphic Login Form Card */}
-        <div className="bg-white/70 dark:bg-[#1a1a1a]/70 backdrop-blur-xl border border-neutral-200/80 dark:border-neutral-800/80 shadow-2xl rounded-3xl p-8 space-y-6">
+        {/* Clean Login Form Card */}
+        <div className="bg-white/80 dark:bg-[#1a1a1a]/80 backdrop-blur-xl border border-neutral-200/80 dark:border-neutral-800/80 shadow-xl rounded-2xl p-7 space-y-5">
           <div className="space-y-1">
-            <h2 className="text-lg font-bold text-neutral-900 dark:text-white">
-              Identity Verification
+            <h2 className="text-base font-bold text-neutral-900 dark:text-white">
+              Sign In
             </h2>
           </div>
 
           {/* Expired pass alert banner */}
           {loaderData?.isExpired && (
-            <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex items-start gap-3 animate-fade-in">
-              <span className="text-base">⌛</span>
+            <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-start gap-2.5 animate-fade-in">
+              <span className="text-sm">⌛</span>
               <span className="text-xs font-semibold text-amber-700 dark:text-amber-300 leading-tight">
-                Your temporary guest access pass has expired or been revoked. Please ask the admin for a new pass link.
+                Your temporary guest access pass has expired or been revoked.
               </span>
             </div>
           )}
 
           {/* Secure credentials warning error alert banner */}
           {errorMessage && errorVisible && (
-            <div className="p-4 bg-rose-500/10 dark:bg-rose-500/5 border border-rose-500/20 rounded-2xl flex items-start gap-3 animate-headShake">
-              <svg className="w-5 h-5 text-rose-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="p-3.5 bg-rose-500/10 dark:bg-rose-500/5 border border-rose-500/20 rounded-xl flex items-start gap-2.5 animate-headShake">
+              <svg className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
               <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 leading-tight">
@@ -143,7 +146,7 @@ export default function LoginRoute() {
           <Form method="post" className="space-y-4">
             {/* Username Input */}
             <div className="space-y-1">
-              <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+              <label className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
                 Username
               </label>
               <div className="relative">
@@ -153,7 +156,7 @@ export default function LoginRoute() {
                   required
                   autoFocus
                   placeholder="Enter username"
-                  className="w-full text-sm font-semibold border border-neutral-200 dark:border-neutral-800 rounded-xl px-4 py-3 bg-white/50 dark:bg-[#121212]/50 text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
+                  className="w-full text-sm font-semibold border border-neutral-200 dark:border-neutral-800 rounded-xl px-4 py-2.5 bg-white/50 dark:bg-[#121212]/50 text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
                 />
                 <div className="absolute right-4 top-1/2 -translate-y-1/2 text-neutral-400 pointer-events-none">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -165,7 +168,7 @@ export default function LoginRoute() {
 
             {/* Password Input */}
             <div className="space-y-1">
-              <label className="text-xs font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
+              <label className="text-[11px] font-bold text-neutral-500 dark:text-neutral-400 uppercase tracking-wider">
                 Password
               </label>
               <div className="relative">
@@ -174,7 +177,7 @@ export default function LoginRoute() {
                   name="password"
                   required
                   placeholder="Enter password"
-                  className="w-full text-sm font-mono border border-neutral-200 dark:border-neutral-800 rounded-xl px-4 py-3 bg-white/50 dark:bg-[#121212]/50 text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
+                  className="w-full text-sm font-mono border border-neutral-200 dark:border-neutral-800 rounded-xl px-4 py-2.5 bg-white/50 dark:bg-[#121212]/50 text-neutral-900 dark:text-white placeholder:text-neutral-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-all"
                 />
                 <button
                   type="button"
@@ -200,7 +203,7 @@ export default function LoginRoute() {
               <button
                 type="submit"
                 disabled={isSubmitting}
-                className="w-full py-3.5 bg-neutral-950 dark:bg-white text-white dark:text-neutral-950 font-bold text-sm rounded-xl hover:shadow-xl hover:scale-[1.01] active:scale-[0.99] transition-all cursor-pointer select-none flex items-center justify-center gap-2"
+                className="w-full py-3 bg-neutral-950 dark:bg-white text-white dark:text-neutral-950 font-bold text-sm rounded-xl hover:shadow-lg transition-all cursor-pointer select-none flex items-center justify-center gap-2"
               >
                 {isSubmitting ? (
                   <>
@@ -208,10 +211,10 @@ export default function LoginRoute() {
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                     </svg>
-                    <span>Verifying Access...</span>
+                    <span>Signing in...</span>
                   </>
                 ) : (
-                  <span>Verify Identity</span>
+                  <span>Sign In</span>
                 )}
               </button>
             </div>

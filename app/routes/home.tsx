@@ -2,7 +2,6 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { useLoaderData, Form, useNavigation, useActionData, useSubmit } from "react-router";
 import type { Route } from "./+types/home";
 import { prisma, withDbRetry } from "../db.server";
-import { parseExpenseText, scanReceiptImage } from "../services/ai.server";
 import { initKeepAwake } from "../utils/keepAwake.server";
 import {
   parseKAmount,
@@ -32,57 +31,10 @@ const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December"
 ];
 
-// High-performance canvas-based client-side image compression
-function compressImage(file: File): Promise<string> {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const MAX_WIDTH = 1024;
-        const MAX_HEIGHT = 1024;
-        let width = img.width;
-        let height = img.height;
-
-        if (width > height) {
-          if (width > MAX_WIDTH) {
-            height = Math.round((height * MAX_WIDTH) / width);
-            width = MAX_WIDTH;
-          }
-        } else {
-          if (height > MAX_HEIGHT) {
-            width = Math.round((width * MAX_HEIGHT) / height);
-            height = MAX_HEIGHT;
-          }
-        }
-
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          resolve(canvas.toDataURL("image/jpeg", 0.7));
-        } else {
-          resolve(event.target?.result as string);
-        }
-      };
-      img.onerror = () => {
-        resolve(event.target?.result as string);
-      };
-      img.src = event.target?.result as string;
-    };
-    reader.onerror = () => {
-      resolve("");
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 export function meta({}: Route.MetaArgs) {
   return [
-    { title: "Brain - Logistics Control" },
-    { name: "description", content: "Notion-styled premium Logistics Entry & Analytics Platform" },
+    { title: "Dreamline Logistics" },
+    { name: "description", content: "Daily Hisaab & Cashflow Management" },
   ];
 }
 
@@ -91,166 +43,6 @@ import { requireAdmin, hashPassword } from "../session.server";
 
 // Server Loader - Parallelized database queries (cuts Neon cloud DB lag by 66%)
 export async function loader({ request }: LoaderFunctionArgs) {
-  const url = new URL(request.url);
-  const processSharedIdsStr = url.searchParams.get("processSharedIds");
-
-  if (processSharedIdsStr) {
-    // Authenticate the user on GET (where session cookies are sent correctly)
-    await requireAdmin(request);
-
-    const ids = processSharedIdsStr.split(",").map(id => parseInt(id)).filter(id => !isNaN(id));
-    if (ids.length > 0) {
-      try {
-        const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-          throw new Error("GEMINI_API_KEY not configured in backend .env");
-        }
-
-        // Fetch the temporary expenses
-        const tempExpenses = await prisma.expense.findMany({
-          where: { id: { in: ids }, category: "shared_temp" }
-        });
-
-        const MODEL_CHAIN = [
-          "gemini-2.5-flash",
-          "gemini-2.0-flash",
-          "gemini-2.0-flash-lite",
-        ];
-
-        const scanReceipt = async (imageUrl: string) => {
-          const prompt = `
-            Analyze this fuel pump / service receipt image. Extract operational logistics details:
-            - amount: (number) The total amount paid in Rupees/INR.
-            - vehicle: (string or null) The vehicle plate/license number if printed or hand-written on the slip (e.g. MH-12-PQ-4567), otherwise null.
-            - senderName: (string or null) The driver's name if printed or hand-written on the slip (e.g. Amit Sharma), otherwise null.
-            - notes: (string) A clean description of the transaction (e.g. "CNG Fuel refill", "Diesel fuel refill", "Auto Servicing").
-            - date: (string or null) The date/time printed on the receipt in ISO 8601 UTC format, or null if not readable.
-
-            Return ONLY a valid, raw JSON object with these fields, for example:
-            {"amount": 1200, "vehicle": "MH-12-PQ-4567", "senderName": "Amit Sharma", "notes": "CNG Fuel refill", "date": "2026-07-13T10:30:00Z"}
-            Do not include markdown code block formatting (like \`\`\`json or \`\`\`).
-          `;
-
-          const base64Data = imageUrl.split(",")[1] || imageUrl;
-          const mimeType = imageUrl.split(";")[0]?.split(":")[1] || "image/jpeg";
-
-          const requestBody = JSON.stringify({
-            contents: [
-              {
-                parts: [
-                  { text: prompt },
-                  {
-                    inlineData: {
-                      mimeType: mimeType,
-                      data: base64Data
-                    }
-                  }
-                ]
-              }
-            ]
-          });
-
-          let response: Response | null = null;
-          let lastError = "";
-
-          for (const model of MODEL_CHAIN) {
-            try {
-              console.log(`🤖 [Shared Loader Scan] Trying model: ${model}`);
-              const res = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: requestBody,
-                }
-              );
-
-              if (res.ok) {
-                console.log(`✅ [Shared Loader Scan] Success with model: ${model}`);
-                response = res;
-                break;
-              }
-
-              if (res.status === 400 || res.status === 403 || res.status === 401) {
-                const errText = await res.text();
-                throw new Error(`Gemini API config error: ${errText}`);
-              }
-
-              console.warn(`⚡ [Shared Loader Scan] ${model} returned status ${res.status}. Falling back...`);
-            } catch (err: any) {
-              lastError = err.message || String(err);
-              if (err.message?.includes("Gemini API config error")) throw err;
-              console.warn(`⚡ [Shared Loader Scan] ${model} network error: ${lastError}. Trying next...`);
-              continue;
-            }
-          }
-
-          if (!response) {
-            throw new Error(`⚠️ Gemini service busy: ${lastError}`);
-          }
-
-          const data = await response.json();
-          const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-          const cleanedText = generatedText.replace(/```json/g, "").replace(/```/g, "").trim();
-          const parsed = JSON.parse(cleanedText);
-
-          if (!parsed || typeof parsed.amount === "undefined") {
-            throw new Error("Unable to parse amount from receipt image.");
-          }
-
-          const amount = Math.round(parseFloat(parsed.amount) || 0);
-          const vehicle = parsed.vehicle || null;
-          const notes = parsed.notes || "Fuel expense auto-scanned from shared receipt";
-          const senderName = parsed.senderName || "Founder";
-          const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
-
-          return { amount, vehicle, notes, senderName, parsedDate };
-        };
-
-        let successCount = 0;
-        let totalAmount = 0;
-
-        for (const tempExp of tempExpenses) {
-          if (!tempExp.imageUrl) continue;
-          try {
-            const result = await scanReceipt(tempExp.imageUrl);
-            await prisma.expense.update({
-              where: { id: tempExp.id },
-              data: {
-                amount: result.amount,
-                category: result.notes.toLowerCase().includes("service") ? "service" : "fuel",
-                notes: result.notes,
-                vehicle: result.vehicle,
-                senderName: result.senderName,
-                approved: true,
-                timestamp: result.parsedDate,
-              }
-            });
-            successCount++;
-            totalAmount += result.amount;
-          } catch (e: any) {
-            console.error(`Failed to parse temp shared expense ${tempExp.id}:`, e);
-            // Fallback: convert to an unapproved manual expense so they don't lose the image
-            await prisma.expense.update({
-              where: { id: tempExp.id },
-              data: {
-                amount: 0,
-                category: "fuel",
-                notes: "Manual Log (Shared scan failed: " + (e.message || "unknown error") + ")",
-                approved: false,
-              }
-            });
-          }
-        }
-
-        return redirect(`/?tab=expenses&shareSuccess=true&count=${successCount}&total=${totalAmount}`);
-      } catch (err: any) {
-        console.error("Shared loader processing failed:", err);
-        return redirect(`/?tab=expenses&shareError=${encodeURIComponent(err.message || "Failed to process shared files")}`);
-      }
-    }
-  }
-
   const session = await requireAdmin(request);
   initKeepAwake();
   const isTempPass = session.get("isTempPass") || false;
@@ -295,18 +87,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     (prisma as any).driverSalarySettlement ? withDbRetry(() => (prisma as any).driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } })) : Promise.resolve([]),
   ]);
 
-  // Batch 2: User profiles, credentials, fleet, passes (lightweight metadata)
-  const [users, adminCredentials, autos, temporaryPasses] = await Promise.all([
+  // Batch 2: User profiles & fleet
+  const [users, autos] = await Promise.all([
     withDbRetry(() => prisma.user.findMany({ orderBy: { createdAt: "desc" } })),
-    withDbRetry(() => prisma.adminCredential.findMany({
-      select: { id: true, username: true, createdAt: true },
-      orderBy: { createdAt: "desc" }
-    })),
     withDbRetry(() => prisma.auto.findMany({ orderBy: { createdAt: "desc" } })),
-    withDbRetry(() => prisma.temporaryPass.findMany({ orderBy: { createdAt: "desc" } })),
   ]);
 
-  return { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses, pendingPayments, salarySettlements };
+  return { users, expenses, loggedInUser, autos, pendingPayments, salarySettlements };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -318,8 +105,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const isViewOnly = session.get("permission") === "VIEW_ONLY";
   const isMutation = [
     "create_expense", "delete_expense", "create_user", "delete_user",
-    "update_user_password", "create_auto", "delete_auto", "create_temp_pass",
-    "revoke_temp_pass", "create_pending_payment", "collect_pending_payment",
+    "update_user_password", "create_pending_payment", "collect_pending_payment",
     "mark_pending_received", "delete_pending_payment", "create_borrowed_due", "repay_borrowed_payment", "settle_driver_salary",
     "create_weekly_earning", "import_whatsapp_transactions"
   ].includes(actionType || "");
@@ -328,121 +114,9 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: "Permission Denied: Your temporary access pass is set to View Only. You cannot perform write operations." };
   }
 
-  if (actionType === "create_temp_pass") {
-    const label = formData.get("label")?.toString()?.trim() || "Guest Pass";
-    const passPermission = formData.get("permission")?.toString() || "VIEW_ONLY";
-    const duration = formData.get("duration")?.toString() || "1h";
-
-    let durationMs = 60 * 60 * 1000; // default 1 hour
-    if (duration === "30m") durationMs = 30 * 60 * 1000;
-    if (duration === "1h") durationMs = 60 * 60 * 1000;
-    if (duration === "6h") durationMs = 6 * 60 * 60 * 1000;
-    if (duration === "24h") durationMs = 24 * 60 * 60 * 1000;
-    if (duration === "7d") durationMs = 7 * 24 * 60 * 60 * 1000;
-
-    const expiresAt = new Date(Date.now() + durationMs);
-    const passCode = `TEMP-${Math.floor(100000 + Math.random() * 900000)}`;
-
-    const newPass = await prisma.temporaryPass.create({
-      data: {
-        passCode,
-        label,
-        permission: passPermission,
-        expiresAt,
-        isActive: true,
-      },
-    });
-
-    return { success: true, action: "create_temp_pass", pass: newPass };
-  }
-
-  if (actionType === "revoke_temp_pass") {
-    const passId = parseInt(formData.get("id")?.toString() || "0");
-    if (passId) {
-      await prisma.temporaryPass.update({
-        where: { id: passId },
-        data: { isActive: false },
-      });
-    }
-    return { success: true, action: "revoke_temp_pass" };
-  }
+  
 
   if (actionType === "create_expense") {
-    const isAi = formData.get("isAi") === "true";
-    if (isAi) {
-      const rawText = formData.get("rawText")?.toString() || "";
-      if (!rawText.trim()) {
-        return { error: "AI parser text cannot be empty" };
-      }
-
-      try {
-        const parsed = await parseExpenseText(rawText);
-
-        if (!Array.isArray(parsed)) {
-          throw new Error("The AI couldn't understand your input. Please try rephrasing it — for example: 'cng 550' or 'diesel 4550.");
-        }
-
-        let expensesCreated = 0;
-        const imageUrl = formData.get("imageUrl")?.toString() || null;
-        let pendingFuelExpense: any = null;
-
-        for (const item of parsed) {
-          const entryDate = item.date ? new Date(item.date) : new Date();
-
-          const amount = Math.round(parseFloat(String(item.amount)) || 0);
-          const type = item.type === "INCOME" ? "INCOME" : "EXPENSE";
-          let category = item.category || "other";
-          const notes = item.notes || rawText;
-          const vehicle = item.vehicle || null;
-          const senderName = item.senderName || (category === "bittu" ? "Driver" : "AI Assistant");
-
-          // Auto-classify as driver advance if notes mention advance/salary
-          if (/advance|salary|kharcha|loan/i.test(notes) && type === "EXPENSE") {
-            category = "bittu";
-          }
-
-          // If it is a CNG/Fuel expense, we absolutely need a receipt slip!
-          if (category === "fuel" && !imageUrl) {
-            pendingFuelExpense = {
-              amount,
-              category,
-              notes,
-              vehicle,
-              type,
-              date: item.date || null,
-            };
-            continue; // Skip saving this one for now!
-          }
-
-          await prisma.expense.create({
-            data: {
-              amount,
-              category,
-              notes,
-              vehicle,
-              senderName,
-              approved: false,
-              imageUrl: category === "fuel" ? imageUrl : null,
-              type,
-              timestamp: entryDate,
-            },
-          });
-          expensesCreated++;
-        }
-
-        return {
-          success: true,
-          action: "create_expense",
-          isAi: true,
-          expensesCreated,
-          needsFuelSlip: pendingFuelExpense !== null,
-          pendingFuelExpense,
-        };
-      } catch (err: any) {
-        console.error("AI Parse failed:", err);
-        return { error: err.message };
-      }
-    } else {
       // Manual entry
       const amount = Math.round(parseFloat(formData.get("amount")?.toString() || "0") || 0);
       const type = formData.get("type")?.toString() || "EXPENSE";
@@ -500,7 +174,6 @@ export async function action({ request }: ActionFunctionArgs) {
         whatsappTitle: type === "INCOME" ? "Income Logged" : "Expense Logged",
       };
     }
-  }
 
   if (actionType === "create_weekly_earning") {
     const v1 = parseKAmount(formData.get("vendor1")?.toString() || formData.get("vendor1Gross")?.toString() || "0");
@@ -784,82 +457,7 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
-  if (actionType === "scan_and_save_receipt") {
-    const imageUrlsStr = formData.get("imageUrls")?.toString() || "[]";
-    let imageUrls: string[] = [];
-    try {
-      imageUrls = JSON.parse(imageUrlsStr);
-    } catch (e) {
-      const singleUrl = formData.get("imageUrl")?.toString();
-      if (singleUrl) imageUrls = [singleUrl];
-    }
-
-    if (imageUrls.length === 0) {
-      return { error: "Please snap or paste at least one receipt image first." };
-    }
-
-    try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error("GEMINI_API_KEY not configured in backend .env");
-      }
-
-      // Fast Model Failover Chain — switches immediately to fallback models without waiting
-      const MODEL_CHAIN = [
-        "gemini-2.5-flash",      // Primary: latest 2.5 flash
-        "gemini-2.0-flash",      // Fallback 1: stable 2.0 flash
-        "gemini-2.0-flash-lite", // Fallback 2: lightest model
-      ];
-
-      // Helper function to scan a single receipt using the failover chain
-      const scanReceipt = async (imageUrl: string) => {
-        const parsed = await scanReceiptImage(imageUrl);
-
-        if (!parsed || typeof parsed.amount === "undefined") {
-          throw new Error("Unable to parse amount from receipt image.");
-        }
-
-        const amount = Math.round(parseFloat(parsed.amount as any) || 0);
-        const vehicle = parsed.vehicle || null;
-        const notes = parsed.notes || "Fuel expense auto-scanned from receipt";
-        const senderName = parsed.senderName || "Founder";
-        const parsedDate = parsed.date ? new Date(parsed.date) : new Date();
-
-        return { amount, vehicle, notes, senderName, parsedDate, imageUrl };
-      };
-
-      // Process all images in parallel
-      const parsedResults = await Promise.all(imageUrls.map(url => scanReceipt(url)));
-
-      // Save all parsed expenses in a database transaction
-      const savedExpenses = await Promise.all(
-        parsedResults.map(result =>
-          prisma.expense.create({
-            data: {
-              amount: result.amount,
-              category: result.notes.toLowerCase().includes("service") ? "service" : "fuel",
-              notes: result.notes,
-              vehicle: result.vehicle,
-              senderName: result.senderName,
-              approved: true,
-              imageUrl: result.imageUrl,
-              type: "EXPENSE",
-              timestamp: result.parsedDate,
-            },
-          })
-        )
-      );
-
-      return {
-        success: true,
-        action: "scan_and_save_receipt",
-        expenses: savedExpenses,
-      };
-    } catch (err: any) {
-      console.error("Receipt Scan failed:", err);
-      return { error: err.message || "Failed to scan receipt images." };
-    }
-  }
+  
 
   if (actionType === "approve_expense") {
     const id = parseInt(formData.get("id")?.toString() || "0") || 0;
@@ -1060,60 +658,7 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
-  if (actionType === "create_auto") {
-    const plateNumber = formData.get("plateNumber")?.toString()?.trim() || "";
-    const modelName = formData.get("modelName")?.toString()?.trim() || "";
-    const ownerName = formData.get("ownerName")?.toString()?.trim() || "";
-    const driverPhone = formData.get("driverPhone")?.toString()?.trim() || null;
-
-    if (!plateNumber) {
-      return { error: "Auto Plate Number is required." };
-    }
-
-    const existing = await prisma.auto.findUnique({ where: { plateNumber } });
-    if (existing) {
-      return { error: `An Auto with Plate Number "${plateNumber}" already exists.` };
-    }
-
-    await prisma.auto.create({
-      data: {
-        plateNumber,
-        modelName: modelName || null,
-        ownerName: ownerName || null,
-        driverPhone,
-      },
-    });
-
-    if (driverPhone) {
-      const user = await prisma.user.findUnique({ where: { phone: driverPhone } });
-      if (user) {
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { vehicleNumber: plateNumber },
-        });
-      }
-    }
-
-    return { success: true, action: "create_auto" };
-  }
-
-  if (actionType === "delete_auto") {
-    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
-    const auto = await prisma.auto.findUnique({ where: { id } });
-    if (auto) {
-      if (auto.driverPhone) {
-        const user = await prisma.user.findUnique({ where: { phone: auto.driverPhone } });
-        if (user && user.vehicleNumber === auto.plateNumber) {
-          await prisma.user.update({
-            where: { id: user.id },
-            data: { vehicleNumber: null },
-          });
-        }
-      }
-      await prisma.auto.delete({ where: { id } });
-    }
-    return { success: true, action: "delete_auto" };
-  }
+  
 
   if (actionType === "create_pending_payment") {
     const title = formData.get("title")?.toString()?.trim() || "Pending Payment";
@@ -1463,11 +1008,11 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Home() {
-  const { users, expenses, adminCredentials, loggedInUser, autos, temporaryPasses = [], pendingPayments = [], salarySettlements = [] } = useLoaderData() as any;
+  const { users, expenses, loggedInUser, autos, pendingPayments = [], salarySettlements = [] } = useLoaderData() as any;
   const dbDrivers = (users || []).filter((u: any) => u.role === "DRIVER");
   const fallbackDrivers = [
-    { id: 9991, name: "Bittu", phone: "9876543210", vehicleNumber: "MH-12-RN-1234", salary: 18000, role: "DRIVER" },
-    { id: 9992, name: "Gaurav", phone: "9876543211", vehicleNumber: "MH-12-RN-5678", salary: 18000, role: "DRIVER" }
+    { id: 9991, name: "Bittu", phone: "", vehicleNumber: "", salary: 18000, role: "DRIVER" },
+    { id: 9992, name: "Gaurav", phone: "", vehicleNumber: "", salary: 18000, role: "DRIVER" }
   ];
   const drivers = [...dbDrivers];
   fallbackDrivers.forEach(fb => {
@@ -1543,8 +1088,6 @@ export default function Home() {
   const actionData = useActionData<typeof action>() as any;
   const navigation = useNavigation();
   const submit = useSubmit();
-
-  const [showAdminPassword, setShowAdminPassword] = useState(false);
   const [customDialog, setCustomDialog] = useState<{
     isOpen: boolean;
     type: "alert" | "confirm";
@@ -1579,10 +1122,8 @@ export default function Home() {
 
   // Tab state & Dashboard workflow controls
   const [activeTab, setActiveTab] = useState<"expenses" | "pending_dues" | "driver_salaries">("expenses");
-  const [userSubTab, setUserSubTab] = useState<"drivers" | "autos" | "admins">("drivers");
   const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger">("entry");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
-  const [driverPassword, setDriverPassword] = useState("");
 
   // Pending Payments & Borrowed Liabilities State
   const [showAddPendingModal, setShowAddPendingModal] = useState(false);
@@ -1615,14 +1156,7 @@ export default function Home() {
   const [viewingDriverAdvances, setViewingDriverAdvances] = useState<any | null>(null);
   const [copiedSlipText, setCopiedSlipText] = useState(false);
 
-  const generateRandomPassword = () => {
-    const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%";
-    let pwd = "";
-    for (let i = 0; i < 10; i++) {
-      pwd += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    setDriverPassword(pwd);
-  };
+  
 
   const [expenseFilter, setExpenseFilter] = useState<"ALL" | "YEAR" | "MONTH" | "TODAY" | "CUSTOM">("ALL");
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState<"ALL" | "EXPENSE" | "INCOME">("ALL");
@@ -1631,12 +1165,6 @@ export default function Home() {
   // Auto-hiding notification and driver profile states
   const [expenseSuccessVisible, setExpenseSuccessVisible] = useState(false);
   const [actionErrorVisible, setActionErrorVisible] = useState(false);
-  const [parsedExpenseVisible, setParsedExpenseVisible] = useState(false);
-  const [userControlSuccessVisible, setUserControlSuccessVisible] = useState(false);
-  const [shareSuccessInfo, setShareSuccessInfo] = useState<{ count: number; total: number } | null>(null);
-  const [shareErrorInfo, setShareErrorInfo] = useState<string | null>(null);
-  const [showPassModal, setShowPassModal] = useState(false);
-  const [copiedPassId, setCopiedPassId] = useState<number | null>(null);
   const [passTimeRemaining, setPassTimeRemaining] = useState<string>("");
 
   // Live countdown timer for Temporary Access Pass holders
@@ -1667,7 +1195,6 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [loggedInUser?.expiresAt, loggedInUser?.isTempPass]);
   const [selectedDriverProfile, setSelectedDriverProfile] = useState<any | null>(null);
-  const [selectedAutoProfile, setSelectedAutoProfile] = useState<any | null>(null);
   const [isEditingDriver, setIsEditingDriver] = useState(false);
   const [editDriverName, setEditDriverName] = useState("");
   const [editDriverPhone, setEditDriverPhone] = useState("");
@@ -1701,7 +1228,6 @@ export default function Home() {
   const [showInstallBanner, setShowInstallBanner] = useState(false);
 
   // AI manual feedback state
-  const [aiRawInput, setAiRawInput] = useState("");
   // [expenseFormMode removed, replaced by consoleTab]
 
   const parseLocalDate = (d: Date | string): Date => {
@@ -1768,14 +1294,12 @@ export default function Home() {
   const [expensePage, setExpensePage] = useState(1);
 
   // [manualType and selectedCategory replaced by consoleTab and selectedExpenseCategory]
-      const [pendingSlipBase64, setPendingSlipBase64] = useState<string | null>(null);
     
   // Local edit states
   const [editingExpense, setEditingExpense] = useState<any | null>(null);
 
   // Form references for automated clearing on success
   const manualExpenseFormRef = useRef<HTMLFormElement>(null);
-  const aiFormRef = useRef<HTMLFormElement>(null);
 
   // Initialize theme from localStorage or system preferences
   useEffect(() => {
@@ -1795,9 +1319,6 @@ export default function Home() {
       const params = new URLSearchParams(window.location.search);
       const tabParam = params.get("tab");
       const showAddParam = params.get("showAdd");
-      const shareSuccessParam = params.get("shareSuccess");
-      const shareErrorParam = params.get("shareError");
-      const sharedFromSW = params.get("sharedFromSW");
 
       if (tabParam === "expenses") {
         setActiveTab("expenses");
@@ -1806,22 +1327,7 @@ export default function Home() {
         } else {
           setShowExpenseDashboard(true);  // Show Ledger
         }
-      } else if (tabParam === "orders") {
-        setActiveTab("expenses");
       }
-
-      if (shareSuccessParam === "true") {
-        const count = parseInt(params.get("count") || "1");
-        const total = parseInt(params.get("total") || "0");
-        setShareSuccessInfo({ count, total });
-        // Clean URL to prevent showing toast again on page reload
-        window.history.replaceState({}, document.title, "/?tab=expenses");
-      } else if (shareErrorParam) {
-        setShareErrorInfo(shareErrorParam);
-        window.history.replaceState({}, document.title, "/?tab=expenses");
-      }
-
-
     }
   }, []);
 
@@ -2066,96 +1572,7 @@ export default function Home() {
   };
 
   // AI Spotlight Multi-Turn Chat State
-  type AiChatMessage = {
-    id: string;
-    role: "user" | "assistant";
-    content: string;
-    data?: any;
-    timestamp: Date;
-  };
-
-  const [isAiSpotlightOpen, setIsAiSpotlightOpen] = useState(false);
-  const [aiQueryInput, setAiQueryInput] = useState("");
-  const [chatMessages, setChatMessages] = useState<AiChatMessage[]>([]);
-  const [isAiQueryLoading, setIsAiQueryLoading] = useState(false);
-  const chatBottomRef = useRef<HTMLDivElement>(null);
-
-  // Global Keyboard Shortcut: Cmd+K / Ctrl+K
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-        e.preventDefault();
-        setIsAiSpotlightOpen((prev) => !prev);
-      }
-      if (e.key === "Escape") {
-        setIsAiSpotlightOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-
-  // Update AI Chat thread when actionData returns
-  useEffect(() => {
-    if (actionData?.action === "ask_ai_financial_query") {
-      setIsAiQueryLoading(false);
-      if (actionData.success) {
-        setChatMessages((prev) => [
-          ...prev,
-          {
-            id: `msg-ai-${Date.now()}`,
-            role: "assistant",
-            content: actionData.humanAnswer,
-            data: actionData,
-            timestamp: new Date(),
-          },
-        ]);
-        setTimeout(() => {
-          chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
-        }, 100);
-      } else if (actionData.error) {
-        triggerAlert("AI Query Notice", actionData.error);
-      }
-    }
-  }, [actionData]);
-
-  // Handler to deep-link filter parameters into the ledger with 100% precision
-  const handleViewInLedger = (filters: any) => {
-    setActiveTab("expenses");
-    setShowExpenseDashboard(true);
-    setIsAiSpotlightOpen(false);
-
-    if (filters?.startDate && filters?.endDate) {
-      setExpenseFilter("CUSTOM");
-      setCustomStartDate(filters.startDate.substring(0, 10));
-      setCustomEndDate(filters.endDate.substring(0, 10));
-    } else if (filters?.startDate) {
-      setExpenseFilter("CUSTOM");
-      setCustomStartDate(filters.startDate.substring(0, 10));
-      setCustomEndDate(new Date().toISOString().substring(0, 10));
-    } else {
-      setExpenseFilter("ALL");
-    }
-
-    if (filters?.type === "EXPENSE" || filters?.type === "INCOME") {
-      setExpenseCategoryFilter(filters.type);
-    } else {
-      setExpenseCategoryFilter("ALL");
-    }
-
-    if (filters?.vehicle) {
-      setEntityFilter("AUTO:" + filters.vehicle);
-    } else if (filters?.driverName) {
-      setEntityFilter("DRIVER:" + filters.driverName);
-    } else if (filters?.senderName) {
-      setEntityFilter("DRIVER:" + filters.senderName);
-    } else if (filters?.categories && filters.categories.length === 1) {
-      setEntityFilter("CATEGORY:" + filters.categories[0]);
-    } else {
-      setEntityFilter("ALL");
-    }
-  };
-
+  
   // Dynamically extract all available years from expenses to populate the year filter dropdown
   const availableYears = useMemo(() => {
     const years = new Set<string>();
@@ -2304,17 +1721,14 @@ export default function Home() {
 
       // If a fuel slip is still pending, do NOT show the success toast yet —
       // the popup modal will handle the remaining workflow.
-      const hasPendingSlip = "needsFuelSlip" in actionData && actionData.needsFuelSlip;
-
+      
       // Always clear the text inputs and primary fuel slip (non-pending)
-      setAiRawInput("");
       setFastAmountInput("");
       setManualNotes("Cash CNG fuel refill");
       setActiveFastPill("Cash CNG");
       setSelectedExpenseCategory("fuel");
       
       // Native browser form reset for all input text fields
-      aiFormRef.current?.reset();
       manualExpenseFormRef.current?.reset();
 
       // Trigger 2-button WhatsApp Sync Modal if formatted text is present
@@ -2353,10 +1767,9 @@ export default function Home() {
       }
 
       // Only clear pending slip and show success if there is NO pending fuel entry
-      if (!hasPendingSlip) {
-        setPendingSlipBase64(null);
+      {
 
-        if (actionData.action === "create_expense" || actionData.action === "scan_and_save_receipt" || actionData.action === "create_weekly_earning" || actionData.action === "import_whatsapp_transactions") {
+        if (actionData.action === "create_expense" || actionData.action === "create_weekly_earning" || actionData.action === "import_whatsapp_transactions") {
           setExpenseSuccessVisible(true);
           const timer = setTimeout(() => setExpenseSuccessVisible(false), 6000);
           return () => clearTimeout(timer);
@@ -2376,25 +1789,9 @@ export default function Home() {
     }
   }, [actionData]);
 
-  // Manage visibility timers for AI parsed expense messages
-  useEffect(() => {
-    if (actionData && "parsedExpense" in actionData && actionData.parsedExpense) {
-      setParsedExpenseVisible(true);
-      const timer = setTimeout(() => setParsedExpenseVisible(false), 6000);
-      return () => clearTimeout(timer);
-    }
-  }, [actionData]);
+  
 
-  // Manage visibility timers for User Control Center success operations
-  useEffect(() => {
-    if (actionData && actionData.success && (actionData.action === "create_driver" || actionData.action === "delete_driver" || actionData.action === "update_driver")) {
-      setUserControlSuccessVisible(true);
-      setIsEditingDriver(false);
-      setSelectedDriverProfile(null);
-      const timer = setTimeout(() => setUserControlSuccessVisible(false), 6000);
-      return () => clearTimeout(timer);
-    }
-  }, [actionData]);
+  
 
 
 
@@ -2423,7 +1820,7 @@ export default function Home() {
                 Dreamline Logistics
               </span>
               <span className="text-[10px] text-slate-400 font-semibold tracking-wider uppercase block">
-                Financial Atelier
+                Daily Hisaab & Cashflow
               </span>
             </div>
           </div>
@@ -2522,7 +1919,7 @@ export default function Home() {
         {/* Sidebar Footer */}
         <div className="p-4 border-t border-neutral-200/60 dark:border-slate-800 text-center">
           <div className="text-[10px] text-neutral-400 dark:text-neutral-500 uppercase tracking-widest font-semibold">
-            Dreamline Atelier v1.2
+            Dreamline Logistics
           </div>
         </div>
       </aside>
@@ -2542,7 +1939,7 @@ export default function Home() {
             </button>
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold uppercase tracking-wider text-neutral-800 dark:text-neutral-200">
-                Dreamline Logistics Atelier
+                Dreamline Logistics
               </span>
             </div>
           </div>
@@ -2650,49 +2047,16 @@ export default function Home() {
               </div>
 
               {/* ACTION NOTIFICATIONS */}
-              {shareErrorInfo && (
-                <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in flex justify-between items-center">
-                  <span>⚠️ Share Scan Error: {shareErrorInfo}</span>
-                  <button onClick={() => setShareErrorInfo(null)} className="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 font-bold ml-2">×</button>
-                </div>
-              )}
-              {shareSuccessInfo && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in flex items-center justify-between">
-                  <span>
-                    🤖 AI Auto-Scanned Shared {shareSuccessInfo.count} Receipt(s) & Logged:
-                    <span className="font-bold"> ₹{shareSuccessInfo.total.toLocaleString()}</span> total!
-                  </span>
-                  <button onClick={() => setShareSuccessInfo(null)} className="text-emerald-600 hover:text-emerald-800 dark:text-emerald-400 dark:hover:text-emerald-200 font-bold ml-2">×</button>
-                </div>
-              )}
               {actionData && "error" in actionData && actionErrorVisible && (
-                <div className="p-3 bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/30 rounded-md text-xs font-semibold animate-fade-in">
-                  ⚠️ {actionData.error}
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/20 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900/30 rounded-lg text-xs font-semibold animate-fade-in flex items-center justify-between">
+                  <span>{actionData.error}</span>
+                  <button onClick={() => setActionErrorVisible(false)} className="text-rose-500 hover:text-rose-700 font-bold ml-2">×</button>
                 </div>
               )}
               {expenseSuccessVisible && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-md text-xs font-semibold animate-fade-in flex items-center justify-between">
-                  {actionData && actionData.action === "scan_and_save_receipt" ? (
-                    <span>
-                      🤖 AI Auto-Scanned {actionData.expenses?.length || 1} Receipt(s) & Logged:
-                      <span className="font-bold">
-                        {" "}₹{actionData.expenses?.reduce((sum: number, e: any) => sum + e.amount, 0).toLocaleString()}
-                      </span>{" "}
-                      total!
-                    </span>
-                  ) : actionData && "isAi" in actionData && actionData.isAi ? (
-                    <span>
-                      🤖 AI Parsed and Saved: 
-                      {actionData.expensesCreated > 0 && ` 💸 ${actionData.expensesCreated} Expense/Income item(s)`}!
-                    </span>
-                  ) : (
-                    <span>✅ Operation saved successfully!</span>
-                  )}
-                  {actionData && "parsedExpense" in actionData && actionData.parsedExpense && (
-                    <span className="text-[10px] uppercase font-bold text-neutral-400">
-                      Parsed: ₹{actionData.parsedExpense.amount} ({actionData.parsedExpense.category})
-                    </span>
-                  )}
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/30 rounded-lg text-xs font-semibold animate-fade-in flex items-center justify-between">
+                  <span>Entry saved successfully.</span>
+                  <button onClick={() => setExpenseSuccessVisible(false)} className="text-emerald-600 hover:text-emerald-800 font-bold ml-2">×</button>
                 </div>
               )}
 
@@ -2707,7 +2071,7 @@ export default function Home() {
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-bold tracking-tight text-neutral-800 dark:text-neutral-200">
-                            Cashflow Entry Console
+                            Quick Entry
                           </span>
                         </div>
                         <div className="inline-flex p-0.5 bg-[#f5f5f4] dark:bg-[#2c2c2c] rounded-lg gap-0.5 select-none self-start sm:self-auto border border-neutral-200/50 dark:border-neutral-800/30">
@@ -2921,7 +2285,7 @@ export default function Home() {
                               <div className="p-3 bg-gradient-to-r from-emerald-500/10 to-teal-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-between">
                                 <div>
                                   <h3 className="text-sm font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1.5">
-                                    <span>💰 Weekly 3-ID Payout Console</span>
+                                    <span>💰 Weekly Payout (3 IDs)</span>
                                   </h3>
                                   <p className="text-[11px] text-neutral-500 dark:text-neutral-400 mt-0.5">
                                     Log Vendor 1, Vendor 2, and Per Order in one go.
@@ -5107,125 +4471,7 @@ export default function Home() {
         )}
 
         {/* Selected Auto Profile Modal Overlay */}
-        {selectedAutoProfile && (
-          <div className="fixed inset-0 bg-neutral-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in animate-duration-150">
-            <div className="bg-white dark:bg-[#1a1a1a] rounded-lg overflow-hidden border border-neutral-200 dark:border-neutral-800 w-full max-w-md shadow-2xl relative">
-              <div className="flex justify-between items-center p-4 border-b border-neutral-100 dark:border-neutral-800">
-                <span className="text-xs font-bold text-neutral-800 dark:text-neutral-200 uppercase tracking-wider">
-                  Vehicle / Auto Profile
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setSelectedAutoProfile(null)}
-                  className="px-2.5 py-1 rounded bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-500 dark:text-neutral-300 transition-all cursor-pointer text-[10px] font-bold"
-                >
-                  Close
-                </button>
-              </div>
-
-              <div className="p-5 space-y-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-amber-50 dark:bg-amber-950/20 text-amber-600 dark:text-amber-400 flex items-center justify-center text-lg font-bold border border-amber-200/50 dark:border-amber-700/50 flex-shrink-0">
-                    🛺
-                  </div>
-                  <div>
-                    <h4 className="text-sm font-bold font-mono text-[#5D87FF] bg-[#5D87FF]/10 px-2 py-0.5 rounded inline-block">
-                      {selectedAutoProfile.plateNumber}
-                    </h4>
-                    <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 mt-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
-                      Active in Fleet
-                    </span>
-                  </div>
-                </div>
-
-                <div className="pt-3 border-t border-neutral-100 dark:border-neutral-800 text-xs space-y-2.5 text-neutral-500 dark:text-neutral-400">
-                  <div className="flex justify-between">
-                    <span>Model Name:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
-                      {selectedAutoProfile.modelName || "N/A"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Ownership status:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
-                      {selectedAutoProfile.ownerName || "N/A"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Assigned Driver:</span>
-                    <span className="font-semibold text-neutral-700 dark:text-neutral-300">
-                      {(() => {
-                        const driver = users.find((u: any) => u.phone === selectedAutoProfile.driverPhone);
-                        return driver ? `${driver.name}` : <span className="text-neutral-400 italic">Unassigned</span>;
-                      })()}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Auto Expenses Log */}
-                <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800 space-y-3">
-                  <h5 className="text-[10px] font-bold text-neutral-400 dark:text-neutral-500 uppercase tracking-widest text-left">
-                    Recent Auto Expenses (Max 3)
-                  </h5>
-                  {(() => {
-                    const autoExpenses = expenses.filter((exp: any) => exp.vehicle === selectedAutoProfile.plateNumber);
-                    return autoExpenses.length === 0 ? (
-                      <div className="text-center py-4 text-[11px] text-neutral-400 italic">
-                        No expenses logged for this vehicle.
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1 scrollbar-none">
-                          {autoExpenses.slice(0, 3).map((exp: any) => (
-                            <div key={exp.id} className="flex justify-between items-center text-[11px] p-2 bg-neutral-50 dark:bg-neutral-900/60 rounded border border-neutral-100 dark:border-neutral-800">
-                              <div className="space-y-0.5 text-left">
-                                <div className="font-semibold text-neutral-700 dark:text-neutral-200">
-                                  {exp.category === "fuel" && "⛽ "}
-                                  {exp.category === "service" && "🔧 "}
-                                  {exp.category === "other" && "📦 "}
-                                  <span className="capitalize">{exp.category}</span>
-                                </div>
-                                <div className="text-neutral-455 dark:text-neutral-400 font-sans text-[10px] truncate max-w-[200px]" title={exp.notes}>
-                                  {exp.notes}
-                                </div>
-                              </div>
-                              <div className="text-right">
-                                <div className="font-bold text-neutral-800 dark:text-neutral-100">
-                                  ₹{exp.amount.toLocaleString()}
-                                </div>
-                                <div className="text-[9px] text-neutral-400">
-                                  {new Date(exp.timestamp).toLocaleDateString(undefined, {month: "short", day: "numeric"})}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        {autoExpenses.length > 0 && (
-                          <div className="pt-1 text-center">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedAutoProfile(null);
-                                setActiveTab("expenses");
-                                setShowExpenseDashboard(true);
-                                setEntityFilter(`AUTO:${selectedAutoProfile.plateNumber}`);
-                              }}
-                              className="text-xs font-bold text-[#5D87FF] hover:underline flex items-center justify-center gap-1 mx-auto"
-                            >
-                              🔍 View All in Ledger ({autoExpenses.length})
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        
 
         {/* Premium PWA Install Sheet Modal Overlay */}
         {showInstallBanner && (
@@ -5262,7 +4508,7 @@ export default function Home() {
                       Dreamline Logistics
                     </h3>
                     <p className="text-[10px] text-[#5D87FF] font-bold uppercase tracking-wider mt-0.5">
-                      Premium Field Console
+                      Install Dreamline App
                     </p>
                   </div>
                 </div>
