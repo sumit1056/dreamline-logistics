@@ -1346,6 +1346,7 @@ export default function Home() {
   const [selectedSlipData, setSelectedSlipData] = useState<any | null>(null);
   const [viewingDriverAdvances, setViewingDriverAdvances] = useState<any | null>(null);
   const [copiedSlipText, setCopiedSlipText] = useState(false);
+  const [salaryPayoutMode, setSalaryPayoutMode] = useState<"CASH" | "UPI" | "BANK_TRANSFER">("CASH");
 
   // Add / Edit Boy Modal States
   const [showAddBoyModal, setShowAddBoyModal] = useState(false);
@@ -4199,13 +4200,13 @@ export default function Home() {
                     <span>Driver Salaries &amp; Advance Settlement Hub</span>
                   </h1>
                   <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                    Custom Base Salaries, 30-Day vs 26-Day calculation rules, live advance deductions, and 1-click settlement vouchers!
+                    Monthly salary calculation and advance settlement.
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center gap-1.5 bg-white dark:bg-[#1e293b] px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-slate-800 shadow-sm">
-                    <span className="text-xs font-semibold text-neutral-500">Month:</span>
+                <div className="flex flex-wrap items-center gap-3 shrink-0">
+                  <div className="flex items-center gap-2 bg-white dark:bg-[#1e293b] px-3 py-2 rounded-xl border border-neutral-200 dark:border-slate-800 shadow-sm">
+                    <span className="text-xs font-semibold text-neutral-500 dark:text-neutral-400">Month:</span>
                     <input
                       type="month"
                       value={salaryMonthYear}
@@ -4223,7 +4224,7 @@ export default function Home() {
                       setNewBoyPhone("");
                       setShowAddBoyModal(true);
                     }}
-                    className="px-3.5 py-2 text-xs font-bold text-white bg-[#5D87FF] hover:bg-[#4570EA] rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                    className="px-3.5 py-2 text-xs font-bold text-white bg-[#5D87FF] hover:bg-[#4570EA] rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95 whitespace-nowrap"
                   >
                     <span>➕</span>
                     <span>Add New Boy</span>
@@ -4268,9 +4269,6 @@ export default function Home() {
                   <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
                     Live Month-End Driver Payout Breakdown
                   </h2>
-                  <span className="text-xs text-neutral-400 font-mono">
-                    Formula: Math.round((Base ÷ Basis) × Days) - Advances + Bonus
-                  </span>
                 </div>
 
                 <div className="space-y-4">
@@ -4286,19 +4284,19 @@ export default function Home() {
                             {item.driver.name.charAt(0)}
                           </div>
                           <div>
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <h3 className="text-base font-bold text-neutral-900 dark:text-white">
                                 {item.driver.name}
                               </h3>
-                              <span className="text-[10px] font-mono bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-bold">
-                                {item.basisDays}-Day Rule
+                              <span className="text-[10px] font-mono bg-[#5D87FF]/15 text-[#5D87FF] dark:bg-[#5D87FF]/25 dark:text-blue-300 border border-[#5D87FF]/30 px-2.5 py-0.5 rounded-full font-bold whitespace-nowrap shrink-0">
+                                {item.basisDays}-Day Basis
                               </span>
-                              <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                              <span className="text-[10px] font-mono bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-bold whitespace-nowrap shrink-0">
                                 ₹{item.baseSalary.toLocaleString("en-IN")}/mo
                               </span>
                             </div>
                             <span className="text-xs text-neutral-400 font-mono">
-                              📞 {item.driver.phone || "No phone"} • Daily Rate: ₹{item.dailyRate}/day
+                              {item.driver.phone && !item.driver.phone.startsWith("980000") ? `📞 ${item.driver.phone} • ` : ""}Daily Rate: ₹{item.dailyRate}/day
                             </span>
                           </div>
                         </div>
@@ -5110,13 +5108,47 @@ export default function Home() {
                 <input type="hidden" name="advanceIds" value={JSON.stringify(settlingDriver.unSettledAdvances.map((a: any) => a.id))} />
                 <input type="hidden" name="basisDays" value={settlingDriver.basisDays || "30"} />
 
-                <div className="space-y-1">
-                  <label className="font-semibold text-neutral-500">Payment Mode</label>
-                  <select name="paymentMode" className="notion-input w-full p-2 rounded-lg border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold">
-                    <option value="CASH">💵 Cash</option>
-                    <option value="UPI">📱 UPI / PhonePe / GPay</option>
-                    <option value="BANK_TRANSFER">🏦 Bank Transfer</option>
-                  </select>
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-neutral-500 dark:text-neutral-400">Payment Mode</label>
+                  <input type="hidden" name="paymentMode" value={salaryPayoutMode} />
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSalaryPayoutMode("CASH")}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                        salaryPayoutMode === "CASH"
+                          ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800 hover:bg-neutral-100 dark:hover:bg-slate-800"
+                      }`}
+                    >
+                      <span>💵</span>
+                      <span>Cash</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSalaryPayoutMode("UPI")}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                        salaryPayoutMode === "UPI"
+                          ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800 hover:bg-neutral-100 dark:hover:bg-slate-800"
+                      }`}
+                    >
+                      <span>📱</span>
+                      <span>UPI</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSalaryPayoutMode("BANK_TRANSFER")}
+                      className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1 ${
+                        salaryPayoutMode === "BANK_TRANSFER"
+                          ? "bg-emerald-600 text-white border-emerald-600 shadow-sm"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800 hover:bg-neutral-100 dark:hover:bg-slate-800"
+                      }`}
+                    >
+                      <span>🏦</span>
+                      <span>Bank</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-1">
