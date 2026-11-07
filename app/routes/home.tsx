@@ -87,13 +87,17 @@ export async function loader({ request }: LoaderFunctionArgs) {
     (prisma as any).driverSalarySettlement ? withDbRetry(() => (prisma as any).driverSalarySettlement.findMany({ orderBy: { paymentDate: "desc" } })) : Promise.resolve([]),
   ]);
 
-  // Batch 2: User profiles & fleet
-  const [users, autos] = await Promise.all([
+  // Batch 2: User profiles, fleet & CNG Card swipes
+  const [users, autos, cngSwipes] = await Promise.all([
     withDbRetry(() => prisma.user.findMany({ orderBy: { createdAt: "desc" } })),
     withDbRetry(() => prisma.auto.findMany({ orderBy: { createdAt: "desc" } })),
+    withDbRetry(() => prisma.expense.findMany({
+      where: { type: "CNG_CARD_SWIPE" },
+      orderBy: { timestamp: "desc" },
+    })),
   ]);
 
-  return { users, expenses, loggedInUser, autos, pendingPayments, salarySettlements };
+  return { users, expenses, loggedInUser, autos, pendingPayments, salarySettlements, cngSwipes };
 }
 
 // Server Action - Database Writes & Gemini AI smart parser integration
@@ -107,7 +111,8 @@ export async function action({ request }: ActionFunctionArgs) {
     "create_expense", "delete_expense", "create_user", "delete_user",
     "update_user_password", "create_pending_payment", "collect_pending_payment",
     "mark_pending_received", "delete_pending_payment", "create_borrowed_due", "repay_borrowed_payment", "settle_driver_salary",
-    "create_weekly_earning", "import_whatsapp_transactions"
+    "create_weekly_earning", "import_whatsapp_transactions",
+    "create_cng_swipe", "delete_cng_swipe", "pay_cc_bill"
   ].includes(actionType || "");
 
   if (isViewOnly && isMutation) {
@@ -1004,11 +1009,113 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
+  // ─── CNG Card Actions ─────────────────────────────────────────────────── //
+
+  if (actionType === "create_cng_swipe") {
+    const senderName = formData.get("senderName")?.toString()?.trim() || "Bittu";
+    const amountsStr = formData.get("amounts")?.toString()?.trim() || "";
+    const dateStr = formData.get("date")?.toString() || null;
+    const entryDate = dateStr ? new Date(dateStr) : new Date();
+
+    const amounts = amountsStr
+      .split(/[\s,]+/)
+      .map((s) => parseKAmount(s.trim()))
+      .filter((n) => n > 0);
+
+    if (amounts.length === 0) {
+      return { error: "Please enter at least one valid amount." };
+    }
+
+    for (const amt of amounts) {
+      await prisma.expense.create({
+        data: {
+          amount: amt,
+          category: "cng_card",
+          notes: `CNG Card Swipe – ${senderName}`,
+          senderName,
+          type: "CNG_CARD_SWIPE",
+          approved: true,
+          settled: false,
+          timestamp: entryDate,
+        },
+      });
+    }
+
+    const total = amounts.reduce((a, b) => a + b, 0);
+    return {
+      success: true,
+      action: "create_cng_swipe",
+      count: amounts.length,
+      total,
+    };
+  }
+
+  if (actionType === "delete_cng_swipe") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    if (id > 0) {
+      await prisma.expense.delete({ where: { id, type: "CNG_CARD_SWIPE" } });
+    }
+    return { success: true, action: "delete_cng_swipe" };
+  }
+
+  if (actionType === "pay_cc_bill") {
+    const cycleStart = new Date(formData.get("cycleStart")?.toString() || "");
+    const cycleEnd = new Date(formData.get("cycleEnd")?.toString() || "");
+    const cycleLabel = formData.get("cycleLabel")?.toString() || "CNG Cycle";
+    const totalAmount = parseKAmount(formData.get("totalAmount")?.toString() || "0");
+
+    if (totalAmount <= 0) {
+      return { error: "No CNG swipes to settle for this cycle." };
+    }
+
+    // Create one lump-sum Expense entry in Cashflow
+    await prisma.expense.create({
+      data: {
+        amount: totalAmount,
+        category: "credit_card_cng",
+        notes: `Credit Card CNG Bill (${cycleLabel})`,
+        senderName: "Founder",
+        type: "EXPENSE",
+        approved: true,
+        settled: true,
+        timestamp: new Date(),
+      },
+    });
+
+    // Mark all CNG swipes in this cycle as settled
+    await prisma.expense.updateMany({
+      where: {
+        type: "CNG_CARD_SWIPE",
+        settled: false,
+        timestamp: { gte: cycleStart, lte: cycleEnd },
+      },
+      data: {
+        settled: true,
+        settledAt: new Date(),
+      },
+    });
+
+    const waText = [
+      `⛽ CNG CARD BILL PAID`,
+      `Cycle: ${cycleLabel}`,
+      `Total: ₹${totalAmount.toLocaleString("en-IN")}`,
+      `✅ Logged to Cashflow as Credit Card CNG expense`,
+    ].join("\n");
+
+    return {
+      success: true,
+      action: "pay_cc_bill",
+      totalAmount,
+      whatsappText: waText,
+      whatsappTitle: "CNG Bill Settled",
+    };
+  }
+
   return null;
 }
 
 export default function Home() {
-  const { users, expenses, loggedInUser, autos, pendingPayments = [], salarySettlements = [] } = useLoaderData() as any;
+  const { users, expenses, loggedInUser, autos, pendingPayments = [], salarySettlements = [], cngSwipes = [] } = useLoaderData() as any;
   const dbDrivers = (users || []).filter((u: any) => u.role === "DRIVER");
   const fallbackDrivers = [
     { id: 9991, name: "Bittu", phone: "", vehicleNumber: "", salary: 18000, role: "DRIVER" },
@@ -1121,9 +1228,16 @@ export default function Home() {
   };
 
   // Tab state & Dashboard workflow controls
-  const [activeTab, setActiveTab] = useState<"expenses" | "pending_dues" | "driver_salaries">("expenses");
+  const [activeTab, setActiveTab] = useState<"expenses" | "cng_card" | "pending_dues" | "driver_salaries">("expenses");
   const [expensesSubTab, setExpensesSubTab] = useState<"entry" | "ledger">("entry");
   const [showExpenseDashboard, setShowExpenseDashboard] = useState(false);
+
+  // CNG Card Tab State
+  const [cngCycleOffset, setCngCycleOffset] = useState(0);
+  const [cngSelectedBoy, setCngSelectedBoy] = useState<"Bittu" | "Gaurav">("Bittu");
+  const [cngAmountInput, setCngAmountInput] = useState("");
+  const [cngDateMode, setCngDateMode] = useState<"today" | "yesterday" | "custom">("today");
+  const [cngCustomDate, setCngCustomDate] = useState("");
 
   // Pending Payments & Borrowed Liabilities State
   const [showAddPendingModal, setShowAddPendingModal] = useState(false);
@@ -1330,19 +1444,16 @@ export default function Home() {
         } else {
           setShowExpenseDashboard(true);  // Show Ledger
         }
-      } else if (tabParam === "orders") {
-        setActiveTab("expenses");
+      } else if (tabParam === "cng_card") {
+        setActiveTab("cng_card");
+      } else if (tabParam === "pending_dues") {
+        setActiveTab("pending_dues");
+      } else if (tabParam === "driver_salaries") {
+        setActiveTab("driver_salaries");
       }
 
-      if (shareSuccessParam === "true") {
-        const count = parseInt(params.get("count") || "1");
-        const total = parseInt(params.get("total") || "0");
-        setShareSuccessInfo({ count, total });
-        // Clean URL to prevent showing toast again on page reload
-        window.history.replaceState({}, document.title, "/?tab=expenses");
-      } else if (shareErrorParam) {
-        setShareErrorInfo(shareErrorParam);
-        window.history.replaceState({}, document.title, "/?tab=expenses");
+      if (shareSuccessParam === "true" || shareErrorParam) {
+        window.history.replaceState({}, document.title, window.location.pathname);
       }
 
 
@@ -1441,7 +1552,7 @@ export default function Home() {
   };
 
   // Automated state resets upon switching tabs
-  const switchTab = (tab: "expenses" | "pending_dues" | "driver_salaries") => {
+  const switchTab = (tab: "expenses" | "cng_card" | "pending_dues" | "driver_salaries") => {
     setActiveTab(tab);
     setShowExpenseDashboard(false);
     setSidebarOpen(false);
@@ -1453,6 +1564,46 @@ export default function Home() {
   };
 
   const isBorrowedItem = (p: any) => p.status?.startsWith("BORROWED") || (p.title || "").includes("[BORROWED]");
+
+  // ─── CNG Card Cycle Helper ─────────────────────────────────────────────── //
+  const getCngCycle = (offset: number): { start: Date; end: Date; label: string } => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const day = now.getDate();
+
+    // Current cycle base: if today >= 4th, cycle started this month's 4th
+    let cycleStartMonth = day >= 4 ? month : month - 1;
+    let cycleStartYear = year;
+    if (cycleStartMonth < 0) { cycleStartMonth = 11; cycleStartYear--; }
+
+    // Apply offset
+    cycleStartMonth += offset;
+    while (cycleStartMonth > 11) { cycleStartMonth -= 12; cycleStartYear++; }
+    while (cycleStartMonth < 0) { cycleStartMonth += 12; cycleStartYear--; }
+
+    const cycleEndMonth = cycleStartMonth + 1 > 11 ? 0 : cycleStartMonth + 1;
+    const cycleEndYear = cycleStartMonth + 1 > 11 ? cycleStartYear + 1 : cycleStartYear;
+
+    const start = new Date(cycleStartYear, cycleStartMonth, 4, 0, 0, 0);
+    const end = new Date(cycleEndYear, cycleEndMonth, 4, 23, 59, 59);
+
+    const ms = MONTH_NAMES[cycleStartMonth].substring(0, 3);
+    const me = MONTH_NAMES[cycleEndMonth].substring(0, 3);
+    const label = `04 ${ms} – 04 ${me} ${cycleEndYear}`;
+    return { start, end, label };
+  };
+
+  const cngCycle = getCngCycle(cngCycleOffset);
+  const cngSwipesInCycle = (cngSwipes as any[]).filter((s: any) => {
+    const t = new Date(s.timestamp);
+    return t >= cngCycle.start && t <= cngCycle.end;
+  });
+  const cngUnpaidInCycle = cngSwipesInCycle.filter((s: any) => !s.settled);
+  const cngBittuTotal = cngSwipesInCycle.filter((s: any) => s.senderName === "Bittu").reduce((a: number, s: any) => a + (s.amount || 0), 0);
+  const cngGauravTotal = cngSwipesInCycle.filter((s: any) => s.senderName === "Gaurav").reduce((a: number, s: any) => a + (s.amount || 0), 0);
+  const cngCycleTotal = cngBittuTotal + cngGauravTotal;
+  const cngUnpaidTotal = cngUnpaidInCycle.reduce((a: number, s: any) => a + (s.amount || 0), 0);
 
   // Pending Dues & Borrowed Liabilities Aggregates
   const duesSummary = useMemo(() => {
@@ -1608,6 +1759,11 @@ export default function Home() {
   // Filtered Expenses
   const filteredExpenses = useMemo(() => {
     return expenses.filter((exp: any) => {
+      // Exclude special ledger types (e.g. CNG_CARD_SWIPE) from main Cashflow ledger
+      if (exp.type !== "INCOME" && exp.type !== "EXPENSE") {
+        return false;
+      }
+
       // 1. First apply Category filter (Expense vs Income)
       if (expenseCategoryFilter === "EXPENSE" && exp.type !== "EXPENSE") {
         return false;
@@ -1764,6 +1920,10 @@ export default function Home() {
         setOtherIncomeNote("");
       }
 
+      if (actionData.action === "create_cng_swipe") {
+        setCngAmountInput("");
+      }
+
       if (actionData.action === "create_weekly_earning") {
         setWeeklyV1("");
         setWeeklyV2("");
@@ -1867,6 +2027,27 @@ export default function Home() {
             <span>Expenses Tracking</span>
           </button>
 
+
+          {/* CNG Card Tab */}
+          {loggedInUser?.role !== "DRIVER" && (
+            <button
+              onClick={() => switchTab("cng_card")}
+              className={`sidebar-link w-[calc(100%-16px)] text-left flex items-center justify-between px-3.5 py-2.5 mx-2 rounded-md transition-all ${activeTab === "cng_card"
+                  ? "bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold shadow-sm"
+                  : "hover:bg-neutral-100 dark:hover:bg-[#1E293B]/60 text-[#5A6A85] dark:text-[#7C8BA1] font-medium"
+                }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <span className="text-sm">⛽</span>
+                <span>CNG Card</span>
+              </div>
+              {cngUnpaidTotal > 0 && (
+                <span className="text-[10px] font-mono font-bold bg-orange-500/20 text-orange-600 dark:text-orange-400 px-1.5 py-0.5 rounded">
+                  ₹{Math.round(cngUnpaidTotal / 1000)}k
+                </span>
+              )}
+            </button>
+          )}
 
           {/* Pending Dues & Receivables Tab */}
           {loggedInUser?.role !== "DRIVER" && (
@@ -3079,6 +3260,477 @@ export default function Home() {
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* ========================================================================= */}
+          {/* ⛽ CNG CREDIT CARD TAB VIEW */}
+          {/* ========================================================================= */}
+          {activeTab === "cng_card" && (
+            <div className="animate-fade-in space-y-6">
+              {/* Header & 4th-to-4th Cycle Selector */}
+              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
+                <div>
+                  <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
+                    <span>⛽</span>
+                    <span>CNG Credit Card Tracker</span>
+                  </h1>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                    Track daily credit card CNG swipes for Bittu &amp; Gaurav on a 4th-to-4th billing cycle, audit statement, and settle lump-sum CC bill into Cashflow.
+                  </p>
+                </div>
+
+                {/* 4th-to-4th Cycle Navigation */}
+                <div className="flex items-center gap-2 bg-white dark:bg-[#18181c] p-1.5 rounded-xl border border-neutral-200 dark:border-neutral-800 shadow-sm">
+                  <button
+                    type="button"
+                    onClick={() => setCngCycleOffset((c) => c - 1)}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-300 transition-all cursor-pointer"
+                    title="Previous billing cycle"
+                  >
+                    ◀ Prev Cycle
+                  </button>
+
+                  <div className="px-3 py-1 bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-bold text-xs rounded-lg flex items-center gap-1.5">
+                    <span>📅</span>
+                    <span>{cngCycle.label}</span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setCngCycleOffset((c) => c + 1)}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-300 transition-all cursor-pointer"
+                    title="Next billing cycle"
+                  >
+                    Next Cycle ▶
+                  </button>
+
+                  {cngCycleOffset !== 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setCngCycleOffset(0)}
+                      className="ml-1 px-2 py-1 text-[11px] font-bold text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200 bg-neutral-100 dark:bg-neutral-800 rounded-md transition-all cursor-pointer"
+                    >
+                      Active Cycle
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Top Summary Cards: Total CC Bill, Bittu, Gaurav */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {/* Total CC Bill */}
+                <div className="bg-white dark:bg-[#18181c] p-4 rounded-xl border border-neutral-200/80 dark:border-neutral-800/80 shadow-sm relative overflow-hidden">
+                  <div className="text-[11px] uppercase tracking-wider font-semibold text-neutral-500 dark:text-neutral-400">
+                    💳 Total CC Bill for Cycle
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-neutral-900 dark:text-neutral-50 mt-1">
+                    ₹{cngCycleTotal.toLocaleString("en-IN")}
+                  </div>
+                  <div className="mt-2 flex items-center justify-between text-xs">
+                    <span className="text-neutral-500 dark:text-neutral-400">
+                      {cngSwipesInCycle.length} swipes ({cngUnpaidInCycle.length} unpaid)
+                    </span>
+                    {cngCycleTotal === 0 ? (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-400">
+                        No Swipes
+                      </span>
+                    ) : cngUnpaidTotal === 0 ? (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                        ✅ Settled into Cashflow
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                        🟡 Settle 21st–24th (₹{cngUnpaidTotal.toLocaleString("en-IN")})
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Bittu Total */}
+                <div className="bg-white dark:bg-[#18181c] p-4 rounded-xl border border-neutral-200/80 dark:border-neutral-800/80 shadow-sm">
+                  <div className="text-[11px] uppercase tracking-wider font-semibold text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
+                    <span>👤</span>
+                    <span>Bittu Total</span>
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-neutral-900 dark:text-neutral-50 mt-1">
+                    ₹{cngBittuTotal.toLocaleString("en-IN")}
+                  </div>
+                  <div className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+                    {cngSwipesInCycle.filter((s: any) => s.senderName === "Bittu").length} swipes in cycle
+                  </div>
+                </div>
+
+                {/* Gaurav Total */}
+                <div className="bg-white dark:bg-[#18181c] p-4 rounded-xl border border-neutral-200/80 dark:border-neutral-800/80 shadow-sm">
+                  <div className="text-[11px] uppercase tracking-wider font-semibold text-purple-600 dark:text-purple-400 flex items-center gap-1.5">
+                    <span>👤</span>
+                    <span>Gaurav Total</span>
+                  </div>
+                  <div className="text-2xl font-bold font-mono text-neutral-900 dark:text-neutral-50 mt-1">
+                    ₹{cngGauravTotal.toLocaleString("en-IN")}
+                  </div>
+                  <div className="mt-2 text-xs text-neutral-500 dark:text-neutral-400">
+                    {cngSwipesInCycle.filter((s: any) => s.senderName === "Gaurav").length} swipes in cycle
+                  </div>
+                </div>
+              </div>
+
+              {/* Action Buttons: WhatsApp Share & Pay CC Bill */}
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-neutral-50 dark:bg-neutral-900/40 p-3 rounded-xl border border-neutral-200/60 dark:border-neutral-800/60">
+                <div className="text-xs text-neutral-600 dark:text-neutral-400">
+                  <span className="font-semibold text-neutral-800 dark:text-neutral-200">Cycle Status: </span>
+                  {cngUnpaidTotal > 0 ? (
+                    <span>₹{cngUnpaidTotal.toLocaleString("en-IN")} ready to settle to Cashflow on bill arrival (21st–24th)</span>
+                  ) : cngCycleTotal > 0 ? (
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">All swipes settled for this cycle!</span>
+                  ) : (
+                    <span>No swipes recorded for this cycle yet.</span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const lines = [
+                        `⛽ CNG CREDIT CARD BILL (${cngCycle.label})`,
+                        `• Bittu: ₹${cngBittuTotal.toLocaleString("en-IN")}`,
+                        `• Gaurav: ₹${cngGauravTotal.toLocaleString("en-IN")}`,
+                        `💳 TOTAL CC BILL: ₹${cngCycleTotal.toLocaleString("en-IN")}`,
+                        cngUnpaidTotal === 0 && cngCycleTotal > 0
+                          ? `✅ Status: Settled into Cashflow`
+                          : `🟡 Status: Pending settlement (Pay by 24th ${MONTH_NAMES[cngCycle.end.getMonth()]?.substring(0, 3)})`,
+                      ];
+                      setWhatsappShareModal({
+                        isOpen: true,
+                        title: `CNG Cycle: ${cngCycle.label}`,
+                        text: lines.join("\n"),
+                      });
+                    }}
+                    className="px-3.5 py-2 text-xs font-bold text-neutral-700 dark:text-neutral-200 bg-white dark:bg-[#18181c] hover:bg-neutral-100 dark:hover:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                  >
+                    <span>💬</span>
+                    <span>Share Cycle Summary</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={cngUnpaidTotal <= 0}
+                    onClick={() => {
+                      triggerConfirm(
+                        "Pay Credit Card Bill & Settle?",
+                        `This will create ONE lump-sum expense of ₹${cngUnpaidTotal.toLocaleString("en-IN")} in Cashflow under 'Credit Card CNG' and mark all ${cngUnpaidInCycle.length} swipes in this cycle (${cngCycle.label}) as settled. Proceed?`,
+                        () => {
+                          const fd = new FormData();
+                          fd.append("_action", "pay_cc_bill");
+                          fd.append("cycleStart", cngCycle.start.toISOString());
+                          fd.append("cycleEnd", cngCycle.end.toISOString());
+                          fd.append("cycleLabel", cngCycle.label);
+                          fd.append("totalAmount", cngUnpaidTotal.toString());
+                          submit(fd, { method: "post" });
+                        }
+                      );
+                    }}
+                    className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                  >
+                    <span>💳</span>
+                    <span>Pay CC Bill &amp; Log to Cashflow</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 3-Second Fast Entry: Daily CNG Swipes */}
+              <div className="bg-white dark:bg-[#18181c] p-5 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-sm space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">⚡</span>
+                    <h2 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+                      3-Second Fast Entry: Daily CNG Swipe
+                    </h2>
+                  </div>
+                  <span className="text-[11px] text-neutral-400 font-mono">
+                    Active Cycle: {cngCycle.label}
+                  </span>
+                </div>
+
+                <Form method="post" className="space-y-4">
+                  <input type="hidden" name="_action" value="create_cng_swipe" />
+                  <input type="hidden" name="senderName" value={cngSelectedBoy} />
+                  <input
+                    type="hidden"
+                    name="date"
+                    value={
+                      cngDateMode === "yesterday"
+                        ? new Date(Date.now() - 86400000).toISOString()
+                        : cngDateMode === "custom" && cngCustomDate
+                        ? new Date(cngCustomDate).toISOString()
+                        : new Date().toISOString()
+                    }
+                  />
+
+                  {/* Row 1: Boy Selector & Date Selector */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Driver / Boy Selector */}
+                    <div>
+                      <label className="block text-[11px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400 mb-1.5">
+                        Driver / Boy
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setCngSelectedBoy("Bittu")}
+                          className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                            cngSelectedBoy === "Bittu"
+                              ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                              : "bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                          }`}
+                        >
+                          <span>👤</span>
+                          <span>Bittu</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCngSelectedBoy("Gaurav")}
+                          className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                            cngSelectedBoy === "Gaurav"
+                              ? "bg-purple-600 text-white border-purple-600 shadow-sm"
+                              : "bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                          }`}
+                        >
+                          <span>👤</span>
+                          <span>Gaurav</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Date Selector */}
+                    <div>
+                      <label className="block text-[11px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400 mb-1.5">
+                        Swipe Date
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setCngDateMode("today")}
+                          className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer text-center ${
+                            cngDateMode === "today"
+                              ? "bg-[#5D87FF] text-white border-[#5D87FF] shadow-sm"
+                              : "bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                          }`}
+                        >
+                          Today
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCngDateMode("yesterday")}
+                          className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer text-center ${
+                            cngDateMode === "yesterday"
+                              ? "bg-[#5D87FF] text-white border-[#5D87FF] shadow-sm"
+                              : "bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                          }`}
+                        >
+                          Yesterday
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCngDateMode("custom")}
+                          className={`py-2 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer text-center ${
+                            cngDateMode === "custom"
+                              ? "bg-[#5D87FF] text-white border-[#5D87FF] shadow-sm"
+                              : "bg-neutral-50 dark:bg-neutral-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                          }`}
+                        >
+                          📅 Custom
+                        </button>
+                      </div>
+                      {cngDateMode === "custom" && (
+                        <input
+                          type="date"
+                          value={cngCustomDate}
+                          onChange={(e) => setCngCustomDate(e.target.value)}
+                          className="mt-2 w-full px-3 py-1.5 text-xs rounded-lg border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#18181c] text-neutral-800 dark:text-neutral-200 focus:outline-none focus:ring-2 focus:ring-[#5D87FF]"
+                        />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Row 2: Amount Input & Quick Shorthands */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-[11px] font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+                        Swipe Amount (₹)
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setCngAmountInput((prev) => (prev ? prev + "000" : "1000"))}
+                          className="text-[10px] font-bold px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-all cursor-pointer"
+                        >
+                          +000
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCngAmountInput("1000")}
+                          className="text-[10px] font-bold px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-all cursor-pointer"
+                        >
+                          1k
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCngAmountInput("1200")}
+                          className="text-[10px] font-bold px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-all cursor-pointer"
+                        >
+                          1.2k
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCngAmountInput("1500")}
+                          className="text-[10px] font-bold px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-all cursor-pointer"
+                        >
+                          1.5k
+                        </button>
+                        {cngAmountInput && (
+                          <button
+                            type="button"
+                            onClick={() => setCngAmountInput("")}
+                            className="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 hover:bg-rose-200 transition-all cursor-pointer"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <input
+                      type="text"
+                      name="amounts"
+                      value={cngAmountInput}
+                      onChange={(e) => setCngAmountInput(e.target.value)}
+                      placeholder="e.g. 1200 or 1200, 1150 (space/comma for batch entry)"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-[#121824] text-neutral-900 dark:text-neutral-100 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-[#5D87FF]"
+                      required
+                    />
+                    <p className="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1">
+                      💡 Enter single amount or batch separate with space/comma (e.g. <span className="font-mono text-neutral-600 dark:text-neutral-300">1200, 1150</span>) to log multiple fills at once.
+                    </p>
+                  </div>
+
+                  {/* Submit Button */}
+                  <button
+                    type="submit"
+                    className="w-full py-2.5 px-4 bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold rounded-xl shadow-md hover:shadow-lg transition-all cursor-pointer flex items-center justify-center gap-2 text-xs"
+                  >
+                    <span>⛽</span>
+                    <span>Log CNG Swipe for {cngSelectedBoy}</span>
+                  </button>
+                </Form>
+              </div>
+
+              {/* Cycle Log List */}
+              <div className="bg-white dark:bg-[#18181c] rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-sm overflow-hidden">
+                <div className="p-4 border-b border-neutral-100 dark:border-neutral-800 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">📋</span>
+                    <h3 className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+                      Cycle Swipes Log ({cngSwipesInCycle.length})
+                    </h3>
+                  </div>
+                  <div className="text-xs font-mono font-semibold text-neutral-500 dark:text-neutral-400">
+                    Cycle Total: ₹{cngCycleTotal.toLocaleString("en-IN")}
+                  </div>
+                </div>
+
+                {cngSwipesInCycle.length === 0 ? (
+                  <div className="p-8 text-center text-neutral-400 dark:text-neutral-500 text-xs">
+                    No CNG card swipes logged in this cycle ({cngCycle.label}).
+                  </div>
+                ) : (
+                  <div className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                    {cngSwipesInCycle.map((s: any) => {
+                      const swipeDate = new Date(s.timestamp);
+                      const isBittu = s.senderName === "Bittu";
+                      return (
+                        <div
+                          key={s.id}
+                          className="p-3.5 flex items-center justify-between hover:bg-neutral-50/60 dark:hover:bg-neutral-850/40 transition-all"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div
+                              className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs ${
+                                isBittu
+                                  ? "bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20"
+                                  : "bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20"
+                              }`}
+                            >
+                              {isBittu ? "B" : "G"}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold text-neutral-900 dark:text-neutral-100">
+                                  {s.senderName}
+                                </span>
+                                {s.settled ? (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                    ✅ Settled
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                                    🟡 Unsettled (Card Bill)
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-neutral-400 dark:text-neutral-500">
+                                {swipeDate.toLocaleDateString("en-IN", {
+                                  weekday: "short",
+                                  day: "numeric",
+                                  month: "short",
+                                  year: "numeric",
+                                })}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="text-right">
+                              <div className="text-sm font-bold font-mono text-neutral-900 dark:text-neutral-100">
+                                ₹{(s.amount || 0).toLocaleString("en-IN")}
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                triggerConfirm(
+                                  "Delete CNG Swipe?",
+                                  `Delete this ₹${(s.amount || 0).toLocaleString("en-IN")} CNG swipe for ${s.senderName}?`,
+                                  () => {
+                                    const fd = new FormData();
+                                    fd.append("_action", "delete_cng_swipe");
+                                    fd.append("id", s.id.toString());
+                                    submit(fd, { method: "post" });
+                                  }
+                                );
+                              }}
+                              className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-all cursor-pointer"
+                              title="Delete swipe"
+                            >
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                                />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -5070,6 +5722,74 @@ Per order :- 5955
             </div>
           </div>
         )}
+        {/* Mobile Bottom Navigation Bar */}
+        <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-[#18181c]/95 backdrop-blur-md border-t border-neutral-200 dark:border-neutral-800 px-2 py-1.5 flex items-center justify-around pb-safe shadow-lg">
+          <button
+            type="button"
+            onClick={() => switchTab("expenses")}
+            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg transition-all cursor-pointer ${
+              activeTab === "expenses"
+                ? "text-[#5D87FF] font-bold"
+                : "text-neutral-500 dark:text-neutral-400 font-medium hover:text-neutral-700 dark:hover:text-neutral-200"
+            }`}
+          >
+            <span className="text-base">💸</span>
+            <span className="text-[10px]">Cashflow</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => switchTab("cng_card")}
+            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg transition-all cursor-pointer relative ${
+              activeTab === "cng_card"
+                ? "text-[#5D87FF] font-bold"
+                : "text-neutral-500 dark:text-neutral-400 font-medium hover:text-neutral-700 dark:hover:text-neutral-200"
+            }`}
+          >
+            <div className="relative">
+              <span className="text-base">⛽</span>
+              {cngUnpaidTotal > 0 && (
+                <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-orange-500" />
+              )}
+            </div>
+            <span className="text-[10px]">CNG Card</span>
+          </button>
+
+          {loggedInUser?.role !== "DRIVER" && (
+            <button
+              type="button"
+              onClick={() => switchTab("pending_dues")}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg transition-all cursor-pointer relative ${
+                activeTab === "pending_dues"
+                  ? "text-[#5D87FF] font-bold"
+                  : "text-neutral-500 dark:text-neutral-400 font-medium hover:text-neutral-700 dark:hover:text-neutral-200"
+              }`}
+            >
+              <div className="relative">
+                <span className="text-base">🟡</span>
+                {pendingDuesSummary.totalPending > 0 && (
+                  <span className="absolute -top-1 -right-2 w-2 h-2 rounded-full bg-amber-500" />
+                )}
+              </div>
+              <span className="text-[10px]">Pending</span>
+            </button>
+          )}
+
+          {loggedInUser?.role !== "DRIVER" && (
+            <button
+              type="button"
+              onClick={() => switchTab("driver_salaries")}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg transition-all cursor-pointer ${
+                activeTab === "driver_salaries"
+                  ? "text-[#5D87FF] font-bold"
+                  : "text-neutral-500 dark:text-neutral-400 font-medium hover:text-neutral-700 dark:hover:text-neutral-200"
+              }`}
+            >
+              <span className="text-base">💵</span>
+              <span className="text-[10px]">Salaries</span>
+            </button>
+          )}
+        </nav>
       </main>
     </div>
   );
