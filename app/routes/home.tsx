@@ -112,7 +112,9 @@ export async function action({ request }: ActionFunctionArgs) {
     "update_user_password", "create_pending_payment", "collect_pending_payment",
     "mark_pending_received", "delete_pending_payment", "create_borrowed_due", "repay_borrowed_payment", "settle_driver_salary",
     "create_weekly_earning", "import_whatsapp_transactions",
-    "create_cng_swipe", "delete_cng_swipe", "pay_cc_bill"
+    "create_cng_swipe", "delete_cng_swipe", "pay_cc_bill",
+    "create_boy", "update_boy_salary", "delete_boy",
+    "create_driver", "update_driver", "delete_driver"
   ].includes(actionType || "");
 
   if (isViewOnly && isMutation) {
@@ -663,6 +665,71 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
+  // ─── Boy / Driver Management Actions in Salaries Tab ───────────────────── //
+
+  if (actionType === "create_boy") {
+    const name = formData.get("name")?.toString()?.trim() || "";
+    let phone = formData.get("phone")?.toString()?.trim() || "";
+    const salary = parseInt(formData.get("salary")?.toString() || "22000") || 22000;
+    const basisDays = formData.get("basisDays")?.toString()?.trim() || "30";
+
+    if (!name) {
+      return { error: "Boy Name is required." };
+    }
+
+    if (!phone) {
+      phone = `98${Math.floor(10000000 + Math.random() * 90000000)}`;
+    }
+
+    const existing = await prisma.user.findUnique({ where: { phone } });
+    if (existing) {
+      phone = `98${Math.floor(10000000 + Math.random() * 90000000)}`;
+    }
+
+    await prisma.user.create({
+      data: {
+        name,
+        phone,
+        role: "DRIVER",
+        salary,
+        passwordText: basisDays,
+        vehicleNumber: basisDays,
+        loginEnabled: false,
+      },
+    });
+
+    return { success: true, action: "create_boy" };
+  }
+
+  if (actionType === "update_boy_salary") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    const salary = parseInt(formData.get("salary")?.toString() || "22000") || 22000;
+    const basisDays = formData.get("basisDays")?.toString()?.trim() || "30";
+
+    if (id <= 0) {
+      return { error: "Invalid Boy ID." };
+    }
+
+    await prisma.user.update({
+      where: { id },
+      data: {
+        salary,
+        passwordText: basisDays,
+        vehicleNumber: basisDays,
+      },
+    });
+
+    return { success: true, action: "update_boy_salary" };
+  }
+
+  if (actionType === "delete_boy") {
+    const id = parseInt(formData.get("id")?.toString() || "0") || 0;
+    if (id > 0) {
+      await prisma.user.delete({ where: { id } });
+    }
+    return { success: true, action: "delete_boy" };
+  }
+
 
 
   if (actionType === "create_pending_payment") {
@@ -975,12 +1042,19 @@ export async function action({ request }: ActionFunctionArgs) {
       });
     }
 
+    const basisDaysStr = formData.get("basisDays")?.toString() || "30";
+    const driverCat = driverName.toLowerCase().includes("gaurav")
+      ? "gaurav_advance"
+      : driverName.toLowerCase().includes("bittu")
+      ? "bittu"
+      : "other";
+
     // Log the salary payment into Expense ledger
     await (prisma as any).expense.create({
       data: {
         amount: netPaidAmount,
-        category: "bittu",
-        notes: `Salary for ${monthYear} (${daysWorked} days) to ${driverName}. Base: ₹${baseSalary}, Advances Deducted: ₹${advancesDeducted}${bonusAmount > 0 ? `, Bonus: ₹${bonusAmount}` : ''}${notes ? ` (${notes})` : ''}`,
+        category: driverCat,
+        notes: `Salary for ${monthYear} (${daysWorked} days on ${basisDaysStr}-day basis) to ${driverName}. Base: ₹${baseSalary}, Advances Deducted: ₹${advancesDeducted}${bonusAmount > 0 ? `, Bonus: ₹${bonusAmount}` : ''}${notes ? ` (${notes})` : ''}`,
         senderName: driverName,
         type: "EXPENSE",
         approved: true,
@@ -992,6 +1066,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const waSalarySlip = [
       "SALARY SETTLEMENT",
       `• Driver: ${driverName}`,
+      `• Salary Basis: ${basisDaysStr} Days (Base: ₹${baseSalary.toLocaleString("en-IN")})`,
       `• Days Worked: ${daysWorked} days`,
       `• Earned Salary: ₹${earnedSalary.toLocaleString("en-IN")}`,
       (advancesDeducted > 0 ? `• Advances Deducted: -₹${advancesDeducted.toLocaleString("en-IN")}` : null),
@@ -1118,8 +1193,8 @@ export default function Home() {
   const { users, expenses, loggedInUser, autos, pendingPayments = [], salarySettlements = [], cngSwipes = [] } = useLoaderData() as any;
   const dbDrivers = (users || []).filter((u: any) => u.role === "DRIVER");
   const fallbackDrivers = [
-    { id: 9991, name: "Bittu", phone: "", vehicleNumber: "", salary: 18000, role: "DRIVER" },
-    { id: 9992, name: "Gaurav", phone: "", vehicleNumber: "", salary: 18000, role: "DRIVER" }
+    { id: 9991, name: "Bittu", phone: "9800000002", vehicleNumber: "30", passwordText: "30", salary: 22000, role: "DRIVER" },
+    { id: 9992, name: "Gaurav", phone: "9800000001", vehicleNumber: "30", passwordText: "30", salary: 22000, role: "DRIVER" }
   ];
   const drivers = [...dbDrivers];
   fallbackDrivers.forEach(fb => {
@@ -1265,10 +1340,22 @@ export default function Home() {
   const [driverDaysWorkedMap, setDriverDaysWorkedMap] = useState<Record<string, number>>({});
   const [driverBonusMap, setDriverBonusMap] = useState<Record<string, number>>({});
   const [driverDeductionMap, setDriverDeductionMap] = useState<Record<string, number>>({});
+  const [driverBasisMap, setDriverBasisMap] = useState<Record<string, number>>({});
+  const [driverSalaryMap, setDriverSalaryMap] = useState<Record<string, number>>({});
   const [settlingDriver, setSettlingDriver] = useState<any | null>(null);
   const [selectedSlipData, setSelectedSlipData] = useState<any | null>(null);
   const [viewingDriverAdvances, setViewingDriverAdvances] = useState<any | null>(null);
   const [copiedSlipText, setCopiedSlipText] = useState(false);
+
+  // Add / Edit Boy Modal States
+  const [showAddBoyModal, setShowAddBoyModal] = useState(false);
+  const [newBoyName, setNewBoyName] = useState("");
+  const [newBoySalary, setNewBoySalary] = useState("22000");
+  const [newBoyBasis, setNewBoyBasis] = useState("30");
+  const [newBoyPhone, setNewBoyPhone] = useState("");
+  const [editingBoy, setEditingBoy] = useState<any | null>(null);
+  const [editBoySalary, setEditBoySalary] = useState("22000");
+  const [editBoyBasis, setEditBoyBasis] = useState("30");
 
 
 
@@ -1667,12 +1754,14 @@ export default function Home() {
   // Driver Salary Hub Live Reconciliation
   const driverSalaryReconciliation = useMemo(() => {
     return drivers.map((d: any) => {
-      const baseSalary = d.salary || 16500;
-      const daysWorked = driverDaysWorkedMap[d.id] !== undefined ? driverDaysWorkedMap[d.id] : 30;
+      const baseSalary = driverSalaryMap[d.id] !== undefined ? driverSalaryMap[d.id] : (d.salary || 22000);
+      const defaultBasis = parseInt(d.passwordText || d.vehicleNumber || "30") || 30;
+      const basisDays = driverBasisMap[d.id] !== undefined ? driverBasisMap[d.id] : defaultBasis;
+      const daysWorked = driverDaysWorkedMap[d.id] !== undefined ? driverDaysWorkedMap[d.id] : (basisDays === 26 ? 26 : 30);
       const bonus = driverBonusMap[d.id] || 0;
       const customDeductions = driverDeductionMap[d.id] || 0;
-      const dailyRate = Math.round(baseSalary / 30);
-      const earnedSalary = Math.round((baseSalary / 30) * daysWorked);
+      const dailyRate = Math.round(baseSalary / basisDays);
+      const earnedSalary = Math.round((baseSalary / basisDays) * daysWorked);
 
       // Find all un-settled advances for this driver with smart fuzzy & first-name matching
       const unSettledAdvances = expenses.filter((e: any) => {
@@ -1715,6 +1804,7 @@ export default function Home() {
       return {
         driver: d,
         baseSalary,
+        basisDays,
         daysWorked,
         dailyRate,
         earnedSalary,
@@ -1725,12 +1815,13 @@ export default function Home() {
         netPayable,
       };
     });
-  }, [drivers, expenses, driverDaysWorkedMap, driverBonusMap, driverDeductionMap]);
+  }, [drivers, expenses, driverDaysWorkedMap, driverBonusMap, driverDeductionMap, driverBasisMap, driverSalaryMap]);
 
   const generateWhatsAppSlipText = (item: any) => {
     return [
       "SALARY SETTLEMENT",
       `• Driver: ${item.driver.name}`,
+      `• Salary Basis: ${item.basisDays} Days (Base: ₹${item.baseSalary.toLocaleString('en-IN')})`,
       `• Days Worked: ${item.daysWorked} days (₹${item.dailyRate}/day)`,
       `• Earned Salary: ₹${item.earnedSalary.toLocaleString('en-IN')}`,
       (item.totalAdvances > 0 ? `• Advances Deducted: -₹${item.totalAdvances.toLocaleString('en-IN')} (${item.unSettledAdvances.length} slips)` : null),
@@ -4100,33 +4191,50 @@ export default function Home() {
           {/* ========================================================================= */}
           {activeTab === "driver_salaries" && (
             <div className="animate-fade-in space-y-6">
-              {/* Header & Month Selector */}
+              {/* Header, Month Selector & Add Boy Button */}
               <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 pb-4 border-b border-[#edece9] dark:border-[#2f2f2f]">
                 <div>
                   <h1 className="text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 flex items-center gap-2">
                     <span>💵</span>
-                    <span>Driver Salaries & Advance Settlement Hub</span>
+                    <span>Driver Salaries &amp; Advance Settlement Hub</span>
                   </h1>
                   <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                    Calculate exact working day salary, auto-deduct cash advances taken during the month, settle with 1-click, and send WhatsApp slips!
+                    Custom Base Salaries, 30-Day vs 26-Day calculation rules, live advance deductions, and 1-click settlement vouchers!
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-neutral-500">Settlement Month:</span>
-                  <input
-                    type="month"
-                    value={salaryMonthYear}
-                    onChange={(e) => setSalaryMonthYear(e.target.value)}
-                    className="notion-input px-3 py-1.5 text-xs font-bold rounded-lg border border-neutral-200 dark:border-slate-800 bg-white dark:bg-[#1e293b] text-neutral-800 dark:text-white outline-none cursor-pointer font-mono"
-                  />
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5 bg-white dark:bg-[#1e293b] px-3 py-1.5 rounded-xl border border-neutral-200 dark:border-slate-800 shadow-sm">
+                    <span className="text-xs font-semibold text-neutral-500">Month:</span>
+                    <input
+                      type="month"
+                      value={salaryMonthYear}
+                      onChange={(e) => setSalaryMonthYear(e.target.value)}
+                      className="text-xs font-bold bg-transparent text-neutral-800 dark:text-white outline-none cursor-pointer font-mono"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewBoyName("");
+                      setNewBoySalary("22000");
+                      setNewBoyBasis("30");
+                      setNewBoyPhone("");
+                      setShowAddBoyModal(true);
+                    }}
+                    className="px-3.5 py-2 text-xs font-bold text-white bg-[#5D87FF] hover:bg-[#4570EA] rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                  >
+                    <span>➕</span>
+                    <span>Add New Boy</span>
+                  </button>
                 </div>
               </div>
 
               {/* Summary Metric Cards */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
-                  <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Active Drivers</span>
+                  <span className="text-[11px] font-bold text-neutral-500 uppercase tracking-wider block">Active Boys</span>
                   <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
                     {drivers.length}
                   </span>
@@ -4135,7 +4243,7 @@ export default function Home() {
                 <div className="p-4 rounded-xl bg-white dark:bg-[#1e293b] border border-neutral-200/70 dark:border-slate-800 shadow-sm space-y-1">
                   <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider block">Base Salary Commitment</span>
                   <span className="text-xl font-extrabold font-mono text-neutral-900 dark:text-white">
-                    ₹{drivers.reduce((s: number, d: any) => s + (d.salary || 16500), 0).toLocaleString("en-IN")}
+                    ₹{driverSalaryReconciliation.reduce((s: number, r: any) => s + r.baseSalary, 0).toLocaleString("en-IN")}
                   </span>
                 </div>
 
@@ -4154,104 +4262,266 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Driver Reconciliation Interactive Grid */}
+              {/* Driver Reconciliation Interactive Cards */}
               <div className="space-y-4">
-                <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
-                  Live Month-End Driver Payout Breakdown
-                </h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-700 dark:text-neutral-300">
+                    Live Month-End Driver Payout Breakdown
+                  </h2>
+                  <span className="text-xs text-neutral-400 font-mono">
+                    Formula: Math.round((Base ÷ Basis) × Days) - Advances + Bonus
+                  </span>
+                </div>
 
-                <div className="space-y-3">
+                <div className="space-y-4">
                   {driverSalaryReconciliation.map((item: any) => (
                     <div
                       key={item.driver.id}
                       className="p-5 rounded-2xl bg-white dark:bg-[#1e293b] border border-neutral-200/80 dark:border-slate-800 shadow-sm space-y-4 transition-all hover:border-[#5D87FF]/40"
                     >
-                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        {/* Driver Info */}
-                        <div className="flex items-center gap-3.5">
-                          <div className="w-11 h-11 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-extrabold text-base flex items-center justify-center border border-[#5D87FF]/20">
+                      {/* Driver Info Header */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-neutral-100 dark:border-slate-800">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full bg-[#ECF2FF] dark:bg-[#5D87FF]/15 text-[#5D87FF] font-extrabold text-base flex items-center justify-center border border-[#5D87FF]/20">
                             {item.driver.name.charAt(0)}
                           </div>
                           <div>
-                            <h3 className="text-base font-bold text-neutral-900 dark:text-white flex items-center gap-2">
-                              <span>{item.driver.name}</span>
-                              {item.driver.vehicleNumber && (
-                                <span className="text-[10px] font-mono bg-neutral-100 dark:bg-slate-800 text-neutral-600 dark:text-slate-300 px-2 py-0.5 rounded font-bold">
-                                  🛺 {item.driver.vehicleNumber}
-                                </span>
-                              )}
-                            </h3>
+                            <div className="flex items-center gap-2">
+                              <h3 className="text-base font-bold text-neutral-900 dark:text-white">
+                                {item.driver.name}
+                              </h3>
+                              <span className="text-[10px] font-mono bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full font-bold">
+                                {item.basisDays}-Day Rule
+                              </span>
+                              <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                                ₹{item.baseSalary.toLocaleString("en-IN")}/mo
+                              </span>
+                            </div>
                             <span className="text-xs text-neutral-400 font-mono">
-                              📞 {item.driver.phone} • Base: ₹{item.baseSalary.toLocaleString("en-IN")}/mo (₹{item.dailyRate}/day)
+                              📞 {item.driver.phone || "No phone"} • Daily Rate: ₹{item.dailyRate}/day
                             </span>
                           </div>
                         </div>
 
-                        {/* Working Days & Bonus Adjusters */}
-                        <div className="flex flex-wrap items-center gap-3 text-xs">
-                          {/* Days Worked */}
-                          <div className="flex items-center gap-1.5 bg-neutral-50 dark:bg-slate-900/60 p-1.5 rounded-xl border border-neutral-200/70 dark:border-slate-800">
-                            <span className="text-neutral-500 font-medium pl-1">Days:</span>
-                            <input
-                              type="number"
-                              min="1"
-                              max="31"
-                              value={item.daysWorked}
-                              onChange={(e) => {
-                                const val = Math.min(31, Math.max(0, parseInt(e.target.value) || 0));
-                                setDriverDaysWorkedMap((prev) => ({ ...prev, [item.driver.id]: val }));
-                              }}
-                              className="w-12 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 rounded-md py-0.5 outline-none"
-                            />
-                            <span className="text-[10px] text-slate-400 pr-1">(= ₹{item.earnedSalary.toLocaleString("en-IN")})</span>
-                          </div>
+                        {/* Edit Rule / Delete Buttons */}
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingBoy(item.driver);
+                              setEditBoySalary(item.baseSalary.toString());
+                              setEditBoyBasis(item.basisDays.toString());
+                            }}
+                            className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-neutral-100 hover:bg-neutral-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-neutral-700 dark:text-slate-200 transition-all cursor-pointer flex items-center gap-1"
+                            title="Edit monthly base salary or calculation basis"
+                          >
+                            <span>✏️</span>
+                            <span>Edit Rule</span>
+                          </button>
 
-                          {/* Bonus */}
-                          <div className="flex items-center gap-1 bg-emerald-500/5 p-1.5 rounded-xl border border-emerald-500/20">
-                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold pl-1">+Bonus:</span>
-                            <input
-                              type="number"
-                              min="0"
-                              placeholder="0"
-                              value={item.bonus || ""}
-                              onChange={(e) => {
-                                const val = Math.max(0, parseFloat(e.target.value) || 0);
-                                setDriverBonusMap((prev) => ({ ...prev, [item.driver.id]: val }));
-                              }}
-                              className="w-16 text-center font-bold font-mono bg-white dark:bg-slate-800 border border-emerald-500/30 rounded-md py-0.5 outline-none text-emerald-600 dark:text-emerald-400"
-                            />
-                          </div>
-
-                          {/* Un-deducted Advances */}
-                          <div className="flex items-center gap-1.5 bg-rose-500/5 p-1.5 rounded-xl border border-rose-500/20">
-                            <span className="text-rose-500 font-semibold pl-1">Advances:</span>
+                          {drivers.length > 2 && (
                             <button
                               type="button"
-                              onClick={() => setViewingDriverAdvances(item)}
-                              className="font-bold font-mono text-rose-500 hover:underline cursor-pointer flex items-center gap-1"
-                              title="Click to view all advances"
+                              onClick={() => {
+                                triggerConfirm(
+                                  "Delete Boy?",
+                                  `Are you sure you want to remove ${item.driver.name} from the roster?`,
+                                  () => {
+                                    const fd = new FormData();
+                                    fd.append("_action", "delete_boy");
+                                    fd.append("id", item.driver.id.toString());
+                                    submit(fd, { method: "post" });
+                                  }
+                                );
+                              }}
+                              className="p-1.5 text-neutral-400 hover:text-rose-500 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-all cursor-pointer"
+                              title="Delete boy"
                             >
-                              <span>-₹{item.totalAdvances.toLocaleString("en-IN")}</span>
-                              <span className="text-[9px] bg-rose-500/20 px-1 py-0.2 rounded font-mono">
-                                {item.unSettledAdvances.length} slips 👁️
-                              </span>
+                              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Interactive Calculator Formula Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-neutral-50/80 dark:bg-slate-900/50 p-3.5 rounded-xl border border-neutral-200/60 dark:border-slate-800/80">
+                        {/* Monthly Base Salary */}
+                        <div>
+                          <label className="block text-[10px] uppercase tracking-wider font-bold text-neutral-500 dark:text-slate-400 mb-1">
+                            Monthly Base Salary (₹)
+                          </label>
+                          <input
+                            type="number"
+                            value={item.baseSalary}
+                            onChange={(e) => {
+                              const val = Math.max(0, parseInt(e.target.value) || 0);
+                              setDriverSalaryMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                            }}
+                            className="w-full text-xs font-mono font-bold bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-neutral-900 dark:text-white outline-none focus:ring-1 focus:ring-[#5D87FF]"
+                          />
+                        </div>
+
+                        {/* Calculation Basis (Divisor) Toggle Pills */}
+                        <div>
+                          <label className="block text-[10px] uppercase tracking-wider font-bold text-neutral-500 dark:text-slate-400 mb-1">
+                            Basis Divisor
+                          </label>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDriverBasisMap((prev) => ({ ...prev, [item.driver.id]: 30 }));
+                              }}
+                              className={`py-1.5 px-2 rounded-lg text-xs font-bold transition-all cursor-pointer text-center ${
+                                item.basisDays === 30
+                                  ? "bg-[#5D87FF] text-white shadow-sm"
+                                  : "bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 text-neutral-600 dark:text-slate-300 hover:bg-neutral-100 dark:hover:bg-slate-700"
+                              }`}
+                            >
+                              30 Days
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDriverBasisMap((prev) => ({ ...prev, [item.driver.id]: 26 }));
+                              }}
+                              className={`py-1.5 px-2 rounded-lg text-xs font-bold transition-all cursor-pointer text-center ${
+                                item.basisDays === 26
+                                  ? "bg-[#5D87FF] text-white shadow-sm"
+                                  : "bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 text-neutral-600 dark:text-slate-300 hover:bg-neutral-100 dark:hover:bg-slate-700"
+                              }`}
+                            >
+                              26 Days
                             </button>
                           </div>
                         </div>
+
+                        {/* Days Worked */}
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[10px] uppercase tracking-wider font-bold text-neutral-500 dark:text-slate-400">
+                              Days Worked
+                            </label>
+                            <span className="text-[10px] font-mono text-neutral-400">
+                              (= ₹{item.earnedSalary.toLocaleString("en-IN")})
+                            </span>
+                          </div>
+                          <input
+                            type="number"
+                            min="0"
+                            max="31"
+                            value={item.daysWorked}
+                            onChange={(e) => {
+                              const val = Math.min(31, Math.max(0, parseInt(e.target.value) || 0));
+                              setDriverDaysWorkedMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                            }}
+                            className="w-full text-xs font-mono font-bold bg-white dark:bg-slate-800 border border-neutral-200 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-neutral-900 dark:text-white outline-none focus:ring-1 focus:ring-[#5D87FF]"
+                          />
+                        </div>
+
+                        {/* Bonus Input */}
+                        <div>
+                          <label className="block text-[10px] uppercase tracking-wider font-bold text-emerald-600 dark:text-emerald-400 mb-1">
+                            + Bonus (₹)
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder="0"
+                            value={item.bonus || ""}
+                            onChange={(e) => {
+                              const val = Math.max(0, parseFloat(e.target.value) || 0);
+                              setDriverBonusMap((prev) => ({ ...prev, [item.driver.id]: val }));
+                            }}
+                            className="w-full text-xs font-mono font-bold bg-white dark:bg-slate-800 border border-emerald-500/30 rounded-lg px-2.5 py-1.5 text-emerald-600 dark:text-emerald-400 outline-none focus:ring-1 focus:ring-emerald-500"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Individual Unsettled Advances Breakdown (Requirement 3) */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs font-bold text-neutral-700 dark:text-neutral-300">
+                          <span className="flex items-center gap-1.5 text-rose-500">
+                            <span>⚠️</span>
+                            <span>Unsettled Advances for {item.driver.name} ({item.unSettledAdvances.length} slips)</span>
+                          </span>
+                          <span className="font-mono text-rose-500 font-extrabold">
+                            Total Advances: -₹{item.totalAdvances.toLocaleString("en-IN")}
+                          </span>
+                        </div>
+
+                        {item.unSettledAdvances.length === 0 ? (
+                          <div className="p-3 rounded-xl bg-neutral-50 dark:bg-slate-900/40 border border-neutral-100 dark:border-slate-800 text-xs text-neutral-400 text-center">
+                            ✨ No unsettled advances for {item.driver.name} this month.
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                            {item.unSettledAdvances.map((adv: any) => (
+                              <div
+                                key={adv.id}
+                                className="p-2.5 rounded-xl bg-rose-50/40 dark:bg-rose-500/10 border border-rose-200/60 dark:border-rose-500/20 flex items-center justify-between text-xs"
+                              >
+                                <div className="min-w-0 pr-2">
+                                  <div className="font-bold text-rose-600 dark:text-rose-400 font-mono">
+                                    ₹{adv.amount.toLocaleString("en-IN")}
+                                  </div>
+                                  <div className="text-[11px] text-neutral-600 dark:text-neutral-300 truncate">
+                                    {adv.notes || "Advance payment"}
+                                  </div>
+                                </div>
+                                <div className="text-[10px] font-mono text-neutral-400 whitespace-nowrap">
+                                  {new Date(adv.timestamp).toLocaleDateString(undefined, {
+                                    month: "short",
+                                    day: "numeric",
+                                  })}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
                       {/* Payout Calculation Bar & Actions */}
                       <div className="pt-3 border-t border-neutral-100 dark:border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
-                        <div className="flex items-baseline gap-2">
-                          <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">
-                            Net Payable Payout:
-                          </span>
-                          <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
-                            ₹{item.netPayable.toLocaleString("en-IN")}
-                          </span>
+                        <div>
+                          <div className="flex items-baseline gap-2">
+                            <span className="text-xs text-slate-400 uppercase font-bold tracking-wider">
+                              Net Payable Payout:
+                            </span>
+                            <span className="text-xl font-extrabold font-mono text-emerald-600 dark:text-emerald-400">
+                              ₹{item.netPayable.toLocaleString("en-IN")}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-neutral-400 font-mono mt-0.5">
+                            Earned: ₹{item.earnedSalary.toLocaleString("en-IN")} (₹{item.baseSalary}/{item.basisDays}d × {item.daysWorked}d)
+                            {item.totalAdvances > 0 && ` - Adv: ₹${item.totalAdvances.toLocaleString("en-IN")}`}
+                            {item.bonus > 0 && ` + Bonus: ₹${item.bonus.toLocaleString("en-IN")}`}
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-2">
+                          {/* 1-Click Save Rule if edited */}
+                          {(driverSalaryMap[item.driver.id] !== undefined || driverBasisMap[item.driver.id] !== undefined) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const fd = new FormData();
+                                fd.append("_action", "update_boy_salary");
+                                fd.append("id", item.driver.id.toString());
+                                fd.append("salary", item.baseSalary.toString());
+                                fd.append("basisDays", item.basisDays.toString());
+                                submit(fd, { method: "post" });
+                              }}
+                              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
+                              title="Save this salary and basis rule permanently to database"
+                            >
+                              <span>💾</span>
+                              <span>Save Rule</span>
+                            </button>
+                          )}
+
                           {/* WhatsApp Slip Button */}
                           <button
                             type="button"
@@ -4272,7 +4542,7 @@ export default function Home() {
                             className="px-3.5 py-1.5 bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold text-xs rounded-xl shadow-sm transition-all cursor-pointer flex items-center gap-1.5 active:scale-95"
                           >
                             <span>💸</span>
-                            <span>Settle & Pay Salary</span>
+                            <span>Settle &amp; Pay Salary</span>
                           </button>
                         </div>
                       </div>
@@ -4801,7 +5071,7 @@ export default function Home() {
               <div className="p-4 rounded-xl bg-neutral-50 dark:bg-slate-900/60 border border-neutral-100 dark:border-slate-800 space-y-2 text-xs">
                 <div className="flex justify-between">
                   <span className="text-slate-400">Days Worked:</span>
-                  <span className="font-mono font-bold">{settlingDriver.daysWorked} days</span>
+                  <span className="font-mono font-bold">{settlingDriver.daysWorked} days ({settlingDriver.basisDays || 30}-day basis)</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Earned Base Pay:</span>
@@ -4838,6 +5108,7 @@ export default function Home() {
                 <input type="hidden" name="otherDeductions" value={settlingDriver.customDeductions} />
                 <input type="hidden" name="netPaidAmount" value={settlingDriver.netPayable} />
                 <input type="hidden" name="advanceIds" value={JSON.stringify(settlingDriver.unSettledAdvances.map((a: any) => a.id))} />
+                <input type="hidden" name="basisDays" value={settlingDriver.basisDays || "30"} />
 
                 <div className="space-y-1">
                   <label className="font-semibold text-neutral-500">Payment Mode</label>
@@ -4908,6 +5179,180 @@ export default function Home() {
           </div>
         )}
 
+        {/* ========================================================================= */}
+        {/* MODAL: ADD NEW BOY */}
+        {/* ========================================================================= */}
+        {showAddBoyModal && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setShowAddBoyModal(false)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <h3 className="text-base font-bold flex items-center gap-2 text-neutral-900 dark:text-white">
+                  <span>👤</span>
+                  <span>Add New Boy / Driver</span>
+                </h3>
+                <button type="button" onClick={() => setShowAddBoyModal(false)} className="text-neutral-400 hover:text-neutral-600 cursor-pointer">✕</button>
+              </div>
+
+              <Form method="post" onSubmit={() => setShowAddBoyModal(false)} className="space-y-4 text-xs">
+                <input type="hidden" name="_action" value="create_boy" />
+                <input type="hidden" name="basisDays" value={newBoyBasis} />
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-600 dark:text-neutral-300">Boy Name *</label>
+                  <input
+                    type="text"
+                    name="name"
+                    value={newBoyName}
+                    onChange={(e) => setNewBoyName(e.target.value)}
+                    placeholder="e.g. Rahul, Sonu"
+                    className="w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-bold text-xs"
+                    required
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-600 dark:text-neutral-300">Monthly Base Salary (₹)</label>
+                  <input
+                    type="number"
+                    name="salary"
+                    value={newBoySalary}
+                    onChange={(e) => setNewBoySalary(e.target.value)}
+                    placeholder="22000"
+                    className="w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-mono font-bold text-xs"
+                    required
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-neutral-600 dark:text-neutral-300">Calculation Basis Rule</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setNewBoyBasis("30")}
+                      className={`py-2 px-3 rounded-xl font-bold border transition-all cursor-pointer text-center ${
+                        newBoyBasis === "30"
+                          ? "bg-[#5D87FF] text-white border-[#5D87FF]"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800"
+                      }`}
+                    >
+                      30-Day Basis (Standard)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewBoyBasis("26")}
+                      className={`py-2 px-3 rounded-xl font-bold border transition-all cursor-pointer text-center ${
+                        newBoyBasis === "26"
+                          ? "bg-[#5D87FF] text-white border-[#5D87FF]"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800"
+                      }`}
+                    >
+                      26-Day Basis (4 Offs)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-600 dark:text-neutral-300">Phone Number (Optional)</label>
+                  <input
+                    type="tel"
+                    name="phone"
+                    value={newBoyPhone}
+                    onChange={(e) => setNewBoyPhone(e.target.value)}
+                    placeholder="e.g. 9876543210 (leave empty to auto-generate)"
+                    className="w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none text-xs"
+                  />
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button type="button" onClick={() => setShowAddBoyModal(false)} className="flex-1 py-2.5 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold hover:bg-neutral-200 transition-all cursor-pointer">
+                    Cancel
+                  </button>
+                  <button type="submit" className="flex-1 py-2.5 rounded-xl bg-[#5D87FF] hover:bg-[#4570EA] text-white font-bold shadow-sm transition-all cursor-pointer">
+                    Add Boy
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* MODAL: EDIT BOY SALARY RULE */}
+        {/* ========================================================================= */}
+        {editingBoy && (
+          <div className="fixed inset-0 z-[999] flex items-center justify-center p-4 animate-fade-in">
+            <div className="absolute inset-0 bg-black/75 backdrop-blur-md" onClick={() => setEditingBoy(null)} />
+            <div className="relative bg-white dark:bg-[#18181c] border border-neutral-200/80 dark:border-neutral-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4 animate-scale-up text-neutral-800 dark:text-neutral-200">
+              <div className="flex justify-between items-center pb-3 border-b border-neutral-100 dark:border-neutral-800">
+                <h3 className="text-base font-bold flex items-center gap-2 text-neutral-900 dark:text-white">
+                  <span>✏️</span>
+                  <span>Edit Salary Rule: {editingBoy.name}</span>
+                </h3>
+                <button type="button" onClick={() => setEditingBoy(null)} className="text-neutral-400 hover:text-neutral-600 cursor-pointer">✕</button>
+              </div>
+
+              <Form method="post" onSubmit={() => setEditingBoy(null)} className="space-y-4 text-xs">
+                <input type="hidden" name="_action" value="update_boy_salary" />
+                <input type="hidden" name="id" value={editingBoy.id} />
+                <input type="hidden" name="basisDays" value={editBoyBasis} />
+
+                <div className="space-y-1">
+                  <label className="font-semibold text-neutral-600 dark:text-neutral-300">Monthly Base Salary (₹)</label>
+                  <input
+                    type="number"
+                    name="salary"
+                    value={editBoySalary}
+                    onChange={(e) => setEditBoySalary(e.target.value)}
+                    className="w-full p-2.5 rounded-xl border border-neutral-200 dark:border-slate-800 bg-neutral-50 dark:bg-slate-900 outline-none font-mono font-bold text-sm"
+                    required
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="font-semibold text-neutral-600 dark:text-neutral-300">Calculation Basis Rule</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditBoyBasis("30")}
+                      className={`py-2 px-3 rounded-xl font-bold border transition-all cursor-pointer text-center ${
+                        editBoyBasis === "30"
+                          ? "bg-[#5D87FF] text-white border-[#5D87FF]"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800"
+                      }`}
+                    >
+                      30 Days (Standard)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditBoyBasis("26")}
+                      className={`py-2 px-3 rounded-xl font-bold border transition-all cursor-pointer text-center ${
+                        editBoyBasis === "26"
+                          ? "bg-[#5D87FF] text-white border-[#5D87FF]"
+                          : "bg-neutral-50 dark:bg-slate-900 text-neutral-700 dark:text-neutral-300 border-neutral-200 dark:border-slate-800"
+                      }`}
+                    >
+                      26 Days (4 Offs)
+                    </button>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-neutral-50 dark:bg-slate-900/60 rounded-xl border border-neutral-200/60 dark:border-slate-800 text-[11px] text-neutral-500">
+                  💡 Formula: <span className="font-mono font-bold text-neutral-700 dark:text-neutral-300">Earned = Math.round((₹{editBoySalary} / {editBoyBasis}) × Days Worked)</span>
+                </div>
+
+                <div className="pt-2 flex gap-2">
+                  <button type="button" onClick={() => setEditingBoy(null)} className="flex-1 py-2.5 rounded-xl bg-neutral-100 dark:bg-slate-800 font-bold hover:bg-neutral-200 transition-all cursor-pointer">
+                    Cancel
+                  </button>
+                  <button type="submit" className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm transition-all cursor-pointer">
+                    💾 Save Salary Rule
+                  </button>
+                </div>
+              </Form>
+            </div>
+          </div>
+        )}
 
         {/* Active Driver Profile Modal Overlay */}
         {selectedDriverProfile && (
